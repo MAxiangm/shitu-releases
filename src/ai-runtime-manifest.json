@@ -1,0 +1,213 @@
+{
+  "version": 2,
+  "upscale": {
+    "filename": "realesrgan-ncnn-vulkan-20220424-windows.zip",
+    "url": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesrgan-ncnn-vulkan-20220424-windows.zip",
+    "size": 45474481,
+    "sha256": "abc02804e17982a3be33675e4d471e91ea374e65b70167abc09e31acb412802d"
+  },
+  "python": {
+    "filename": "python-3.12.10-embed-amd64.zip",
+    "url": "https://www.python.org/ftp/python/3.12.10/python-3.12.10-embed-amd64.zip",
+    "size": 11133606,
+    "sha256": "4acbed6dd1c744b0376e3b1cf57ce906f9dc9e95e68824584c8099a63025a3c3"
+  },
+  "u2net": {
+    "filename": "u2net.onnx",
+    "url": "https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2net.onnx",
+    "size": 175997641,
+    "sha256": "8d10d2f3bb75ae3b6d527c77944fc5e7dcd94b29809d47a739a7a728a912b491"
+  },
+  "wheels": [
+    {
+      "url": "https://files.pythonhosted.org/packages/0a/64/6d942153e202ac0033629f64c7aa8a647b8401f3cb9114cdc44004bed331/onnxruntime_directml-1.22.0-cp312-cp312-win_amd64.whl",
+      "sha256": "f8fc1a48b7fb134e34f8f138719a27d1bf6895611728b593fd86bc7c05b848a1",
+      "size": 24435369,
+      "filename": "onnxruntime_directml-1.22.0-cp312-cp312-win_amd64.whl",
+      "name": "onnxruntime-directml",
+      "version": "1.22.0"
+    },
+    {
+      "url": "https://files.pythonhosted.org/packages/36/fa/8c9210162ca1b88529ab76b41ba02d433fd54fecaf6feb70ef9f124683f1/numpy-2.2.6-cp312-cp312-win_amd64.whl",
+      "sha256": "c1f9540be57940698ed329904db803cf7a402f3fc200bfe599334c9bd84a40b2",
+      "size": 12614190,
+      "filename": "numpy-2.2.6-cp312-cp312-win_amd64.whl",
+      "name": "numpy",
+      "version": "2.2.6"
+    },
+    {
+      "url": "https://files.pythonhosted.org/packages/8c/ce/e7dfc873bdd9828f3b6e5c2bbb74e47a98ec23cc5c74fc4e54462f0d9204/pillow-11.3.0-cp312-cp312-win_amd64.whl",
+      "sha256": "a6444696fce635783440b7f7a9fc24b3ad10a9ea3f0ab66c5905be1c19ccf17d",
+      "size": 6986324,
+      "filename": "pillow-11.3.0-cp312-cp312-win_amd64.whl",
+      "name": "pillow",
+      "version": "11.3.0"
+    },
+    {
+      "url": "https://files.pythonhosted.org/packages/f7/af/ab3c51ab7507a7325e98ffe691d9495ee3d3aa5f589afad65ec920d39821/protobuf-6.31.1-py3-none-any.whl",
+      "sha256": "720a6c7e6b77288b85063569baae8536671b39f15cc22037ec7045658d80489e",
+      "size": 168724,
+      "filename": "protobuf-6.31.1-py3-none-any.whl",
+      "name": "protobuf",
+      "version": "6.31.1"
+    },
+    {
+      "url": "https://files.pythonhosted.org/packages/b8/25/155f9f080d5e4bc0082edfda032ea2bc2b8fab3f4d25d46c1e9dd22a1a89/flatbuffers-25.2.10-py2.py3-none-any.whl",
+      "sha256": "ebba5f4d5ea615af3f7fd70fc310636fbb2bbd1f566ac0a23d98dd412de50051",
+      "size": 30953,
+      "filename": "flatbuffers-25.2.10-py2.py3-none-any.whl",
+      "name": "flatbuffers",
+      "version": "25.2.10"
+    },
+    {
+      "url": "https://files.pythonhosted.org/packages/a7/06/3d6badcf13db419e25b07041d9c7b4a2c331d3f4e7134445ec5df57714cd/coloredlogs-15.0.1-py2.py3-none-any.whl",
+      "sha256": "612ee75c546f53e92e70049c9dbfcc18c935a2b9a53b66085ce9ef6a6e5c0934",
+      "size": 46018,
+      "filename": "coloredlogs-15.0.1-py2.py3-none-any.whl",
+      "name": "coloredlogs",
+      "version": "15.0.1"
+    },
+    {
+      "url": "https://files.pythonhosted.org/packages/f0/0f/310fb31e39e2d734ccaa2c0fb981ee41f7bd5056ce9bc29b2248bd569169/humanfriendly-10.0-py2.py3-none-any.whl",
+      "sha256": "1697e1a8a8f550fd43c2865cd84542fc175a61dcb779b6fee18cf6b6ccba1477",
+      "size": 86794,
+      "filename": "humanfriendly-10.0-py2.py3-none-any.whl",
+      "name": "humanfriendly",
+      "version": "10.0"
+    },
+    {
+      "url": "https://files.pythonhosted.org/packages/20/12/38679034af332785aac8774540895e234f4d07f7545804097de4b666afd8/packaging-25.0-py3-none-any.whl",
+      "sha256": "29572ef2b1f17581046b3a2227d5c611fb25ec70ca1ba8554b24b0e69331a484",
+      "size": 66469,
+      "filename": "packaging-25.0-py3-none-any.whl",
+      "name": "packaging",
+      "version": "25.0"
+    },
+    {
+      "url": "https://files.pythonhosted.org/packages/a2/09/77d55d46fd61b4a135c444fc97158ef34a095e5681d0a6c10b75bf356191/sympy-1.14.0-py3-none-any.whl",
+      "sha256": "e091cc3e99d2141a0ba2847328f5479b05d94a6635cb96148ccb3f34671bd8f5",
+      "size": 6299353,
+      "filename": "sympy-1.14.0-py3-none-any.whl",
+      "name": "sympy",
+      "version": "1.14.0"
+    },
+    {
+      "url": "https://files.pythonhosted.org/packages/43/e3/7d92a15f894aa0c9c4b49b8ee9ac9850d6e63b03c9c32c0367a13ae62209/mpmath-1.3.0-py3-none-any.whl",
+      "sha256": "a0b2b9fe80bbcd81a6647ff13108738cfb482d481d826cc0e02f5b35e5c88d2c",
+      "size": 536198,
+      "filename": "mpmath-1.3.0-py3-none-any.whl",
+      "name": "mpmath",
+      "version": "1.3.0"
+    },
+    {
+      "name": "pyreadline3",
+      "version": "3.5.4",
+      "url": "https://files.pythonhosted.org/packages/5a/dc/491b7661614ab97483abf2056be1deee4dc2490ecbf7bff9ab5cdbac86e1/pyreadline3-3.5.4-py3-none-any.whl",
+      "sha256": "eaf8e6cc3c49bcccf145fc6067ba8643d1df34d604a1ec0eccbf7a18e6d3fae6",
+      "size": 83178,
+      "filename": "pyreadline3-3.5.4-py3-none-any.whl"
+    }
+  ],
+  "vclibs": {
+    "filename": "Microsoft.VCLibs.x64.14.00.Desktop.appx",
+    "url": "https://download.microsoft.com/download/4/7/c/47c6134b-d61f-4024-83bd-b9c9ea951c25/Microsoft.VCLibs.x64.14.00.Desktop.appx",
+    "size": 6764349,
+    "sha256": "b56a9101f706f9d95f815f5b7fa6efbac972e86573d378b96a07cff5540c5961"
+  },
+  "installed": {
+    "ai-upscale": [
+      {
+        "path": "realesrgan-ncnn-vulkan.exe",
+        "size": 6161408,
+        "sha256": "07e49f7cbb4ede01ae4dd4c399d3a7e5846e3d2085c3128eff881e55cb7b1a0c"
+      },
+      {
+        "path": "vcomp140.dll",
+        "size": 182704,
+        "sha256": "8f72ef2e483465444b2059fc6744d6cb22cd8d8a27f6fa56befd2a42dcd0f78b"
+      },
+      {
+        "path": "models/realesrgan-x4plus.bin",
+        "size": 33424520,
+        "sha256": "713ee713b0353afaa27976f0563a64a5043bd70b9bd8936c2e26e25ebcdbcddf"
+      },
+      {
+        "path": "models/realesrgan-x4plus.param",
+        "size": 116029,
+        "sha256": "35330ececcea33b6c397a72548e788d5d53becee4734c50b7fada36e89f10a86"
+      }
+    ],
+    "ai-cutout": [
+      {
+        "path": "python/python.exe",
+        "size": 104952,
+        "sha256": "4d6f5f81a4bca11191c4c7c6b43632694d0a4ce74e068619d8fdc161d469859a"
+      },
+      {
+        "path": "python/python312.dll",
+        "size": 6945272,
+        "sha256": "9a0e3435aaa680d868150f87ab3e388ad2eebc22f87e036155c7b4eda8cd2120"
+      },
+      {
+        "path": "python/python312.zip",
+        "size": 3835482,
+        "sha256": "fb131c0ef7e35cc5250a74c8cd18744bf4115fb8163710711f3758d7df3d1f88"
+      },
+      {
+        "path": "python/python312._pth",
+        "size": 46,
+        "sha256": "e93f24fbea8505919a2964173596424560f8134af31d7f4e7bb4d930ad08abb9"
+      },
+      {
+        "path": "python/msvcp140.dll",
+        "size": 563232,
+        "sha256": "6fdc2c6fc1362c317ed65ae331dda329d4d03826feb8d79d635eaf8ba49764bc"
+      },
+      {
+        "path": "python/vcruntime140.dll",
+        "size": 109088,
+        "sha256": "d5a99b38807c3df803876ce5f1e71dc43cd7ac2c882582387e550941bc99cd00"
+      },
+      {
+        "path": "python/vcruntime140_1.dll",
+        "size": 39360,
+        "sha256": "68f948ea61695f85ff24d249077e312abb23267b3adc43679d35d781e9aa0244"
+      },
+      {
+        "path": "python/Lib/site-packages/onnxruntime/capi/onnxruntime_pybind11_state.pyd",
+        "size": 24998432,
+        "sha256": "ed50685e46c08f322617c592c6b62916e6b7e4168f6418b5912369475b4906de"
+      },
+      {
+        "path": "python/Lib/site-packages/onnxruntime/capi/onnxruntime.dll",
+        "size": 20295752,
+        "sha256": "f0e5195d6b3c30ed00129a5f78dfd535773e1732b106960e9b823ea16d790935"
+      },
+      {
+        "path": "python/Lib/site-packages/onnxruntime/capi/onnxruntime_providers_shared.dll",
+        "size": 21560,
+        "sha256": "a9b645f33b1ddcb6d91d35d824e13b49db228a6c86572ab570aafdfa54d33f39"
+      },
+      {
+        "path": "python/Lib/site-packages/onnxruntime/capi/DirectML.dll",
+        "size": 18527816,
+        "sha256": "80ce0517a87fc2b75a2dd7ea7ec4d1d3f41f89473e48f0a0cd3ead4493da817e"
+      },
+      {
+        "path": "python/Lib/site-packages/numpy/_core/_multiarray_umath.cp312-win_amd64.pyd",
+        "size": 4178432,
+        "sha256": "d98a8f4ce703bf7158f639d24ff4a55ece2753a306a3f7074b4fa670660afee5"
+      },
+      {
+        "path": "python/Lib/site-packages/PIL/_imaging.cp312-win_amd64.pyd",
+        "size": 2491392,
+        "sha256": "03c6629b37d514770d33bfeb1c02179e50779ae67587310310a96b2de5e7142a"
+      },
+      {
+        "path": "u2net.onnx",
+        "size": 175997641,
+        "sha256": "8d10d2f3bb75ae3b6d527c77944fc5e7dcd94b29809d47a739a7a728a912b491"
+      }
+    ]
+  }
+}

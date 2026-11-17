@@ -1,0 +1,9 @@
+node_modules/
+.recovery/
+ai-runtime/
+dist/
+release-backup.json
+library/
+*.log
+恢复说明.md
+docs/原版使用说明.md

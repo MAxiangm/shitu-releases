@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>拾图采集助手</title><link rel="stylesheet" href="popup.css"></head>
+<body>
+  <header><img src="icon.png" alt=""><div><h1>拾图采集助手</h1><p>网页里的灵感，留在自己的素材库</p></div></header>
+  <section class="connection"><span id="statusDot" class="dot"></span><strong id="status">正在自动查找拾图…</strong><button id="check" type="button">重新检测</button></section>
+  <section class="gesture"><kbd>Alt</kbd><b>＋</b><span>鼠标右键</span><p>在图片或直链视频上点击，即可采集。<br>也可从网页右键菜单选择「保存到拾图」。</p></section>
+  <section class="automatic"><strong>打开拾图，自动连接</strong><p id="feedback" role="status">正在查找本机运行中的拾图…</p></section>
+  <section id="recent" class="recent" hidden><span>上次采集</span><p id="recentText"></p></section>
+  <footer>只在你主动采集时传输素材到本机，不上传云端。<br>临时 Blob 素材限 20 MB；暂不支持 DRM、直播和分段流视频。</footer>
+  <script src="popup.js"></script>
+</body>
+</html>

@@ -1,0 +1,32 @@
+{
+  "name": "shitu",
+  "productName": "拾图",
+  "version": "0.10.8",
+  "description": "A local-first image library for Windows",
+  "main": "src/main.cjs",
+  "private": true,
+  "scripts": {
+    "start": "node scripts/start.cjs",
+    "check": "node scripts/check.cjs",
+    "test": "node --test tests/*.test.cjs",
+    "test:e2e": "node scripts/smoke.cjs",
+    "package": "node scripts/package.cjs",
+    "installer": "node scripts/build-installer.cjs",
+    "sync:installer": "node scripts/sync-installer.cjs",
+    "release:github": "node scripts/publish-github.cjs",
+    "prepare:resources": "node scripts/prepare-build-resources.cjs",
+    "test:updates": "node scripts/smoke-update.cjs"
+  },
+  "devDependencies": {
+    "electron": "45.1.0",
+    "playwright-core": "^1.64.1"
+  },
+  "dependencies": {
+    "sharp": "0.35.5"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/MAxiangm/shitu-releases.git"
+  },
+  "homepage": "https://github.com/MAxiangm/shitu-releases"
+}
