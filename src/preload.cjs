@@ -23,7 +23,18 @@ contextBridge.exposeInMainWorld('shitu', Object.freeze({
     return () => ipcRenderer.removeListener('shitu:plugin-event', listener);
   },
   getLibrary: () => call('get-library'),
-  prepareVideo: (id, expectedRoot, requestToken) => call('prepare-video', id, expectedRoot, requestToken),
+  prepareVideo: (id, expectedRoot, requestToken, profile = 'full') => call('prepare-video', id, expectedRoot, requestToken, profile),
+  startVideoTranscode: request => call('video-transcode-start', request),
+  getTranscodeDevices: refresh => call('transcode-devices', refresh),
+  getTranscodeSettings: () => call('transcode-settings'),
+  saveTranscodeSettings: settings => call('transcode-settings-save', settings),
+  videoTranscodeState: () => call('video-transcode-state'),
+  cancelVideoTranscode: id => call('video-transcode-cancel', id),
+  onVideoTranscode: callback => {
+    const listener = (_event, state) => callback(state);
+    ipcRenderer.on('shitu:video-transcode', listener);
+    return () => ipcRenderer.removeListener('shitu:video-transcode', listener);
+  },
   cancelVideo: (id, expectedRoot, requestToken) => call('cancel-video', id, expectedRoot, requestToken),
   releaseVideoViewer: (id, expectedRoot) => call('release-video-viewer', id, expectedRoot),
   prepareModel: (id, expectedRoot) => call('prepare-model', id, expectedRoot),
@@ -46,6 +57,7 @@ contextBridge.exposeInMainWorld('shitu', Object.freeze({
   importFolder: folderId => call('import-folder', folderId),
   importPaths: (paths, folderId) => call('import-paths', paths, folderId),
   updateAssets: (ids, patch) => call('update-assets', ids, patch),
+  moveAssetsToFolder: (ids, folderId, expectedRoot) => call('move-assets-to-folder', ids, folderId, expectedRoot),
   setTrash: (ids, trashed) => call('set-trash', ids, trashed),
   deletePermanently: (ids, expectedRoot) => call('delete-permanently', ids, expectedRoot),
   createFolder: (name, parentId = null) => call('create-folder', name, parentId),

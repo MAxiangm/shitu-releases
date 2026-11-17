@@ -1,6 +1,7 @@
 'use strict';
 const FolderTree = require('./folder-tree.js');
 const ColorLabels = require('./color-labels.js');
+const { VIDEO } = require('./media-formats.cjs');
 
 function assetMenuTemplate(assets, folders, choose) {
   const one = assets.length === 1;
@@ -32,6 +33,7 @@ function assetMenuTemplate(assets, folders, choose) {
         { id: 'plugin-center', label: '打开插件中心…', click: () => choose('plugin') }
       ]
     },
+    item('video-transcode', one ? '视频转码…' : '批量视频转码…', assets.length > 0 && !anyTrashed && assets.every(asset => asset.mediaType === 'video' || VIDEO.has(asset.ext))),
     { type: 'separator' },
     item('rename', '重命名', one && !anyTrashed),
     item('tags', one ? '编辑标签' : '批量添加标签', !anyTrashed),

@@ -14,7 +14,7 @@
     return url.href;
   }
   function create({ prepare, cancel, allowed = () => true, current = () => true,
-    delay = 200, schedule = setTimeout, unschedule = clearTimeout,
+    delay = 80, schedule = setTimeout, unschedule = clearTimeout,
     makeVideo = () => document.createElement('video') }) {
     let active = null;
     const attached = new Set();

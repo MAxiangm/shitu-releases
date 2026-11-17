@@ -18,6 +18,11 @@ let closeReady = false;
 let closing = false;
 let libraryRefreshSerial = 0;
 let draggingAssets = false;
+let nativeAssetDrag = false;
+let dragTargetNode = null;
+let dragPosition = null;
+let dragScrollFrame = 0;
+let dragOpenedMenu = false;
 let suppressAssetClickUntil = 0;
 let marquee = null;
 let marqueeFrame = 0;
@@ -28,7 +33,7 @@ let projectPreviewView;
 let modelViewer;
 let modelViewerModule;
 const videoHover = window.ShituVideoHover.create({
-  prepare: (id, root, token) => api.prepareVideo(id, root, token),
+  prepare: (id, root, token) => api.prepareVideo(id, root, token, 'hover'),
   cancel: (id, root, token) => api.cancelVideo(id, root, token),
   allowed: () => !state.selectionMode && !state.previewId && !state.busy && !state.libraryChanging &&
     !draggingAssets && !deletingAssets && !closing && !document.hidden &&
@@ -36,10 +41,25 @@ const videoHover = window.ShituVideoHover.create({
     $('folderContextMenu').classList.contains('hidden'),
   current: (asset, root) => state.library.root === root && state.library.assets.some(item => item.id === asset.id && item.hash === asset.hash)
 });
+const assetFolderDrag = window.ShituAssetFolderDrag.create({
+  prepare: prepareAssetFolderDrag,
+  current: assetDragIsCurrent,
+  targetAt: assetDropTarget,
+  outside: event => event.clientX <= 0 || event.clientY <= 0 || event.clientX >= innerWidth - 1 || event.clientY >= innerHeight - 1,
+  start: startPointerAssetDrag,
+  move: positionPointerAssetDrag,
+  target: highlightAssetDropTarget,
+  finish: finishPointerAssetDrag,
+  drop: (payload, destination) => { void run(() => moveDraggedAssets(payload, destination)); },
+  external: startExternalAssetDrag,
+  error: messageError
+});
 const updateUi = {
   snapshot: { status: 'idle', currentVersion: '', latestVersion: '', progress: 0 },
   pending: false, preparingInstall: false, previousFocus: null, notices: new Set(), revision: 0
 };
+const transcodeUi = { snapshot: null, ids: [], root: null, pending: false, error: '', previousFocus: null, notified: new Set() };
+const transcodeSettingsUi = { settings: { mode: 'auto', cpuThreads: 1, gpuId: 'auto' }, draft: null, devices: null, loading: false, saving: false, error: '', previousFocus: null, returnToTranscode: false, revision: 0 };
 
 function el(tag, className, text) {
   const node = document.createElement(tag);
@@ -182,6 +202,195 @@ function videoDuration(value) {
   const hours = Math.floor(seconds / 3600);
   const minutes = Math.floor(seconds / 60) % 60;
   return `${hours ? `${hours}:` : ''}${hours ? String(minutes).padStart(2, '0') : minutes}:${String(seconds % 60).padStart(2, '0')}`;
+}
+function transcodeActive(snapshot = transcodeUi.snapshot) { return ['running', 'cancelling'].includes(snapshot?.status); }
+function transcodeMessage(error) {
+  return String(error?.message || error || '视频转码失败，请重试').replace(/^Error invoking remote method '[^']+':\s*(?:Error:\s*)?/, '');
+}
+function transcodeBitrate() {
+  const value = Number($('videoTranscodeBitrate').value);
+  return Number.isFinite(value) && value >= 0.5 && value <= 200 ? value : null;
+}
+function transcodeModeName(mode) { return ({ auto: '自动选择', cpu: 'CPU', gpu: 'GPU', hybrid: 'CPU + GPU 双线' })[mode] || '自动选择'; }
+function transcodeSettingsError() {
+  const draft = transcodeSettingsUi.draft || transcodeSettingsUi.settings;
+  const maximum = Math.min(64, Number(transcodeSettingsUi.devices?.cpu?.logicalProcessors) || 1);
+  if (!Number.isInteger(Number(draft.cpuThreads)) || Number(draft.cpuThreads) < 1 || Number(draft.cpuThreads) > maximum) return `CPU 线程数需为 1–${maximum} 之间的整数。`;
+  const available = (transcodeSettingsUi.devices?.gpus || []).filter(gpu => gpu.available);
+  if (['gpu', 'hybrid'].includes(draft.mode) && !available.length) return '未检测到可用的 GPU 编码器，请选择 CPU 或自动选择。';
+  if (draft.mode !== 'cpu' && draft.gpuId !== 'auto' && !available.some(gpu => gpu.id === draft.gpuId)) return '所选 GPU 当前不可用，请重新选择设备。';
+  return '';
+}
+function renderTranscodeSettings() {
+  const ui = transcodeSettingsUi, draft = ui.draft || ui.settings, busy = ui.loading || ui.saving;
+  const maximum = Math.min(64, Number(ui.devices?.cpu?.logicalProcessors) || 1);
+  $('transcodeSettingsOptions').disabled = busy || !ui.devices;
+  $('transcodeSettingsMode').value = draft.mode;
+  $('transcodeSettingsCpuName').textContent = ui.devices?.cpu?.name || (ui.loading ? '正在检测 CPU…' : '尚未检测');
+  $('transcodeSettingsCpuThreads').max = String(maximum);
+  $('transcodeSettingsCpuThreads').value = String(draft.cpuThreads);
+  $('transcodeSettingsCpuHint').textContent = ui.devices ? `${ui.devices.cpu.logicalProcessors} 个逻辑处理器，最多使用 ${maximum} 个线程；线程数越多，CPU 占用通常越高。` : '检测后可选择使用的 CPU 线程数。';
+  const gpuSelect = $('transcodeSettingsGpu'), automatic = el('option', '', '自动选择可用 GPU');
+  automatic.value = 'auto';
+  const options = (ui.devices?.gpus || []).map(gpu => {
+    const option = el('option', '', `${gpu.name}${gpu.available ? '' : '（不可用）'}`);
+    option.value = gpu.id; option.disabled = !gpu.available; return option;
+  });
+  if (draft.gpuId !== 'auto' && !options.some(option => option.value === draft.gpuId)) {
+    const missing = el('option', '', '之前选择的 GPU（当前不可用）'); missing.value = draft.gpuId; missing.disabled = true; options.push(missing);
+  }
+  gpuSelect.replaceChildren(automatic, ...options); gpuSelect.value = draft.gpuId;
+  gpuSelect.disabled = busy || !ui.devices || draft.mode === 'cpu';
+  const unavailable = (ui.devices?.gpus || []).filter(gpu => !gpu.available);
+  $('transcodeSettingsDeviceNotes').replaceChildren(...unavailable.map(gpu => el('li', '', `${gpu.name}：${gpu.error || '硬件编码检测未通过。'}`)));
+  $('transcodeSettingsDeviceNotes').classList.toggle('hidden', !unavailable.length);
+  const availableCount = (ui.devices?.gpus || []).filter(gpu => gpu.available).length;
+  $('transcodeSettingsGpuHint').textContent = ui.loading ? '正在检测硬件编码能力，首次检测可能需要几秒…' : !ui.devices ? '点击重新检测读取设备。' : availableCount ? `检测到 ${availableCount} 个可用 GPU 编码器。` : '未检测到可用 GPU 编码器；自动模式会使用 CPU。';
+  $('transcodeSettingsModeHint').textContent = draft.mode === 'hybrid' ? '批量 MP4 同时运行一个 CPU 任务和一个 GPU 任务；单个视频使用 GPU 编码、CPU 处理。' : draft.mode === 'auto' ? 'MP4 优先使用可用 GPU，硬件编码不可用时回退 CPU。' : draft.mode === 'gpu' ? 'MP4 使用所选 GPU 编码，CPU 负责其余处理。' : 'MP4 使用 CPU 编码，可调整线程数。';
+  const error = ui.error || (!ui.loading && ui.devices ? transcodeSettingsError() : '');
+  $('transcodeSettingsStatus').textContent = error || (ui.loading ? '正在检测设备…' : ui.saving ? '正在保存…' : '保存后用于下一次转码；正在运行的任务保持原设置。');
+  $('transcodeSettingsStatus').classList.toggle('is-error', Boolean(error));
+  $('transcodeSettingsRefresh').disabled = busy;
+  $('transcodeSettingsSave').disabled = busy || !ui.devices || Boolean(error);
+  $('transcodeSettingsSave').textContent = ui.saving ? '正在保存…' : '保存设置';
+}
+async function loadTranscodeSettings(refresh = false) {
+  const ui = transcodeSettingsUi, revision = ++ui.revision;
+  ui.loading = true; ui.error = ''; renderTranscodeSettings();
+  try {
+    if (!api.getTranscodeDevices || !api.getTranscodeSettings) throw new Error('当前版本暂不支持转码设备设置。');
+    const [devices, settings] = await Promise.all([api.getTranscodeDevices(refresh), api.getTranscodeSettings()]);
+    if (revision !== ui.revision) return;
+    ui.devices = devices; ui.settings = settings;
+    if (!refresh || !ui.draft) ui.draft = { ...settings };
+  } catch (error) { if (revision === ui.revision) ui.error = transcodeMessage(error); }
+  finally { if (revision === ui.revision) { ui.loading = false; renderTranscodeSettings(); renderVideoTranscode(); } }
+}
+function openTranscodeSettings() {
+  const ui = transcodeSettingsUi;
+  assetFolderDrag.cancel(); videoHover.stop(); closeFolderMenu();
+  if (state.previewId) closePreview();
+  ui.previousFocus = document.activeElement;
+  ui.returnToTranscode = !$('videoTranscodeOverlay').classList.contains('hidden');
+  if (ui.returnToTranscode) $('videoTranscodeOverlay').classList.add('hidden');
+  ui.draft = { ...ui.settings }; ui.error = '';
+  $('transcodeSettingsOverlay').classList.remove('hidden'); renderTranscodeSettings();
+  $('transcodeSettingsDialog').focus(); void loadTranscodeSettings();
+}
+function closeTranscodeSettings() {
+  const ui = transcodeSettingsUi;
+  if (ui.saving) return;
+  $('transcodeSettingsOverlay').classList.add('hidden');
+  if (ui.returnToTranscode) { $('videoTranscodeOverlay').classList.remove('hidden'); renderVideoTranscode(); }
+  ui.returnToTranscode = false;
+  if (ui.previousFocus?.isConnected) ui.previousFocus.focus();
+}
+async function saveTranscodeSettings() {
+  const ui = transcodeSettingsUi;
+  if (ui.loading || ui.saving || !ui.devices) return;
+  ui.error = transcodeSettingsError(); if (ui.error) { renderTranscodeSettings(); return; }
+  ui.saving = true; renderTranscodeSettings();
+  try {
+    ui.settings = await api.saveTranscodeSettings({ mode: ui.draft.mode, cpuThreads: Number(ui.draft.cpuThreads), gpuId: ui.draft.gpuId });
+    ui.draft = { ...ui.settings }; ui.saving = false; closeTranscodeSettings(); renderVideoTranscode(); toast('转码设备设置已保存。');
+  } catch (error) { ui.error = transcodeMessage(error); }
+  finally { ui.saving = false; renderTranscodeSettings(); }
+}
+function renderVideoTranscode() {
+  const job = transcodeUi.snapshot, active = transcodeActive(job), hasJob = Boolean(job?.id);
+  const format = hasJob ? job.format : $('videoTranscodeFormat').value;
+  const total = hasJob ? Number(job.total) || 0 : transcodeUi.ids.length;
+  $('videoTranscodeTitle').textContent = total > 1 ? '批量视频转码' : '视频转码';
+  $('videoTranscodeSummary').textContent = hasJob ? `${total} 个视频 · ${job.format === 'dxv' ? `DXV Normal${job.alpha ? ' · 保留透明通道' : ''} · MOV` : `MP4 · ${job.bitrateMbps} Mbps`}` : `已选择 ${total} 个视频，转码结果保存为新素材。`;
+  $('videoTranscodeDeviceSummary').textContent = format === 'dxv' ? 'DXV 使用 CPU；GPU 与双线编码适用于 MP4。' : `转码设备：${transcodeModeName(hasJob ? job.executionMode || 'cpu' : transcodeSettingsUi.settings.mode)}`;
+  $('videoTranscodeExecutionNotice').textContent = job?.executionNotice || (!hasJob && format === 'mp4' && transcodeSettingsUi.settings.mode === 'hybrid' ? '批量视频由 CPU 与 GPU 同时处理；单个视频使用 GPU 编码。' : '');
+  $('videoTranscodeSettings').disabled = transcodeUi.pending;
+  if (hasJob) { $('videoTranscodeFormat').value = job.format; $('videoTranscodeAlpha').checked = Boolean(job.alpha); if (job.format === 'mp4') $('videoTranscodeBitrate').value = String(job.bitrateMbps); }
+  $('videoTranscodeOptions').disabled = transcodeUi.pending || hasJob;
+  $('videoTranscodeBitrateField').classList.toggle('hidden', format !== 'mp4');
+  $('videoTranscodeAlphaField').classList.toggle('hidden', format !== 'dxv');
+  $('videoTranscodeBitrate').required = format === 'mp4';
+  $('videoTranscodeStart').classList.toggle('hidden', hasJob);
+  $('videoTranscodeStart').disabled = transcodeUi.pending || !total || (format === 'mp4' && transcodeBitrate() === null);
+  $('videoTranscodeStart').textContent = transcodeUi.pending ? '正在开始…' : '开始转码';
+  $('videoTranscodeCancel').classList.toggle('hidden', !active);
+  $('videoTranscodeCancel').disabled = transcodeUi.pending || job?.status === 'cancelling';
+  $('videoTranscodeCancel').textContent = job?.status === 'cancelling' ? '正在取消…' : '取消任务';
+  $('videoTranscodeBackground').textContent = active ? '后台运行' : '关闭';
+  $('videoTranscodeStatus').classList.toggle('is-error', Boolean(transcodeUi.error) || job?.status === 'error' || Number(job?.failed) > 0);
+  if (active) {
+    $('videoTranscodeStatus').textContent = job.status === 'cancelling' ? '正在停止转码，已完成的结果会保留…' : `已处理 ${job.completed || 0} / ${total} 个视频`;
+  } else if (hasJob) {
+    const prefix = job.status === 'cancelled' ? '任务已取消' : job.status === 'error' ? '转码未完成' : '转码完成';
+    $('videoTranscodeStatus').textContent = `${prefix}：新增 ${job.imported || 0} 个素材${job.duplicates ? `，${job.duplicates} 个结果已存在` : ''}${job.failed ? `，失败 ${job.failed} 个` : ''}。`;
+  } else $('videoTranscodeStatus').textContent = transcodeUi.error || (format === 'mp4' && transcodeBitrate() === null ? '请输入 0.5–200 之间的视频码率。' : '');
+  $('videoTranscodeProgressArea').classList.toggle('hidden', !hasJob);
+  $('videoTranscodeProgress').value = Math.max(0, Math.min(100, Number(job?.progress) || 0));
+  $('videoTranscodeCurrent').textContent = job?.current ? `${job.current.index || 1} / ${total} · ${job.current.name || '正在处理'}${Number.isFinite(job.current.progress) ? ` · ${Math.round(job.current.progress)}%` : ''}` : `${Math.round(Number(job?.progress) || 0)}%`;
+  const lanes = Array.isArray(job?.lanes) ? job.lanes : [];
+  const runningItems = Array.isArray(job?.runningItems) ? job.runningItems : [];
+  const workers = lanes.length ? lanes : runningItems.map(item => ({ id: item.laneId, label: item.deviceLabel, current: item, status: 'running' }));
+  $('videoTranscodeWorkers').replaceChildren(...workers.map(worker => {
+    const row = el('li', 'video-transcode-worker'), current = worker.current;
+    row.append(el('strong', '', worker.label || current?.deviceLabel || (worker.device?.type === 'gpu' ? 'GPU' : 'CPU')));
+    row.append(el('span', '', current ? `${current.name || '正在处理'} · ${Math.round(Number(current.progress) || 0)}%` : ({ completed: '已完成', cancelled: '已取消', error: '未完成' })[worker.status] || '等待任务'));
+    if (current) { const progress = el('progress'); progress.max = 100; progress.value = Math.max(0, Math.min(100, Number(current.progress) || 0)); progress.setAttribute('aria-label', `${worker.label || '转码任务'}进度`); row.append(progress); }
+    return row;
+  }));
+  $('videoTranscodeWorkers').classList.toggle('hidden', !workers.length);
+  const errors = Array.isArray(job?.errors) ? job.errors : [];
+  $('videoTranscodeErrors').replaceChildren(...errors.map(item => el('li', '', `${item.name || '视频'}：${transcodeMessage(item.error)}`)));
+  $('videoTranscodeErrors').classList.toggle('hidden', !errors.length);
+  $('videoTranscodeButton').classList.toggle('hidden', !hasJob);
+  $('videoTranscodeLabel').textContent = active ? `转码 ${Math.round(Number(job.progress) || 0)}%` : '转码结果';
+}
+function receiveVideoTranscode(snapshot, notify = true) {
+  if (!snapshot || typeof snapshot !== 'object') return;
+  const previous = transcodeUi.snapshot;
+  if (snapshot.id && previous?.id === snapshot.id && !transcodeActive(previous) && transcodeActive(snapshot)) return;
+  transcodeUi.snapshot = snapshot.id ? snapshot : null;
+  renderVideoTranscode();
+  if (notify && snapshot.id && !transcodeActive(snapshot) && !transcodeUi.notified.has(snapshot.id)) {
+    transcodeUi.notified.add(snapshot.id);
+    toast(snapshot.status === 'cancelled' ? '视频转码已取消，已完成的结果保留。' : `${snapshot.status === 'error' ? '视频转码未完成' : '视频转码完成'}，新增 ${snapshot.imported || 0} 个素材${snapshot.failed ? `，失败 ${snapshot.failed} 个` : ''}。`, snapshot.status === 'error' || snapshot.failed > 0, 9000, { text: '查看', run: () => openVideoTranscode() });
+  }
+}
+function openVideoTranscode(ids) {
+  assetFolderDrag.cancel(); videoHover.stop(); closeFolderMenu();
+  if (state.previewId) closePreview();
+  if (ids && !transcodeActive() && !transcodeUi.pending) {
+    const assets = ids.map(id => state.library.assets.find(asset => asset.id === id));
+    if (!assets.length || assets.some(asset => !asset || !isVideo(asset) || asset.trashedAt)) { toast('请选择有效的视频素材。', true); return; }
+    transcodeUi.ids = [...new Set(ids)]; transcodeUi.root = state.library.root; transcodeUi.snapshot = null; transcodeUi.error = '';
+  }
+  transcodeUi.previousFocus = document.activeElement;
+  renderVideoTranscode();
+  $('videoTranscodeOverlay').classList.remove('hidden');
+  (transcodeUi.snapshot?.id ? $('videoTranscodeDialog') : $('videoTranscodeFormat')).focus();
+}
+function closeVideoTranscode() {
+  $('videoTranscodeOverlay').classList.add('hidden');
+  if (transcodeUi.previousFocus?.isConnected) transcodeUi.previousFocus.focus();
+}
+async function startVideoTranscode() {
+  if (transcodeUi.pending || transcodeUi.snapshot?.id || !transcodeUi.ids.length) return;
+  const format = $('videoTranscodeFormat').value, bitrateMbps = format === 'mp4' ? transcodeBitrate() : undefined;
+  if (!['mp4', 'dxv'].includes(format) || format === 'mp4' && bitrateMbps === null) { renderVideoTranscode(); return; }
+  const ids = [...transcodeUi.ids], expectedRoot = transcodeUi.root;
+  transcodeUi.pending = true; transcodeUi.error = ''; renderVideoTranscode();
+  try {
+    if (!await waitForMetadata() || state.library.root !== expectedRoot || state.libraryChanging) throw new Error('素材库已切换，请重新选择视频');
+    const snapshot = await api.startVideoTranscode({ ids, expectedRoot, format, ...(format === 'mp4' ? { bitrateMbps } : { alpha: $('videoTranscodeAlpha').checked }) });
+    receiveVideoTranscode(snapshot, false);
+  } catch (error) { transcodeUi.error = transcodeMessage(error); toast(transcodeUi.error, true); }
+  finally { transcodeUi.pending = false; renderVideoTranscode(); }
+}
+async function cancelVideoTranscode() {
+  if (transcodeUi.pending || !transcodeActive()) return;
+  transcodeUi.pending = true; renderVideoTranscode();
+  try { receiveVideoTranscode(await api.cancelVideoTranscode(transcodeUi.snapshot.id), false); }
+  catch (error) { toast(transcodeMessage(error), true); }
+  finally { transcodeUi.pending = false; renderVideoTranscode(); }
 }
 const videoExtensions = new Set(['mp4', 'm4v', 'mov', 'qt', 'webm', 'ogv', 'ogg', 'mkv', 'avi', 'wmv', 'asf', 'mpg', 'mpeg', 'mpe', 'm1v', 'm2v', 'mts', 'm2ts', 'ts', 'm2t', 'vob', 'flv', 'f4v', 'mxf', '3gp', '3g2', 'divx', 'dxv', 'rm', 'rmvb', 'dv']);
 function isVideo(asset) { return asset.mediaType === 'video' || videoExtensions.has((asset.ext || '').replace(/^\./, '').toLowerCase()); }
@@ -349,6 +558,7 @@ function receiveUpdateState(snapshot, notify = true) {
 }
 
 function showAppUpdate() {
+  assetFolderDrag.cancel();
   videoHover.stop();
   updateUi.previousFocus = document.activeElement;
   renderAppUpdate();
@@ -474,6 +684,7 @@ function filteredAssets() {
   return list.sort(comparators[state.sort]);
 }
 function changeView(view, folder = null, tag = null) {
+  assetFolderDrag.cancel();
   flushDetailDrafts();
   videoHover.stop();
   closeFolderMenu();
@@ -730,6 +941,7 @@ function renderFolderChildren() {
   return children;
 }
 function renderGallery(list) {
+  assetFolderDrag.cancel();
   videoHover.clear();
   stopMarquee();
   const childFolders = renderFolderChildren();
@@ -745,7 +957,7 @@ function renderGallery(list) {
     card.setAttribute('aria-label', `${asset.name}${assetColor ? `，颜色标记：${assetColor.name}` : ''}`);
     if (assetColor) card.dataset.colorLabel = assetColor.id;
     card.setAttribute('aria-selected', String(state.selected.has(asset.id)));
-    card.draggable = !state.selectionMode && !asset.trashedAt;
+    card.draggable = false;
     card.dataset.trashed = String(Boolean(asset.trashedAt));
     const thumb = el('div', 'asset-thumb');
     const check = el('span', 'asset-check');
@@ -753,7 +965,7 @@ function renderGallery(list) {
     check.append(icon('check'));
     thumb.append(mediaFor(asset, 'thumb'), check, el('span', 'asset-format', (asset.ext || '').toUpperCase()));
     if (isVideo(asset)) {
-      thumb.title = '悬停静音播放 · 双击打开预览';
+      thumb.title = '悬停快速预览 · 双击完整播放';
       videoHover.attach(thumb, asset, state.library.root);
     }
     if (isVideo(asset) || isModel(asset) || isProject(asset)) {
@@ -781,8 +993,8 @@ function renderGallery(list) {
     card.append(thumb, info);
     card.addEventListener('click', (event) => { if (performance.now() >= suppressAssetClickUntil) selectCard(asset.id, event, list); });
     card.addEventListener('dblclick', () => { if (!state.selectionMode && performance.now() >= suppressAssetClickUntil) openPreview(asset.id); });
-    card.addEventListener('dragstart', event => beginAssetDrag(event, asset));
-    card.addEventListener('dragend', finishAssetDrag);
+    card.addEventListener('pointerdown', event => beginAssetDrag(event, asset));
+    card.addEventListener('dragstart', event => event.preventDefault());
     card.addEventListener('contextmenu', event => assetContextMenuEvent(event, asset.id));
     card.addEventListener('keydown', (event) => {
       if (event.key === 'Enter' || (state.selectionMode && event.key === ' ')) {
@@ -815,6 +1027,8 @@ function assetContextMenuEvent(event, id) {
   run(() => showAssetContextMenu(id));
 }
 function finishAssetDrag() {
+  nativeAssetDrag = false;
+  assetFolderDrag.cancel();
   if (!draggingAssets) return;
   draggingAssets = false;
   suppressAssetClickUntil = performance.now() + 250;
@@ -822,19 +1036,111 @@ function finishAssetDrag() {
   $('dropOverlay').classList.add('hidden');
 }
 function beginAssetDrag(event, asset) {
-  videoHover.stop();
-  event.preventDefault();
+  if (event.button !== 0 || event.target.closest('button,input,textarea,select,a,.asset-check') ||
+      asset.trashedAt || !canStartAssetFolderDrag()) return;
+  // Preserve normal click and Ctrl-click selection until an actual drag begins.
+  if (!assetFolderDrag.begin(event, asset.id)) return;
   event.stopPropagation();
-  if (state.selectionMode || asset.trashedAt || state.busy || state.libraryChanging) return;
-  selectForAssetAction(asset.id);
+}
+function canStartAssetFolderDrag() {
+  return hasLibrary() && !state.busy && !state.libraryChanging && !state.previewId && !draggingAssets && !closing && !deletingAssets &&
+    !document.querySelector('.modal-overlay:not(.hidden),.preview:not(.hidden),.sp-overlay:not([hidden])');
+}
+function prepareAssetFolderDrag(id) {
+  if (!canStartAssetFolderDrag()) return null;
+  const asset = state.library.assets.find(item => item.id === id && !item.trashedAt);
+  if (!asset) return null;
+  flushDetailDrafts();
+  selectForAssetAction(id);
+  const assets = [...state.selected].map(assetId => state.library.assets.find(item => item.id === assetId));
+  if (!assets.length || assets.some(item => !item || item.trashedAt)) return null;
+  return { root: state.library.root, ids: assets.map(item => item.id), hashes: assets.map(item => item.hash) };
+}
+function assetDragIsCurrent(payload) {
+  return state.library.root === payload.root && !state.libraryChanging && !state.busy && !state.previewId && !closing && !deletingAssets &&
+    payload.ids.every((id, index) => state.library.assets.some(asset => asset.id === id && !asset.trashedAt && asset.hash === payload.hashes[index]));
+}
+function startPointerAssetDrag(gesture, event) {
+  videoHover.stop(); stopMarquee();
   draggingAssets = true;
+  nativeAssetDrag = false;
   suppressAssetClickUntil = performance.now() + 250;
   document.body.classList.add('dragging-assets');
   $('dropOverlay').classList.add('hidden');
-  try { api.startAssetDrag([...state.selected], state.library.root); }
+  try { document.body.setPointerCapture(gesture.pointerId); } catch {}
+  $('assetDragGhost').textContent = `${gesture.payload.ids.length} 个素材 · 拖入文件夹`;
+  $('assetDragGhost').classList.remove('hidden');
+  positionPointerAssetDrag(event, gesture);
+  dragScrollFrame = requestAnimationFrame(scrollAssetFolderDrag);
+}
+function positionPointerAssetDrag(event) {
+  dragPosition = { x: event.clientX, y: event.clientY, pointerId: event.pointerId };
+  $('assetDragGhost').style.left = `${Math.max(8, Math.min(innerWidth - 220, event.clientX + 16))}px`;
+  $('assetDragGhost').style.top = `${Math.max(8, Math.min(innerHeight - 50, event.clientY + 18))}px`;
+}
+function assetDropTarget(event, payload) {
+  const hit = document.elementFromPoint(event.clientX, event.clientY);
+  const summary = hit?.closest('.folder-browser > summary');
+  if (summary && !summary.parentElement.open) { summary.parentElement.open = true; dragOpenedMenu = true; }
+  const node = hit?.closest('.folder-card[data-folder-id],.folder-row[data-folder-id],.folder-breadcrumb[data-folder-id]');
+  if (!node) return null;
+  const folderId = node.dataset.folderId || null;
+  const folder = folderId ? state.library.folders.find(item => item.id === folderId) : null;
+  if (folderId && !folder) return null;
+  if (payload.ids.every(id => state.library.assets.find(asset => asset.id === id)?.folderId === folderId)) return null;
+  return { node, folderId, name: folder?.name || '素材库根目录' };
+}
+function highlightAssetDropTarget(destination, gesture) {
+  if (dragTargetNode !== destination?.node) {
+    dragTargetNode?.classList.remove('asset-drop-target');
+    if (dragTargetNode) delete dragTargetNode.dataset.folderDropState;
+    dragTargetNode = destination?.node || null;
+    dragTargetNode?.classList.add('asset-drop-target');
+    if (dragTargetNode) dragTargetNode.dataset.folderDropState = 'ready';
+  }
+  if (gesture) $('assetDragGhost').textContent = destination ? `移动 ${gesture.payload.ids.length} 个素材到「${destination.name}」` : `${gesture.payload.ids.length} 个素材 · 拖入文件夹`;
+}
+function scrollAssetFolderDrag() {
+  dragScrollFrame = 0;
+  if (!assetFolderDrag.active || !dragPosition) return;
+  const scroller = $('galleryScroller'), rect = scroller.getBoundingClientRect(), edge = 34;
+  if (dragPosition.x >= rect.left && dragPosition.x <= rect.right) {
+    const speed = dragPosition.y < rect.top + edge && dragPosition.y >= rect.top - edge ? -12 :
+      dragPosition.y > rect.bottom - edge && dragPosition.y <= rect.bottom + edge ? 12 : 0;
+    if (speed) {
+      scroller.scrollTop += speed;
+      assetFolderDrag.move({ pointerId: dragPosition.pointerId, clientX: dragPosition.x, clientY: dragPosition.y, buttons: 1 });
+    }
+  }
+  if (assetFolderDrag.active) dragScrollFrame = requestAnimationFrame(scrollAssetFolderDrag);
+}
+function finishPointerAssetDrag(reason, gesture) {
+  cancelAnimationFrame(dragScrollFrame); dragScrollFrame = 0; dragPosition = null;
+  try { if (document.body.hasPointerCapture(gesture.pointerId)) document.body.releasePointerCapture(gesture.pointerId); } catch {}
+  $('assetDragGhost').classList.add('hidden');
+  highlightAssetDropTarget(null);
+  if (dragOpenedMenu) { document.querySelector('.folder-browser').open = false; dragOpenedMenu = false; }
+  suppressAssetClickUntil = performance.now() + 350;
+  if (reason !== 'external') { draggingAssets = false; document.body.classList.remove('dragging-assets'); }
+}
+function startExternalAssetDrag(payload) {
+  if (!assetDragIsCurrent(payload)) { finishAssetDrag(); return; }
+  nativeAssetDrag = true;
+  try { api.startAssetDrag(payload.ids, payload.root); }
   catch (error) { finishAssetDrag(); messageError(error); }
 }
+async function moveDraggedAssets(payload, destination) {
+  if (!assetDragIsCurrent(payload)) return;
+  const changed = payload.ids.filter(id => state.library.assets.find(asset => asset.id === id)?.folderId !== destination.folderId);
+  if (!changed.length) return;
+  const saved = await saveMetadata(() => {
+    if (!assetDragIsCurrent(payload)) throw new Error('素材库或所选素材已变化，请重新拖动');
+    return api.moveAssetsToFolder(payload.ids, destination.folderId, payload.root);
+  });
+  if (saved) toast(`已将 ${changed.length} 个素材移入「${destination.name}」`);
+}
 async function showAssetContextMenu(id) {
+  assetFolderDrag.cancel();
   videoHover.stop();
   if (!hasLibrary() || state.libraryChanging || draggingAssets) return;
   const root = state.library.root;
@@ -853,6 +1159,7 @@ async function showAssetContextMenu(id) {
   // stale preview pointing at an item that moved out of the current view.
   if (state.previewId && ['rename', 'tags', 'folder', 'favorite', 'unfavorite', 'trash', 'restore'].includes(result.action)) closePreview();
   switch (result.action) {
+    case 'video-transcode': openVideoTranscode(ids); break;
     case 'plugin': await openPluginCenter(result.pluginId, ids); break;
     case 'preview': openPreview(first.id); break;
     case 'open': await api.openAsset(first.id); break;
@@ -956,11 +1263,12 @@ function renderSelectionMode() {
   $('selectionModeButton').setAttribute('aria-pressed', String(state.selectionMode));
   $('selectionModeButton').querySelector('span').textContent = state.selectionMode ? '完成' : '选择';
   $('selectionModeButton').title = state.selectionMode ? '退出选择模式，恢复浏览和文件拖出' : '进入选择模式：点选或拖动框选';
-  $('selectionHint').textContent = state.selectionMode ? '点击选择 · 拖动框选 · Ctrl 追加 · Esc 退出' : 'Ctrl＋滚轮缩放 · 空格预览 · 悬停视频播放';
+  $('selectionHint').textContent = state.selectionMode ? '点击选择 · 拖动框选 · Ctrl 追加 · Esc 退出' : 'Ctrl＋滚轮缩放 · 空格预览 · 悬停快速预览';
   $('galleryScroller').dataset.selectionMode = String(state.selectionMode);
-  $('gallery').querySelectorAll('.asset-card').forEach(card => { card.draggable = !state.selectionMode && card.dataset.trashed !== 'true'; });
+  $('gallery').querySelectorAll('.asset-card').forEach(card => { card.draggable = false; });
 }
 function setSelectionMode(enabled) {
+  assetFolderDrag.cancel();
   videoHover.stop();
   stopMarquee();
   state.selectionMode = enabled;
@@ -1243,6 +1551,7 @@ function renderLibraryState() {
   $('managerCloseLibrary').disabled = state.libraryChanging;
 }
 function showLibraryManager() {
+  assetFolderDrag.cancel();
   videoHover.stop();
   renderLibraryState();
   $('libraryManagerOverlay').classList.remove('hidden');
@@ -1254,6 +1563,7 @@ function closeLibraryManager() {
   if (hasLibrary()) $('libraryInfo').focus();
 }
 async function changeLibrary(kind) {
+  assetFolderDrag.cancel();
   if (state.libraryChanging || state.busy) return;
   videoHover.stop();
   state.libraryChanging = true;
@@ -1284,6 +1594,7 @@ async function changeLibrary(kind) {
   }
 }
 function modal({ title, description = '', value = '', input = true, confirm = '确定', cancel = '取消', destructive = false, parentOptions = null, parentId = null, colorValue }) {
+  assetFolderDrag.cancel();
   videoHover.stop();
   closeFolderMenu();
   if (modalResolve) modalResolve(null);
@@ -1384,6 +1695,7 @@ async function manageFolder(folder, kind = 'rename') {
   }
 }
 async function importImages(folder, paths) {
+  assetFolderDrag.cancel();
   if (!hasLibrary()) { toast('请先选择素材库位置'); return; }
   if (state.libraryChanging) return;
   if (state.busy) { toast('正在导入，请稍候'); return; }
@@ -1641,6 +1953,7 @@ function displayPreviewAsset(asset, index, total) {
   }
 }
 function openPreview(id) {
+  assetFolderDrag.cancel();
   videoHover.stop({ deferCancel: true });
   const list = filteredAssets();
   if (!list.some(asset => asset.id === id)) return;
@@ -1737,6 +2050,7 @@ async function refreshCollector(quiet = false) {
   } finally { refreshingCollector = false; $('refreshCollector').disabled = false; }
 }
 function showCollector() {
+  assetFolderDrag.cancel();
   videoHover.stop();
   $('collectorOverlay').classList.remove('hidden');
   $('collectorClose').focus();
@@ -1813,11 +2127,20 @@ for (const type of ['click', 'dblclick']) $('galleryScroller').addEventListener(
 $('galleryScroller').addEventListener('scroll', () => { videoHover.stop(); if (marquee?.active) updateMarquee(); });
 $('galleryScroller').addEventListener('lostpointercapture', event => { if (marquee?.pointerId === event.pointerId) stopMarquee(true, true); });
 window.addEventListener('pointermove', moveMarquee, { passive: false });
+window.addEventListener('pointermove', event => assetFolderDrag.move(event), { passive: false });
+window.addEventListener('pointerup', event => assetFolderDrag.end(event));
+window.addEventListener('pointercancel', () => assetFolderDrag.cancel());
+document.body.addEventListener('lostpointercapture', () => { if (assetFolderDrag.active) assetFolderDrag.cancel(); });
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape' && assetFolderDrag.pending) {
+    assetFolderDrag.cancel(); event.preventDefault(); event.stopImmediatePropagation();
+  }
+}, true);
 window.addEventListener('pointerup', event => { if (marquee?.pointerId === event.pointerId) stopMarquee(false, true); });
 window.addEventListener('pointercancel', event => { if (marquee?.pointerId === event.pointerId) stopMarquee(true, true); });
-window.addEventListener('blur', () => { videoHover.stop(); stopMarquee(true, true); });
+window.addEventListener('blur', () => { assetFolderDrag.cancel(); videoHover.stop(); stopMarquee(true, true); });
 window.addEventListener('resize', () => { videoHover.stop(); stopMarquee(true, true); });
-document.addEventListener('visibilitychange', () => { if (document.hidden) videoHover.stop(); });
+document.addEventListener('visibilitychange', () => { if (document.hidden) { assetFolderDrag.cancel(); videoHover.stop(); } });
 $('searchInput').addEventListener('input', (e) => { state.search = e.target.value; state.limit = 240; state.selected.clear(); render(); });
 $('formatFilter').addEventListener('change', (e) => { state.format = e.target.value; state.limit = 240; state.selected.clear(); render(); });
 $('sortSelect').addEventListener('change', (e) => { state.sort = e.target.value; renderGallery(filteredAssets()); });
@@ -1863,6 +2186,35 @@ $('appUpdateButton').addEventListener('click', showAppUpdate);
 $('setupAppUpdate').addEventListener('click', showAppUpdate);
 $('appUpdateClose').addEventListener('click', closeAppUpdate);
 $('appUpdateOverlay').addEventListener('click', event => { if (event.target === $('appUpdateOverlay')) closeAppUpdate(); });
+$('videoTranscodeButton').addEventListener('click', () => openVideoTranscode());
+$('settingsButton').addEventListener('click', openTranscodeSettings);
+$('videoTranscodeSettings').addEventListener('click', openTranscodeSettings);
+$('transcodeSettingsClose').addEventListener('click', closeTranscodeSettings);
+$('transcodeSettingsCancel').addEventListener('click', closeTranscodeSettings);
+$('transcodeSettingsOverlay').addEventListener('click', event => { if (event.target === $('transcodeSettingsOverlay')) closeTranscodeSettings(); });
+$('transcodeSettingsForm').addEventListener('submit', event => { event.preventDefault(); void saveTranscodeSettings(); });
+$('transcodeSettingsRefresh').addEventListener('click', () => { void loadTranscodeSettings(true); });
+for (const [id, field] of [['transcodeSettingsMode', 'mode'], ['transcodeSettingsGpu', 'gpuId'], ['transcodeSettingsCpuThreads', 'cpuThreads']]) {
+  $(id).addEventListener(field === 'cpuThreads' ? 'input' : 'change', event => {
+    transcodeSettingsUi.draft[field] = event.target.value; transcodeSettingsUi.error = ''; renderTranscodeSettings();
+  });
+}
+$('videoTranscodeClose').addEventListener('click', closeVideoTranscode);
+$('videoTranscodeBackground').addEventListener('click', closeVideoTranscode);
+$('videoTranscodeOverlay').addEventListener('click', event => { if (event.target === $('videoTranscodeOverlay')) closeVideoTranscode(); });
+$('videoTranscodeCancel').addEventListener('click', () => { void cancelVideoTranscode(); });
+$('videoTranscodeForm').addEventListener('submit', event => { event.preventDefault(); void startVideoTranscode(); });
+$('videoTranscodeFormat').addEventListener('change', () => { transcodeUi.error = ''; renderVideoTranscode(); });
+$('videoTranscodeBitratePreset').addEventListener('change', event => {
+  if (event.target.value !== 'custom') $('videoTranscodeBitrate').value = event.target.value;
+  else $('videoTranscodeBitrate').focus();
+  transcodeUi.error = ''; renderVideoTranscode();
+});
+$('videoTranscodeBitrate').addEventListener('input', () => {
+  const value = $('videoTranscodeBitrate').value;
+  $('videoTranscodeBitratePreset').value = ['5', '10', '20', '40', '80'].includes(value) ? value : 'custom';
+  transcodeUi.error = ''; renderVideoTranscode();
+});
 $('appUpdateCheck').addEventListener('click', () => runUpdateAction(() => api.checkUpdate()));
 $('appUpdateOpenRelease').addEventListener('click', async () => {
   try { await api.openUpdateRelease(); }
@@ -1953,6 +2305,28 @@ window.addEventListener('pagehide', resetPreviewMedia);
 $('galleryScroller').addEventListener('click', (e) => { if (performance.now() >= suppressAssetClickUntil && (e.target === $('galleryScroller') || e.target === $('gallery'))) { flushDetailDrafts(); state.selected.clear(); updateSelectionClasses(); renderSelection(); renderDetails(); } });
 
 document.addEventListener('keydown', (e) => {
+  if (!$('transcodeSettingsOverlay').classList.contains('hidden')) {
+    if (e.key === 'Escape') { e.preventDefault(); closeTranscodeSettings(); }
+    if (e.key === 'Tab') {
+      const controls = [...$('transcodeSettingsDialog').querySelectorAll('button:not(:disabled),input:not(:disabled),select:not(:disabled)')].filter(node => !node.closest('.hidden') && !node.matches(':disabled'));
+      const first = controls[0], last = controls[controls.length - 1];
+      if (!first) { e.preventDefault(); $('transcodeSettingsDialog').focus(); }
+      else if (e.shiftKey && (document.activeElement === first || !controls.includes(document.activeElement))) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && (document.activeElement === last || !controls.includes(document.activeElement))) { e.preventDefault(); first.focus(); }
+    }
+    return;
+  }
+  if (!$('videoTranscodeOverlay').classList.contains('hidden')) {
+    if (e.key === 'Escape') { e.preventDefault(); closeVideoTranscode(); }
+    if (e.key === 'Tab') {
+      const controls = [...$('videoTranscodeDialog').querySelectorAll('button:not(:disabled),input:not(:disabled),select:not(:disabled)')].filter(node => !node.closest('.hidden'));
+      const first = controls[0], last = controls[controls.length - 1];
+      if (!first) { e.preventDefault(); $('videoTranscodeDialog').focus(); }
+      else if (e.shiftKey && (document.activeElement === first || !controls.includes(document.activeElement))) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && (document.activeElement === last || !controls.includes(document.activeElement))) { e.preventDefault(); first.focus(); }
+    }
+    return;
+  }
   if (!$('appUpdateOverlay').classList.contains('hidden')) {
     if (e.key === 'Escape') { e.preventDefault(); closeAppUpdate(); }
     if (e.key === 'Tab') {
@@ -2027,7 +2401,7 @@ document.addEventListener('drop', (e) => {
 });
 api.onAssetDragEnd?.(finishAssetDrag);
 api.onActionError?.(message => { finishAssetDrag(); messageError(new Error(message)); });
-window.addEventListener('focus', finishAssetDrag);
+window.addEventListener('focus', () => { if (nativeAssetDrag) finishAssetDrag(); });
 api.onImportProgress?.((event) => {
   if (!event) return;
   const done = event.current ?? event.processed ?? event.completed ?? 0;
@@ -2052,6 +2426,7 @@ api.onProjectPreview?.(detail => {
   if (detail?.id === projectPreviewView?.id && detail.root === projectPreviewView.root) projectPreviewView.updateProgress(detail);
 });
 window.addEventListener('beforeunload', (event) => {
+  assetFolderDrag.cancel();
   videoHover.stop();
   if (closeReady) return;
   flushDetailDrafts();
@@ -2095,3 +2470,16 @@ if (api.onUpdateState && api.updateState) {
     if (revision === updateUi.revision) receiveUpdateState({ status: 'error', message: '暂时无法读取更新状态，请稍后重试。' }, false);
   });
 } else receiveUpdateState({ status: 'disabled', message: '当前版本暂未启用自动更新。' }, false);
+
+renderVideoTranscode();
+if (api.getTranscodeSettings) {
+  api.getTranscodeSettings().then(settings => {
+    if (!transcodeSettingsUi.draft && !transcodeSettingsUi.loading) { transcodeSettingsUi.settings = settings; renderVideoTranscode(); }
+  }).catch(() => {});
+}
+if (api.onVideoTranscode && api.videoTranscodeState) {
+  let transcodeRevision = 0;
+  api.onVideoTranscode(snapshot => { transcodeRevision++; receiveVideoTranscode(snapshot); });
+  const revision = transcodeRevision;
+  api.videoTranscodeState().then(snapshot => { if (revision === transcodeRevision) receiveVideoTranscode(snapshot, false); }).catch(() => {});
+}

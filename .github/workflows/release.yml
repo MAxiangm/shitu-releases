@@ -105,8 +105,12 @@ jobs:
         run: npm test
       - name: Smoke test application
         run: node scripts/smoke.cjs
+      - name: Smoke test renderer crash recovery
+        run: node scripts/smoke-ui-recovery.cjs
       - name: Smoke test nested folders and hierarchy persistence
         run: node scripts/smoke-folders.cjs
+      - name: Smoke test single and multiple assets dragged into folders
+        run: node scripts/smoke-asset-drag.cjs
       - name: Smoke test asset and folder color labels
         run: node scripts/smoke-colors.cjs
       - name: Smoke test browser capture and saved receipts
@@ -117,6 +121,8 @@ jobs:
         run: node scripts/smoke-update.cjs
       - name: Smoke test real video decoding and preview
         run: node scripts/smoke-video.cjs
+      - name: Smoke test batch video transcoding
+        run: node scripts/smoke-transcode.cjs
       - name: Smoke test video thumbnail hover playback
         run: node scripts/smoke-hover-video.cjs
       - name: Smoke test model packaging and interactive preview

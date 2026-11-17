@@ -523,6 +523,23 @@ class Library {
     });
   }
 
+  moveAssetsToFolder(ids, folderId) {
+    return this._mutate(async () => {
+      if (!Array.isArray(ids) || !ids.length || ids.length > 10000 || ids.some(id => typeof id !== 'string' || !/^[a-zA-Z0-9-]{1,128}$/.test(id))) throw new Error('请选择有效素材');
+      const selected = this._ids(ids);
+      this._folder(folderId);
+      const assets = this.data.assets.filter(asset => selected.has(asset.id));
+      if (assets.some(asset => asset.trashedAt)) throw new Error('请先从回收站恢复素材');
+      const changed = new Set(assets.filter(asset => asset.folderId !== folderId).map(asset => asset.id));
+      if (!changed.size) return this.snapshot();
+      const draft = clone(this.data);
+      const updatedAt = now();
+      for (const asset of draft.assets) if (changed.has(asset.id)) Object.assign(asset, { folderId, updatedAt });
+      await this._persist(draft);
+      return this.snapshot();
+    });
+  }
+
   setTrash(ids, trashed) {
     return this._mutate(async () => {
       const selected = this._ids(ids);

@@ -46,6 +46,22 @@ test('full viewer adoption survives a delayed hover cancellation', async () => {
   assert.equal(await viewer, 'shared');
 });
 
+test('full video preparation replaces a short hover profile without reusing its clip', async () => {
+  const requests = createVideoPreviewRequests(), short = controlled(), full = controlled();
+  const hover = requests.prepare(identity('clip', { profile: 'hover' }), 'hover-profile', short.run);
+  const hoverRejected = aborted(hover);
+  await tick();
+  const viewer = requests.prepare(identity('clip', { profile: 'full' }), undefined, full.run);
+  await tick();
+  assert.equal(short.signal.aborted, true);
+  assert.notEqual(viewer, hover);
+  assert.equal(requests.cancel('clip', library.root, 'hover-profile'), false);
+  assert.equal(full.signal.aborted, false);
+  full.resolve('complete-video');
+  assert.equal(await viewer, 'complete-video');
+  await hoverRejected;
+});
+
 test('each hover lease cancels only itself, and the last lease aborts conversion', async () => {
   const requests = createVideoPreviewRequests(), work = controlled();
   const pending = requests.prepare(identity(), 'hover-a', work.run);

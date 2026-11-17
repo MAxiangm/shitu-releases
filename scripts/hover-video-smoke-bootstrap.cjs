@@ -26,16 +26,17 @@ module.exports = function configureHoverVideoSmoke({ root, base }) {
   const createVideoEngine = videoModule.createVideoEngine;
   videoModule.createVideoEngine = options => {
     engine = createVideoEngine(options);
-    const preview = engine.preview;
-    engine.preview = async (source, options) => {
-      previewStarts.push(source);
+    const wrapPreview = (method, profile) => async (source, options) => {
+      previewStarts.push({ source, profile });
       const gate = engineGate;
-      if (gate && source.toLowerCase().endsWith(gate.extension)) {
-        gate.entered = true; gate.signal = options.signal;
+      if (gate && source.toLowerCase().endsWith(gate.extension) && (!gate.profile || gate.profile === profile)) {
+        gate.entered = true; gate.signal ||= options.signal; gate.signals ||= []; gate.signals.push(options.signal);
         await gate.promise;
       }
-      return preview(source, options);
+      return method.call(engine, source, options);
     };
+    engine.preview = wrapPreview(engine.preview, 'full');
+    engine.hoverPreview = wrapPreview(engine.hoverPreview, 'hover');
     return engine;
   };
   const gateFor = extra => {
@@ -78,11 +79,12 @@ module.exports = function configureHoverVideoSmoke({ root, base }) {
         // The official DXV regression fixture contains one frame. Require a
         // frame actually presented by Chromium instead of time advancement.
         await wait(() => { const v=card.querySelector('video.asset-hover-video'); return v && ${advancing ? 'v.readyState>=2 && !v.paused' : 'v.videoWidth>0 && v.videoHeight>0 && !v.error && v.getVideoPlaybackQuality().totalVideoFrames>0'} && card.querySelector('.asset-thumb').dataset.videoHoverState==='playing'; }, 'Hover playback failed: ${id}');
+        const readyAt=performance.now();
         const video=card.querySelector('video.asset-hover-video');
         check(video.muted && video.loop && !video.controls, 'Hover video must be muted, looped, and without controls');
         check(document.querySelectorAll('.asset-hover-video').length===1, 'More than one hover player exists');
         ${advancing ? "const start=video.currentTime; await wait(() => video.currentTime > start+0.1 || video.currentTime < start, 'Hover video time did not advance');" : ''}
-        return {width:video.videoWidth,height:video.videoHeight,currentTime:video.currentTime,framesPresented:video.getVideoPlaybackQuality().totalVideoFrames,timeAdvancementChecked:${advancing}};
+        return {width:video.videoWidth,height:video.videoHeight,currentTime:video.currentTime,framesPresented:video.getVideoPlaybackQuality().totalVideoFrames,timeAdvancementChecked:${advancing},duration:video.duration,latencyMs:Math.round(readyAt-(window.__hoverSmoke.starts['${id}']||readyAt))};
       })()`);
       const stopped = async () => js(`window.__hoverSmoke.wait(() => document.querySelectorAll('.asset-hover-video').length===0, 'Hover player did not release')`);
       try {
@@ -94,9 +96,9 @@ module.exports = function configureHoverVideoSmoke({ root, base }) {
           const imported=await api.importPaths(files.map(file=>file.filename)); check(imported.report.imported===files.length && !imported.report.errors.length,'Fixture import failed');
           const assets=Object.fromEntries(files.map(file=>[file.kind,imported.snapshot.assets.find(asset=>asset.hash===file.hash)]));
           check(Object.values(assets).every(Boolean),'Imported fixtures missing'); applyLibrary(imported.snapshot,false);
-          window.__hoverSmoke={check,wait,assets,snapshot:imported.snapshot,retired:[]};
+          window.__hoverSmoke={check,wait,assets,snapshot:imported.snapshot,retired:[],starts:{}};
           window.__hoverPointer=[];
-          document.addEventListener('pointerenter',event=>{window.__hoverPointer.push({id:event.target.id,cls:event.target.className,type:event.pointerType});},true);
+          document.addEventListener('pointerenter',event=>{window.__hoverPointer.push({id:event.target.id,cls:event.target.className,type:event.pointerType});if(event.target.matches?.('.asset-thumb'))window.__hoverSmoke.starts[event.target.closest('.asset-card').dataset.assetId]=performance.now();},true);
           document.addEventListener('mousemove',event=>{window.__hoverMove={x:event.clientX,y:event.clientY,cls:event.target.className};},true);
           new MutationObserver(records=>records.forEach(record=>record.removedNodes.forEach(node=>{if(node.nodeType===1){if(node.matches('.asset-hover-video'))window.__hoverSmoke.retired.push(node);window.__hoverSmoke.retired.push(...node.querySelectorAll('.asset-hover-video'));}}))).observe(document.getElementById('gallery'),{childList:true,subtree:true});
           await wait(()=>document.querySelectorAll('.asset-card').length===files.length,'Gallery cards missing');
@@ -104,12 +106,20 @@ module.exports = function configureHoverVideoSmoke({ root, base }) {
           return {ids:Object.fromEntries(Object.entries(assets).map(([kind,asset])=>[kind,asset.id])),root:initial.root,originals:imported.snapshot.assets.map(asset=>({filename:asset.filename,hash:asset.hash}))};
         })()`);
         const { ids } = setup, decoded = [];
-        for (const kind of ['native', 'converted', ...(ids.dxv ? ['dxv'] : [])]) {
+        for (const kind of ['native', 'webm', 'converted', ...(ids.dxv ? ['dxv'] : []), 'longDxv']) {
           await hover(ids[kind]);
           decoded.push({ kind, ...await playing(ids[kind], kind !== 'dxv') });
           await moveOutside(); await stopped();
           await js(`(() => { const card=document.querySelector('.asset-card[data-asset-id="${ids[kind]}"]'); window.__hoverSmoke.check(card.querySelector('img')&&!card.querySelector('img').classList.contains('hidden'),'Thumbnail did not return'); })()`);
         }
+        const longCold = decoded.find(item => item.kind === 'longDxv');
+        assert.ok(longCold.duration <= 6.2, 'Hover encoded the entire 24-second source instead of a short preview');
+        assert.ok(longCold.width <= 640 && longCold.height <= 360, 'Hover proxy is unnecessarily large');
+        assert.ok(longCold.latencyMs < 6000, 'Small cold DXV hover took too long');
+        await hover(ids.longDxv);
+        const longWarm = await playing(ids.longDxv);
+        assert.ok(longWarm.latencyMs < 1500, 'Cached hover should start promptly');
+        await moveOutside(); await stopped();
         // Passing over a thumbnail must not launch a conversion.
         const sweepStarts = previewStarts.length;
         await hover(ids.converted); await moveOutside(); await new Promise(resolve => setTimeout(resolve, 280));
@@ -127,11 +137,14 @@ module.exports = function configureHoverVideoSmoke({ root, base }) {
         await hover(ids.converted); await wait(() => engineGate.entered, 'Cold prepare did not reach engine gate');
         await moveOutside(); await wait(() => engineGate.signal.aborted, 'Leaving hover did not cancel preparation');
         engineGate.release(); engineGate = null; await stopped();
-        // Opening the full viewer while preparation is pending must retain the job.
+        // Full playback must replace a pending short hover with a full-quality request.
         engineGate = gateFor({ extension: '.avi' });
         await hover(ids.converted); await wait(() => engineGate.entered, 'Full-viewer transfer did not reach engine gate');
         await js(`openPreview('${ids.converted}')`);
         await stopped();
+        await wait(() => engineGate.signals?.length >= 2, 'Full viewer did not request a separate full preview');
+        assert.equal(engineGate.signals[0].aborted, true, 'Full viewer left the obsolete short hover running');
+        assert.equal(engineGate.signals[1].aborted, false, 'Full viewer was cancelled by the outgoing hover');
         engineGate.release(); engineGate = null;
         await js(`(async()=>{const {wait,check}=window.__hoverSmoke;const v=document.getElementById('previewVideo');await wait(()=>state.previewId==='${ids.converted}'&&v.readyState>=2&&!v.classList.contains('hidden'),'Full preview failed after hover transfer');check(v.controls,'Full preview controls missing');closePreview();})()`);
         // Real click selection remains available through the video overlay.
@@ -177,7 +190,7 @@ module.exports = function configureHoverVideoSmoke({ root, base }) {
         for (const file of setup.originals) assert.equal(crypto.createHash('sha256').update(await fs.readFile(path.join(setup.root, file.filename))).digest('hex'), file.hash, 'Managed original changed');
         assert.deepEqual(failures, []); assert.deepEqual(requests, []);
         completed = true;
-        await fs.writeFile(resultPath, JSON.stringify({ ok: true, electron: process.versions.electron, nativeMouseEvents: true, decoded, lazyPlayers: true, briefHoverSkipped: true, onePlayerOnly: true, staleReplyIgnored: true, leaveCancelsPreparation: true, fullPreviewTransfer: true, closedViewerAllowsHover: true, clickSelection: true, selectionModeSuppressed: true, blurStops: true, scrollStops: true, rerenderStops: true, modalStops: true, imagesUnaffected: true, librarySwitchStops: true, screenshotCaptured: true, managedOriginalsUnchanged: true, networkAccessed: false, ...result }, null, 2) + '\n');
+        await fs.writeFile(resultPath, JSON.stringify({ ok: true, electron: process.versions.electron, nativeMouseEvents: true, decoded, longWarm, shortHoverProxy: true, separateFullPlayback: true, lazyPlayers: true, briefHoverSkipped: true, onePlayerOnly: true, staleReplyIgnored: true, leaveCancelsPreparation: true, fullPreviewTransfer: true, closedViewerAllowsHover: true, clickSelection: true, selectionModeSuppressed: true, blurStops: true, scrollStops: true, rerenderStops: true, modalStops: true, imagesUnaffected: true, librarySwitchStops: true, screenshotCaptured: true, managedOriginalsUnchanged: true, networkAccessed: false, ...result }, null, 2) + '\n');
         await engine.shutdown(); window.destroy(); app.quit();
       } catch (error) { await fail(error); }
     });

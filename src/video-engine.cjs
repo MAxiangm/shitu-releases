@@ -6,9 +6,12 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { spawn } = require('node:child_process');
 const { VIDEO: VIDEO_EXTENSIONS } = require('./media-formats.cjs');
+const { readDXVAlpha } = require('./dxv-format.cjs');
 
 const PREVIEW_VERSION = 1;
 const PREVIEW_MIME = 'video/webm';
+const HOVER_VERSION = 1;
+const HOVER_SECONDS = 6;
 const MAX_PROBE_OUTPUT = 2 * 1024 * 1024;
 const STDERR_LIMIT = 16 * 1024;
 // Reject playlist/concat demuxers: a media file must not instruct FFmpeg to open
@@ -56,6 +59,9 @@ function createVideoEngine({ runtimeDir = path.join(__dirname, '..', 'video-runt
   const controllers = new Set();
   const tasks = new Set();
   const previews = new Map();
+  const hoverJobs = new Map();
+  const hoverMemory = new Map();
+  let hoverEncoding = Promise.resolve();
   let closed = false;
 
   function notify(event) { try { onProgress(event); } catch {} }
@@ -126,9 +132,142 @@ function createVideoEngine({ runtimeDir = path.join(__dirname, '..', 'video-runt
     });
     let data;
     try { data = JSON.parse(output); } catch { throw new Error('视频信息无法读取'); }
-    return displayMetadata(data);
+    const metadata = displayMetadata(data);
+    if (metadata.codec === 'dxv') {
+      // DXV's decoder reports RGBA for opaque DXT1 as well as alpha DXT5.
+      // Read only the first packet header instead of guessing from pix_fmt.
+      try {
+        const packets = JSON.parse(await run(ffprobe, ['-v', 'error', '-protocol_whitelist', 'file,pipe', '-format_whitelist', INPUT_FORMATS,
+          '-select_streams', String(metadata.streamIndex), '-read_intervals', '%+#1', '-show_packets', '-show_entries', 'packet=pos', '-of', 'json', '-i', filename],
+        { signal, timeoutMs: timeouts.probeMs || 30000 }));
+        const value = packets.packets?.[0]?.pos;
+        const position = typeof value === 'string' && /^\d+$/.test(value) ? Number(value) : NaN;
+        const alpha = await readDXVAlpha(filename, position);
+        checkSignal(signal);
+        if (alpha !== null) metadata.hasAlpha = alpha;
+      } catch { checkSignal(signal); }
+    }
+    return metadata;
   }
   function probe(source, { signal } = {}) { return operation(signal, internal => probeSource(source, internal)); }
+
+  const fileStamp = stat => `${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}:${stat.ino}`;
+  function rememberHover(identity, value) {
+    hoverMemory.delete(identity);
+    hoverMemory.set(identity, value);
+    while (hoverMemory.size > 64) hoverMemory.delete(hoverMemory.keys().next().value);
+  }
+  function nativeVideo(filename, metadata) {
+    const suffix = path.extname(filename).toLowerCase();
+    if (['.mp4', '.m4v'].includes(suffix) && metadata.codec === 'h264' &&
+        ['yuv420p', 'yuvj420p'].includes(metadata.pixelFormat) && (!metadata.hasAudio || metadata.audioCodec === 'aac')) return 'video/mp4';
+    if (suffix === '.webm' && ['vp8', 'vp9', 'av1'].includes(metadata.codec) &&
+        (!metadata.hasAudio || ['opus', 'vorbis'].includes(metadata.audioCodec))) return PREVIEW_MIME;
+    return null;
+  }
+  async function readHoverCache(output, metadataFile, identity, sourceStamp, signal) {
+    try {
+      const [stat, raw] = await Promise.all([fs.stat(output), fs.readFile(metadataFile, 'utf8')]);
+      const data = JSON.parse(raw);
+      if (!stat.isFile() || !stat.size || data.version !== HOVER_VERSION || data.identity !== identity || data.sourceStamp !== sourceStamp ||
+          stat.size !== data.bytes || !(data.media?.width > 0) || !(data.media?.height > 0) || data.media.codec !== 'vp9' ||
+          !(data.media.duration > 0 && data.media.duration <= HOVER_SECONDS + .2) || !/^[a-f0-9]{64}$/.test(data.outputHash || '')) return null;
+      if (await sha256(output, signal) !== data.outputHash) return null;
+      const result = { ...data.media, path: output, mimeType: PREVIEW_MIME, cached: true, profile: 'hover', sourceDuration: data.sourceDuration };
+      rememberHover(identity, { sourceStamp, outputStamp: fileStamp(stat), result });
+      return result;
+    } catch { checkSignal(signal); return null; }
+  }
+  async function createHoverPreview(info, key, suppliedMetadata, signal) {
+    const { filename, stat } = info;
+    const sourceStamp = fileStamp(stat);
+    // Hover uses a disposable, stat-bound preview. The catalog hash is already
+    // trusted by the caller; scanning a multi-gigabyte original here would make
+    // even native MP4s wait. Full-quality preview still verifies the full hash.
+    const identity = crypto.createHash('sha256').update(`${key || ''}\0${filename}\0${sourceStamp}`).digest('hex');
+    const memory = hoverMemory.get(identity);
+    if (memory) {
+      if (memory.result.direct) return { ...memory.result, cached: true };
+      try {
+        const outputStat = await fs.stat(memory.result.path);
+        if (outputStat.isFile() && fileStamp(outputStat) === memory.outputStamp) return { ...memory.result, cached: true };
+      } catch {}
+      hoverMemory.delete(identity);
+    }
+    const output = path.join(cacheDir, `hover-v${HOVER_VERSION}-${identity}.webm`), metadataFile = `${output}.json`;
+    const cached = await readHoverCache(output, metadataFile, identity, sourceStamp, signal);
+    if (cached) { notify({ profile: 'hover', key, state: 'ready', cached: true }); return cached; }
+    checkSignal(signal);
+    const completeMetadata = suppliedMetadata && suppliedMetadata.width > 0 && suppliedMetadata.height > 0 &&
+      typeof suppliedMetadata.pixelFormat === 'string' && typeof suppliedMetadata.codec === 'string' &&
+      (suppliedMetadata.hasAudio === false || typeof suppliedMetadata.audioCodec === 'string');
+    const metadata = completeMetadata ? { ...suppliedMetadata } : await probeSource(filename, signal);
+    const directMime = nativeVideo(filename, metadata);
+    if (directMime) {
+      const result = { ...metadata, path: filename, mimeType: directMime, direct: true, cached: false, profile: 'hover', sourceDuration: metadata.duration };
+      rememberHover(identity, { sourceStamp, result });
+      notify({ profile: 'hover', key, state: 'ready', direct: true });
+      return result;
+    }
+    const encode = async () => {
+      checkSignal(signal);
+      await fs.mkdir(cacheDir, { recursive: true });
+      const temporary = path.join(cacheDir, `.hover-preview-${crypto.randomUUID()}.webm`), temporaryMetadata = `${temporary}.json`;
+      const color = metadata.colorSpace === 'ycgco' ? 'zscale=matrixin=ycgco:matrix=709,' : '';
+      const filter = `${color}scale=w='min(640,iw)':h='min(360,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1,fps=24:round=up`;
+      const args = ['-hide_banner', '-loglevel', 'error', '-nostdin', '-protocol_whitelist', 'file,pipe', '-format_whitelist', INPUT_FORMATS,
+        '-threads', '2', '-t', String(HOVER_SECONDS), '-i', filename, '-map', `0:${metadata.streamIndex || 0}`, '-an', '-sn', '-dn',
+        '-vf', filter, '-frames:v', String(HOVER_SECONDS * 24), '-c:v', 'libvpx-vp9', '-deadline', 'realtime', '-cpu-used', '8',
+        '-row-mt', '1', '-threads', '2', '-crf', '38', '-b:v', '0', '-pix_fmt', metadata.hasAlpha ? 'yuva420p' : 'yuv420p',
+        '-auto-alt-ref', '0', '-f', 'webm', '-y', temporary];
+      notify({ profile: 'hover', key, state: 'converting', progress: 0 });
+      try {
+        await run(ffmpeg, args, { signal, timeoutMs: timeouts.hoverMs || 120000 });
+        checkSignal(signal);
+        if (fileStamp((await sourceFile(filename)).stat) !== sourceStamp) throw new Error('视频在预览准备期间已变化，请重试');
+        const previewMetadata = await probeSource(temporary, signal), outputHash = await sha256(temporary, signal);
+        const bytes = (await fs.stat(temporary)).size;
+        if (!bytes || !(previewMetadata.duration > 0 && previewMetadata.duration <= HOVER_SECONDS + .2)) throw new Error('悬停预览生成失败');
+        const media = { ...previewMetadata, sourceCodec: metadata.codec, sourceHasAlpha: metadata.hasAlpha };
+        await fs.writeFile(temporaryMetadata, JSON.stringify({ version: HOVER_VERSION, identity, sourceStamp, outputHash, bytes,
+          sourceDuration: metadata.duration, media }) + '\n', { flag: 'wx' });
+        checkSignal(signal);
+        await fs.rename(temporary, output); await fs.rename(temporaryMetadata, metadataFile);
+        const result = { ...media, path: output, mimeType: PREVIEW_MIME, cached: false, profile: 'hover', sourceDuration: metadata.duration };
+        rememberHover(identity, { sourceStamp, outputStamp: fileStamp(await fs.stat(output)), result });
+        notify({ profile: 'hover', key, state: 'ready', cached: false });
+        return result;
+      } finally {
+        await fs.unlink(temporary).catch(() => {}); await fs.unlink(temporaryMetadata).catch(() => {});
+      }
+    };
+    // Old cancelled conversions finish releasing their process before the next
+    // hover begins encoding, so rapid pointer movement cannot launch a swarm.
+    const result = hoverEncoding.then(encode, encode);
+    hoverEncoding = result.catch(() => {});
+    return result;
+  }
+
+  async function hoverPreview(source, { key, signal, metadata } = {}) {
+    if (closed) throw new Error('视频处理引擎已关闭');
+    checkSignal(signal);
+    if (key != null && (typeof key !== 'string' || !/^[a-fA-F0-9]{64}$/.test(key))) throw new Error('视频缓存标识无效');
+    key = key?.toLowerCase();
+    const info = await sourceFile(source);
+    checkSignal(signal);
+    const identity = `${key || ''}\0${info.filename}\0${fileStamp(info.stat)}`;
+    let job = hoverJobs.get(identity);
+    if (!job || job.controller.signal.aborted || job.settled) {
+      const controller = new AbortController(); controllers.add(controller);
+      job = { controller, consumers: new Set(), settled: false, promise: null };
+      hoverJobs.set(identity, job);
+      job.promise = track(Promise.resolve().then(() => createHoverPreview(info, key, metadata, controller.signal)).finally(() => {
+        job.settled = true; controllers.delete(controller);
+        if (hoverJobs.get(identity) === job) hoverJobs.delete(identity);
+      }));
+    }
+    return subscribe(job, signal);
+  }
 
   function thumbnail(source, destination, { signal } = {}) {
     return operation(signal, async internal => {
@@ -276,7 +415,7 @@ function createVideoEngine({ runtimeDir = path.join(__dirname, '..', 'video-runt
     for (const controller of controllers) controller.abort();
     await Promise.allSettled([...tasks]);
   }
-  return { probe, thumbnail, preview, busy: () => tasks.size > 0, shutdown };
+  return { probe, thumbnail, preview, hoverPreview, busy: () => tasks.size > 0, shutdown };
 }
 
-module.exports = { createVideoEngine, VIDEO_EXTENSIONS, PREVIEW_VERSION, displayMetadata };
+module.exports = { createVideoEngine, VIDEO_EXTENSIONS, PREVIEW_VERSION, HOVER_VERSION, HOVER_SECONDS, displayMetadata };

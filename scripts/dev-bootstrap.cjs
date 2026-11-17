@@ -12,8 +12,11 @@ const aeSmoke = process.env.SHITU_AE_SMOKE === '1';
 const folderSmoke = process.env.SHITU_FOLDER_SMOKE === '1';
 const colorsSmoke = process.env.SHITU_COLORS_SMOKE === '1';
 const hoverVideoSmoke = process.env.SHITU_HOVER_VIDEO_SMOKE === '1';
-if ([smoke, updateSmoke, videoSmoke, modelSmoke, aeSmoke, folderSmoke, colorsSmoke, hoverVideoSmoke].filter(Boolean).length > 1) throw new Error('Choose one smoke test mode at a time.');
-const testing = smoke || updateSmoke || videoSmoke || modelSmoke || aeSmoke || folderSmoke || colorsSmoke || hoverVideoSmoke;
+const assetDragSmoke = process.env.SHITU_ASSET_DRAG_SMOKE === '1';
+const transcodeSmoke = process.env.SHITU_TRANSCODE_SMOKE === '1';
+const uiRecoverySmoke = process.env.SHITU_UI_RECOVERY_SMOKE === '1';
+if ([smoke, updateSmoke, videoSmoke, modelSmoke, aeSmoke, folderSmoke, colorsSmoke, hoverVideoSmoke, assetDragSmoke, transcodeSmoke, uiRecoverySmoke].filter(Boolean).length > 1) throw new Error('Choose one smoke test mode at a time.');
+const testing = smoke || updateSmoke || videoSmoke || modelSmoke || aeSmoke || folderSmoke || colorsSmoke || hoverVideoSmoke || assetDragSmoke || transcodeSmoke || uiRecoverySmoke;
 const base = testing
   ? path.resolve(process.env.SHITU_SMOKE_DIRECTORY)
   : path.join(root, '.recovery', 'development');
@@ -62,6 +65,24 @@ if (hoverVideoSmoke) {
   if (!relative || relative.startsWith('..') || path.isAbsolute(relative) || fs.lstatSync(base).isSymbolicLink()) throw new Error('Hover video smoke directory must stay inside .recovery/tests.');
   const marker = JSON.parse(fs.readFileSync(path.join(base, 'hover-video-smoke-fixture.json'), 'utf8'));
   if (!process.env.SHITU_HOVER_VIDEO_SMOKE_TOKEN || marker.token !== process.env.SHITU_HOVER_VIDEO_SMOKE_TOKEN) throw new Error('Hover video smoke marker does not match.');
+}
+if (uiRecoverySmoke) {
+  const relative = path.relative(path.join(root, '.recovery', 'tests'), base);
+  if (!relative || relative.startsWith('..') || path.isAbsolute(relative) || fs.lstatSync(base).isSymbolicLink()) throw new Error('UI recovery smoke directory must stay inside .recovery/tests.');
+  const marker = JSON.parse(fs.readFileSync(path.join(base, 'ui-recovery-smoke-fixture.json'), 'utf8'));
+  if (!process.env.SHITU_UI_RECOVERY_SMOKE_TOKEN || marker.token !== process.env.SHITU_UI_RECOVERY_SMOKE_TOKEN) throw new Error('UI recovery smoke marker does not match.');
+}
+if (transcodeSmoke) {
+  const relative = path.relative(path.join(root, '.recovery', 'tests'), base);
+  if (!relative || relative.startsWith('..') || path.isAbsolute(relative) || fs.lstatSync(base).isSymbolicLink()) throw new Error('Transcode smoke directory must stay inside .recovery/tests.');
+  const marker = JSON.parse(fs.readFileSync(path.join(base, 'transcode-smoke-fixture.json'), 'utf8'));
+  if (!process.env.SHITU_TRANSCODE_SMOKE_TOKEN || marker.token !== process.env.SHITU_TRANSCODE_SMOKE_TOKEN) throw new Error('Transcode smoke marker does not match.');
+}
+if (assetDragSmoke) {
+  const relative = path.relative(path.join(root, '.recovery', 'tests'), base);
+  if (!relative || relative.startsWith('..') || path.isAbsolute(relative) || fs.lstatSync(base).isSymbolicLink()) throw new Error('Asset drag smoke directory must stay inside .recovery/tests.');
+  const marker = JSON.parse(fs.readFileSync(path.join(base, 'asset-drag-smoke-fixture.json'), 'utf8'));
+  if (!process.env.SHITU_ASSET_DRAG_SMOKE_TOKEN || marker.token !== process.env.SHITU_ASSET_DRAG_SMOKE_TOKEN) throw new Error('Asset drag smoke marker does not match.');
 }
 for (const name of ['profile', 'sessions', 'crashes', 'plugins']) {
   fs.mkdirSync(path.join(base, name), { recursive: true });
@@ -181,6 +202,9 @@ if (aeSmoke) require('./ae-smoke-bootstrap.cjs')({ root, base });
 if (folderSmoke) require('./folders-smoke-bootstrap.cjs')({ root, base });
 if (colorsSmoke) require('./colors-smoke-bootstrap.cjs')({ root, base });
 if (hoverVideoSmoke) require('./hover-video-smoke-bootstrap.cjs')({ root, base });
+if (assetDragSmoke) require('./asset-drag-smoke-bootstrap.cjs')({ root, base });
+if (transcodeSmoke) require('./transcode-smoke-bootstrap.cjs')({ root, base });
+if (uiRecoverySmoke) require('./ui-recovery-smoke-bootstrap.cjs')({ root, base });
 
 function configureUpdateSmoke() {
   // This branch only runs inside an explicitly marked, isolated smoke process.

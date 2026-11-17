@@ -24,16 +24,16 @@ class Video extends EventTarget {
 }
 function fixture(options = {}) {
   let timerId = 0;
-  const timers = new Map(), prepares = [], cancels = [], videos = [];
+  const timers = new Map(), prepares = [], cancels = [], videos = [], delays = [];
   const controller = create({
     prepare: (id, root, token) => { prepares.push({ id, root, token }); return options.prepared ? options.prepared(id) : { url: urlFor(id) }; },
     cancel: (id, root, token) => { cancels.push({ id, root, token }); return options.cancelResult; },
     makeVideo: () => { const video = new Video(options.playResult); videos.push(video); return video; },
-    schedule: callback => { const id = ++timerId; timers.set(id, callback); return id; },
+    schedule: (callback, delay) => { const id = ++timerId; timers.set(id, callback); delays.push(delay); return id; },
     unschedule: id => timers.delete(id),
     allowed: options.allowed || (() => true), current: options.current || (() => true)
   });
-  return { controller, prepares, cancels, videos, timers,
+  return { controller, prepares, cancels, videos, timers, delays,
     attach: id => { const thumb = new Thumb(); controller.attach(thumb, { id, hash: id }, 'fixture-library'); return thumb; },
     tick: async () => { for (const [id, callback] of [...timers]) { timers.delete(id); callback(); } await flush(); }
   };
@@ -49,6 +49,15 @@ test('hover dwell avoids preparing videos while sweeping thumbnails or using tou
   assert.equal(f.videos.length, 0);
   assert.equal(f.cancels.length, 0);
   assert.equal(f.timers.size, 0);
+});
+
+test('hover uses a short dwell while retaining a cancellable delay before decoding', async () => {
+  const f = fixture(), thumb = f.attach('fast');
+  thumb.enter();
+  assert.equal(f.prepares.length, 0);
+  assert.ok(f.delays[0] > 0 && f.delays[0] <= 100, 'Hover should react within 100 ms');
+  thumb.leave(); await f.tick();
+  assert.equal(f.prepares.length, 0);
 });
 
 test('one muted looping hover video plays and leaving releases source, player and scoped preparation', async () => {

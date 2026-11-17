@@ -3,7 +3,7 @@
 // A procedural backdrop: all points and strands are drawn locally, behind UI.
 (() => {
   const canvas = document.getElementById('ambientParticles');
-  const ctx = canvas?.getContext('2d', { alpha: true });
+  let ctx = canvas?.getContext('2d', { alpha: true });
   if (!ctx) return;
   const motionButton = document.getElementById('backgroundMotionButton');
   let motionEnabled = localStorage.getItem('shitu-background-motion') !== 'off';
@@ -13,7 +13,9 @@
     { x: .72, phase: 5.5, width: .17 },
     { x: 1.02, phase: 2.2, width: .19 },
   ];
-  let width = 1, height = 1, dpr = 1, frame = 0, lastDraw = 0, elapsed = 0, draws = 0;
+  const MAX_BACKING_PIXELS = 4_000_000;
+  let width = 1, height = 1, dpr = 1, frame = 0, resizeFrame = 0, lastDraw = 0, elapsed = 0, draws = 0;
+  let contextLost = false, pageActive = true;
   let particles = [], seed = 197311, appVisible = true;
   const random = () => { seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0; return seed / 4294967296; };
   const glow = document.createElement('canvas');
@@ -34,10 +36,15 @@
       depth: .5 + .5 * Math.sin(fold + v * .8),
     };
   }
-  function resize() {
+  function resize(force = false) {
     width = Math.max(1, innerWidth); height = Math.max(1, innerHeight);
-    dpr = Math.min(devicePixelRatio || 1, 1.5);
-    canvas.width = Math.round(width * dpr); canvas.height = Math.round(height * dpr);
+    // The backdrop is decorative. Bound its GPU backing store on 4K/HiDPI
+    // screens rather than keeping a full-resolution surface alive all day.
+    dpr = Math.min(devicePixelRatio || 1, 1.5, Math.sqrt(MAX_BACKING_PIXELS / (width * height)));
+    const nextWidth = Math.max(1, Math.floor(width * dpr)), nextHeight = Math.max(1, Math.floor(height * dpr));
+    if (!force && canvas.width === nextWidth && canvas.height === nextHeight) return;
+    if (contextLost || !ctx) return;
+    canvas.width = nextWidth; canvas.height = nextHeight;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     seed = 197311;
     const count = Math.max(1400, Math.min(3200, Math.round(width * height / 450)));
@@ -50,7 +57,12 @@
     canvas.dataset.particleCount = String(particles.length);
     draw();
   }
+  function scheduleResize() {
+    if (resizeFrame) return;
+    resizeFrame = requestAnimationFrame(() => { resizeFrame = 0; resize(); });
+  }
   function draw() {
+    if (contextLost || !ctx || ctx.isContextLost?.()) return;
     const started = performance.now();
     const sample = { strands: [], particles: [] };
     ctx.clearRect(0, 0, width, height);
@@ -99,7 +111,7 @@
   }
   function tick(now) {
     frame = 0;
-    if (document.hidden || !appVisible || !motionEnabled) return;
+    if (document.hidden || !appVisible || !pageActive || !motionEnabled || contextLost) return;
     if (!lastDraw || now - lastDraw >= 1000 / 24) {
       elapsed += lastDraw ? Math.min(.1, (now - lastDraw) / 1000) : 0;
       lastDraw = now;
@@ -109,9 +121,9 @@
   }
   function sync() {
     cancelAnimationFrame(frame); frame = 0; lastDraw = 0;
-    canvas.dataset.status = document.hidden || !appVisible || !motionEnabled ? 'paused' : 'running';
-    if (!document.hidden && appVisible && motionEnabled) frame = requestAnimationFrame(tick);
-    else if (!document.hidden && appVisible) draw();
+    canvas.dataset.status = contextLost ? 'context-lost' : document.hidden || !appVisible || !pageActive || !motionEnabled ? 'paused' : 'running';
+    if (!document.hidden && appVisible && pageActive && motionEnabled && !contextLost) frame = requestAnimationFrame(tick);
+    else if (!document.hidden && appVisible && pageActive && !contextLost) draw();
   }
   function updateButton() {
     motionButton?.setAttribute('aria-pressed', String(motionEnabled));
@@ -123,10 +135,22 @@
     localStorage.setItem('shitu-background-motion', motionEnabled ? 'on' : 'off');
     updateButton(); sync();
   });
-  addEventListener('resize', resize);
+  addEventListener('resize', scheduleResize);
   document.addEventListener('visibilitychange', sync);
   window.shitu?.onWindowVisibility?.(visible => { appVisible = visible; sync(); });
-  addEventListener('pagehide', () => { cancelAnimationFrame(frame); frame = 0; });
-  addEventListener('pageshow', sync);
+  canvas.addEventListener('contextlost', () => {
+    // Do not cancel this Canvas2D event: its default action restores the buffer.
+    contextLost = true;
+    cancelAnimationFrame(resizeFrame); resizeFrame = 0;
+    sync();
+  });
+  canvas.addEventListener('contextrestored', () => {
+    ctx = canvas.getContext('2d', { alpha: true });
+    contextLost = !ctx;
+    if (!contextLost) resize(true);
+    sync();
+  });
+  addEventListener('pagehide', () => { pageActive = false; cancelAnimationFrame(resizeFrame); resizeFrame = 0; sync(); });
+  addEventListener('pageshow', () => { pageActive = true; resize(); sync(); });
   updateButton(); resize(); sync();
 })();

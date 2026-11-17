@@ -1,7 +1,7 @@
 'use strict';
 
-// A thumbnail hover owns a cancellable lease. The full viewer can adopt that
-// work, so a late mouseleave must never cancel preparation the viewer needs.
+// A thumbnail hover owns a cancellable lease. Only requests for the same
+// profile share work; the full viewer must never receive a short hover clip.
 const VIEWER = Symbol('video viewer');
 function hoverToken(value) {
   if (typeof value !== 'string' || !value.length || value.length > 128 || /[^a-zA-Z0-9_-]/.test(value))
@@ -16,7 +16,8 @@ function createVideoPreviewRequests() {
   function prepare(identity, requestToken, operation) {
     const consumer = requestToken == null ? VIEWER : hoverToken(requestToken);
     const same = active && active.library === identity.library && active.id === identity.id &&
-      active.source === identity.source && active.hash === identity.hash && !active.controller.signal.aborted;
+      active.source === identity.source && active.hash === identity.hash &&
+      (active.profile || 'full') === (identity.profile || 'full') && !active.controller.signal.aborted;
     if (same) {
       active.consumers.add(consumer);
       return active.promise;

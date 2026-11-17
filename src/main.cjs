@@ -1,5 +1,7 @@
+require('./process-stdio.cjs').installProcessStdioGuards();
 const { app, BrowserWindow, protocol, ipcMain, dialog, shell, nativeImage, nativeTheme, Menu, clipboard, ClipboardItem, net } = require('electron');
 const path = require('node:path');
+const os = require('node:os');
 const fs = require('node:fs/promises');
 const { pathToFileURL } = require('node:url');
 const { LibraryManager } = require('./library-manager.cjs');
@@ -13,6 +15,11 @@ const { createAppUpdater } = require('./app-updater.cjs');
 const { createUpdateTransport } = require('./update-transport.cjs');
 const { createUpdateScheduler, updateIntervalMs } = require('./update-scheduler.cjs');
 const { createVideoEngine } = require('./video-engine.cjs');
+const { createVideoTranscoder } = require('./video-transcode.cjs');
+const { createVideoTranscodeService } = require('./video-transcode-service.cjs');
+const { createTranscodeDeviceManager } = require('./transcode-devices.cjs');
+const { createTranscodeSettings, executionPlan } = require('./transcode-settings.cjs');
+const { createUiRecovery } = require('./ui-recovery.cjs');
 const { createVideoPreviewRequests } = require('./video-preview-requests.cjs');
 const { createModelService } = require('./model-service.cjs');
 const { createAEProjectCollector } = require('./ae-projects.cjs');
@@ -37,8 +44,15 @@ let collectorError;
 let libraryManager;
 let switchingLibrary=false;
 let draggingAssets=false;
+let movingAssets=0;
 let imagePlugins;
 let videoEngine;
+let videoTranscoder;
+let videoTranscodeService;
+let transcodeDevices;
+let transcodeSettings;
+let uiRecovery;
+let uiDiagnosticWrite = Promise.resolve();
 let modelService;
 let aeProjects;
 let aePreviewService;
@@ -65,14 +79,15 @@ function librarySnapshot() {
   return {root:null,assets:[],folders:[],tags:[],stats:{total:0,active:0,trashed:0,untagged:0,unfiled:0,bytes:0},needsLibrary:true,libraryError:status.error,legacyRoot:status.legacyRoot};
 }
 
-async function prepareVideo(id, expectedRoot, requestToken) {
+async function prepareVideo(id, expectedRoot, requestToken, profile = 'full') {
+  if (!['full', 'hover'].includes(profile) || (profile === 'hover' && typeof requestToken !== 'string')) throw new Error('视频预览请求无效');
   const current = requireLibrary();
   if (current.root !== expectedRoot) throw new Error('素材库已切换，请重新选择视频');
   let asset = current.snapshot().assets.find(item => item.id === id);
   if (!asset || asset.mediaType !== 'video') throw new Error('请选择有效的视频素材');
   const source = current.getAssetPath(id, 'original');
-  return videoRequests.prepare({ library: current, id, source, hash: asset.hash }, requestToken, async signal => {
-    if (!asset.thumbnail || !asset.codec) {
+  return videoRequests.prepare({ library: current, id, source, hash: asset.hash, profile }, requestToken, async signal => {
+    if (profile === 'full' && (!asset.thumbnail || !asset.codec)) {
       const result = await current.refreshVideoMetadata([id], { signal });
       if (result.updated) {
         asset = result.snapshot.assets.find(item => item.id === id);
@@ -80,17 +95,20 @@ async function prepareVideo(id, expectedRoot, requestToken) {
       }
     }
     signal.throwIfAborted();
-    const result = await videoEngine.preview(source, { key: asset.hash, signal });
+    const result = profile === 'hover'
+      ? await videoEngine.hoverPreview(source, { key: asset.hash, signal, metadata: asset })
+      : await videoEngine.preview(source, { key: asset.hash, signal });
     signal.throwIfAborted();
     if (library !== current || current.getAssetPath(id, 'original') !== source) throw new Error('素材库已切换，请重新选择视频');
-    const key = crypto.createHash('sha256').update(`${current.root}\0${id}\0${asset.hash}`).digest('hex');
+    const key = crypto.createHash('sha256').update(`${current.root}\0${id}\0${asset.hash}\0${profile}`).digest('hex');
     videoPreviews.set(key, { id, root: current.root, source, path: result.path });
     return { url: `shitu://asset/${encodeURIComponent(id)}?kind=preview&key=${key}`, width: result.width,
-      height: result.height, duration: result.duration, codec: result.sourceCodec || asset.codec || result.codec, mimeType: result.mimeType };
+      height: result.height, duration: result.duration, sourceDuration: result.sourceDuration || result.duration,
+      profile, codec: result.sourceCodec || asset.codec || result.codec, mimeType: result.mimeType };
   });
 }
 async function switchLibrary(mode) {
-  if(switchingLibrary || importing || draggingAssets || imagePlugins?.busy() || collector?.activeCount())throw new Error('请等待当前导入、采集、图片处理或拖放完成后再切换素材库');
+  if(switchingLibrary || importing || draggingAssets || movingAssets || videoTranscodeService?.busy() || imagePlugins?.busy() || collector?.activeCount())throw new Error('请等待当前导入、采集、转码、图片处理或拖放完成后再切换素材库');
   if(mode==='migrate')requireLibrary();
   switchingLibrary=true;
   try {
@@ -154,7 +172,7 @@ function checkedHandler(channel, handler) {
 
 function ensureUpdateCanInstall() {
   if (!app.isPackaged || process.platform !== 'win32') throw new Error('开发模式不安装更新，请使用正式安装版');
-  if (installingUpdate || closing || activeOperations || switchingLibrary || importing || draggingAssets || imagePlugins?.busy() || collector?.activeCount()) {
+  if (installingUpdate || closing || activeOperations || switchingLibrary || importing || draggingAssets || videoTranscodeService?.busy() || imagePlugins?.busy() || collector?.activeCount()) {
     throw new Error('请等待导入、采集、图片处理和保存完成后再安装更新');
   }
 }
@@ -224,6 +242,19 @@ function sendActionEvent(channel, payload) {
   if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) mainWindow.webContents.send(`shitu:${channel}`, payload);
 }
 
+function recordUiDiagnostic(detail = {}) {
+  const entry = { time: new Date().toISOString(), version: app.getVersion() };
+  for (const key of ['event', 'source', 'reason']) if (typeof detail[key] === 'string' && /^[a-zA-Z0-9_-]{1,64}$/.test(detail[key])) entry[key] = detail[key];
+  if (Number.isInteger(detail.exitCode)) entry.exitCode = detail.exitCode;
+  uiDiagnosticWrite = uiDiagnosticWrite.catch(() => {}).then(async () => {
+    const directory = path.join(app.getPath('userData'), 'diagnostics');
+    const filename = path.join(directory, 'ui-health.log');
+    await fs.mkdir(directory, { recursive: true });
+    if ((await fs.stat(filename).catch(() => null))?.size > 128 * 1024) await fs.writeFile(filename, '');
+    await fs.appendFile(filename, JSON.stringify(entry) + '\n');
+  }).catch(() => {});
+}
+
 function startAssetDrag(ids, expectedRoot) {
   if (draggingAssets) return;
   try {
@@ -241,6 +272,17 @@ function startAssetDrag(ids, expectedRoot) {
     draggingAssets = false;
     sendActionEvent('drag-ended');
   }
+}
+
+async function moveAssetsToFolder(ids, folderId, expectedRoot) {
+  const current = requireLibrary();
+  if (typeof expectedRoot !== 'string' || current.root !== expectedRoot) throw new Error('素材库已切换，请重新选择素材');
+  movingAssets++;
+  try {
+    const snapshot = await current.moveAssetsToFolder(ids, folderId);
+    if (library !== current) throw new Error('素材库已切换，请重新选择素材');
+    return snapshot;
+  } finally { movingAssets--; }
 }
 
 async function copyAssetImage(id, expectedRoot) {
@@ -275,6 +317,31 @@ async function importPaths(paths, folderId = null) {
 }
 
 function bindHandlers() {
+  checkedHandler('transcode-devices', refresh => {
+    if (refresh !== undefined && typeof refresh !== 'boolean') throw new Error('设备检测参数无效');
+    return transcodeDevices.discover({ refresh: refresh === true });
+  });
+  checkedHandler('transcode-settings', () => transcodeSettings.get());
+  checkedHandler('transcode-settings-save', async settings => {
+    if (closing) throw new Error('软件正在关闭，请稍后再保存设置');
+    if (settings?.mode === 'gpu' || settings?.mode === 'hybrid') {
+      executionPlan(settings, await transcodeDevices.discover(), { format: 'mp4', total: 2 });
+    }
+    if (closing) throw new Error('软件正在关闭，请稍后再保存设置');
+    return transcodeSettings.save(settings);
+  });
+  checkedHandler('video-transcode-state', () => videoTranscodeService.state());
+  checkedHandler('video-transcode-start', async request => {
+    if (closing || switchingLibrary || importing || draggingAssets || imagePlugins?.busy()) throw new Error('请等待当前素材操作完成后再转码');
+    const settings = await transcodeSettings.get();
+    const devices = request?.format === 'dxv' || settings.mode === 'cpu'
+      ? { cpu: { name: os.cpus()[0]?.model || 'CPU', logicalProcessors: Math.max(1, Math.min(128, os.availableParallelism?.() || os.cpus().length || 1)) }, gpus: [] }
+      : await transcodeDevices.discover();
+    if (closing || switchingLibrary || importing || draggingAssets || imagePlugins?.busy()) throw new Error('当前无法开始转码，请稍后重试');
+    const plan = executionPlan(settings, devices, { format: request?.format, total: request?.ids?.length || 0 });
+    return videoTranscodeService.start({ ...request, executionPlan: plan });
+  });
+  checkedHandler('video-transcode-cancel', id => videoTranscodeService.cancel(id));
   checkedHandler('prepare-video', prepareVideo);
   checkedHandler('cancel-video', (id, expectedRoot, requestToken) => videoRequests.cancel(id, expectedRoot, requestToken));
   checkedHandler('release-video-viewer', (id, expectedRoot) => videoRequests.releaseViewer(id, expectedRoot));
@@ -351,6 +418,7 @@ function bindHandlers() {
   });
   checkedHandler('import-paths', importPaths);
   checkedHandler('update-assets', (ids, patch) => requireLibrary().updateAssets(ids, patch));
+  checkedHandler('move-assets-to-folder', moveAssetsToFolder);
   checkedHandler('set-trash', (ids, trashed) => requireLibrary().setTrash(ids, trashed));
   checkedHandler('delete-permanently', (ids, expectedRoot) => {
     const current = requireLibrary();
@@ -406,6 +474,17 @@ async function createWindow() {
   mainWindow.webContents.session.setPermissionRequestHandler((_wc, _permission, callback) => callback(false));
   mainWindow.webContents.session.setPermissionCheckHandler(() => false);
   mainWindow.webContents.on('will-attach-webview', event => event.preventDefault());
+  uiRecovery = createUiRecovery({ app, window: mainWindow,
+    canRecover: () => !closing && !installingUpdate && !draggingAssets,
+    onDiagnostic: recordUiDiagnostic,
+    onExhausted: async () => {
+      if (closing || mainWindow.isDestroyed()) return;
+      const result = await dialog.showMessageBox(mainWindow, { type: 'warning', title: '界面显示异常',
+        message: '界面连续出现显示异常，可以重新载入界面。已保存的素材库不受影响。',
+        buttons: ['重新载入界面', '稍后处理'], defaultId: 0, cancelId: 1 });
+      if (result.response === 0 && !closing && !mainWindow.isDestroyed()) mainWindow.webContents.reload();
+    }
+  });
   const sendVisibility = visible => {
     if (!mainWindow.webContents.isDestroyed()) mainWindow.webContents.send('shitu:window-visibility', visible);
   };
@@ -421,7 +500,7 @@ async function createWindow() {
     }
     if (closing) return;
     closing = true;
-    Promise.resolve(library?.flush()).then(() => Promise.allSettled([modelService?.shutdown(), aeProjects?.shutdown(), aePreviewService?.shutdown()])).then(() => { mayClose = true; mainWindow.close(); }).catch(error => {
+    Promise.resolve(videoTranscodeService?.shutdown()).then(() => transcodeSettings?.flush()).then(() => library?.flush()).then(() => Promise.allSettled([transcodeDevices?.shutdown?.(), videoTranscoder?.shutdown(), modelService?.shutdown(), aeProjects?.shutdown(), aePreviewService?.shutdown()])).then(() => { mayClose = true; mainWindow.close(); }).catch(error => {
       closing = false;
       dialog.showErrorBox('保存未完成', error.message);
     });
@@ -435,6 +514,14 @@ else {
   app.on('second-instance', () => { if (mainWindow) { if (mainWindow.isMinimized()) mainWindow.restore(); mainWindow.focus(); } });
   app.whenReady().then(async () => {
     videoEngine = createVideoEngine({ runtimeDir: path.join(__dirname, '..', 'video-runtime'), cacheDir: path.join(app.getPath('userData'), 'video-previews') });
+    transcodeDevices = createTranscodeDeviceManager({ runtimeDir: path.join(__dirname, '..', 'video-runtime') });
+    videoTranscoder = createVideoTranscoder({ runtimeDir: path.join(__dirname, '..', 'video-runtime'), deviceManager: transcodeDevices });
+    transcodeSettings = createTranscodeSettings({ filePath: path.join(app.getPath('userData'), 'transcode-settings.json') });
+    videoTranscodeService = createVideoTranscodeService({ engine: videoTranscoder, getLibrary: () => library,
+      workDir: path.join(app.getPath('userData'), 'video-transcodes'),
+      onEvent: state => sendActionEvent('video-transcode', state),
+      onChanged: owner => { if (owner === library) sendActionEvent('library-changed'); }
+    });
     modelService = createModelService({ BrowserWindow, cacheDir: path.join(app.getPath('userData'), 'model-previews'), getLibrary: () => library });
     aeProjects = createAEProjectCollector({ cacheDir: path.join(app.getPath('userData'), 'ae-projects') });
     libraryManager=new LibraryManager({configPath:path.join(app.getPath('userData'),'library-location.json'),legacyRoot,createThumbnail,
@@ -509,8 +596,11 @@ else {
   });
   app.on('window-all-closed', () => app.quit());
   app.on('will-quit', () => {
+    uiRecovery?.dispose();
     updateScheduler?.dispose(); appUpdater?.dispose();
     videoRequests.abortAll();
+    videoTranscodeService?.shutdown().catch(()=>{}); videoTranscoder?.shutdown().catch(()=>{});
+    Promise.resolve(transcodeDevices?.shutdown?.()).catch(()=>{});
     imagePlugins?.shutdown().catch(()=>{}); collector?.close().catch(()=>{}); videoEngine?.shutdown().catch(()=>{}); modelService?.shutdown().catch(()=>{}); aeProjects?.shutdown().catch(()=>{}); aePreviewService?.shutdown().catch(()=>{});
   });
 }

@@ -12,6 +12,10 @@ class ShituCylinderPreview {
     this.targetColumn = 0;
     this.activeRow = 0;
     this.frame = 0;
+    this.lastFrameDraw = 0;
+    this.appVisible = true;
+    this.pageActive = true;
+    this.suspendedVideos = new Map();
     this.rotation = null;
     const savedRows = Number(localStorage.getItem('shitu-preview-rows'));
     this.preferredRows = Number.isInteger(savedRows) && savedRows >= 1 && savedRows <= 5 ? savedRows : null;
@@ -54,6 +58,10 @@ class ShituCylinderPreview {
       if (this.opened && this.reducedMotion.matches) this.finish();
       else this.ensureFrame();
     });
+    document.addEventListener('visibilitychange', () => this.syncVisibility());
+    window.shitu?.onWindowVisibility?.(visible => { this.appVisible = visible; this.syncVisibility(); });
+    window.addEventListener('pagehide', () => { this.pageActive = false; this.syncVisibility(); });
+    window.addEventListener('pageshow', () => { this.pageActive = true; this.syncVisibility(); });
     viewport.addEventListener('wheel', event => this.onWheel(event), { passive: false });
     viewport.addEventListener('pointerdown', event => this.trackDoubleClick(event), true);
     viewport.addEventListener('dblclick', event => {
@@ -491,18 +499,43 @@ class ShituCylinderPreview {
     this.draw();
     this.ensureFrame();
   }
+  visible() { return !document.hidden && this.appVisible && this.pageActive; }
+  syncVisibility() {
+    cancelAnimationFrame(this.frame); this.frame = 0; this.lastFrameDraw = 0;
+    if (!this.visible()) {
+      this.endPan();
+      this.rotation = null;
+      this.position = this.targetColumn;
+      this.ring.dataset.animating = 'false';
+      for (const item of this.media) if (item.tagName === 'VIDEO' && !item.paused) {
+        this.suspendedVideos.set(item, item.currentSrc || item.src);
+        item.pause();
+      }
+      return;
+    }
+    if (!this.opened) { this.suspendedVideos.clear(); return; }
+    this.resize();
+    for (const [item, source] of this.suspendedVideos) {
+      if ((item.currentSrc || item.src) === source && source) item.play().catch(() => {});
+    }
+    this.suspendedVideos.clear();
+    this.ensureFrame();
+  }
   ensureFrame() {
-    if (!this.opened || this.singleMode || this.frame || (!this.ambientMotion && !this.rotation)) return;
+    if (!this.opened || !this.visible() || this.singleMode || this.frame || (!this.ambientMotion && !this.rotation)) return;
     const tick = time => {
       this.frame = 0;
-      if (!this.opened) return;
+      if (!this.opened || !this.visible()) return;
+      const rotating = Boolean(this.rotation);
       if (this.rotation) {
         const { from, to, start, duration } = this.rotation;
         const progress = Math.min(1, (time - start) / duration);
         this.position = from + (to - from) * (1 - Math.pow(1 - progress, 3));
         if (progress === 1) { this.rotation = null; this.ring.dataset.animating = 'false'; }
       }
-      this.draw(time);
+      if (rotating || !this.lastFrameDraw || time - this.lastFrameDraw >= 1000 / 30) {
+        this.draw(time); this.lastFrameDraw = time;
+      }
       this.ensureFrame();
     };
     this.frame = requestAnimationFrame(tick);
@@ -517,6 +550,7 @@ class ShituCylinderPreview {
   }
   close() {
     for (const item of this.media) if (item.tagName === 'VIDEO') item.pause();
+    this.suspendedVideos.clear();
     cancelAnimationFrame(this.frame); this.frame = 0;
     this.rotation = null;
     this.wheelRemainder = 0;

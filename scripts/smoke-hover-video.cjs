@@ -13,9 +13,12 @@ const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
   const source = path.join(base, 'source'); await fs.mkdir(source);
   const ffmpeg = path.join(root, 'video-runtime', process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg');
   const files = [];
-  for (const [kind, extension, encoder] of [['native', 'webm', 'libvpx-vp9'], ['converted', 'avi', 'mpeg4']]) {
+  for (const [kind, extension, encoder, duration, width, height] of [
+    ['native', 'mp4', 'libopenh264', 3, 192, 128], ['webm', 'webm', 'libvpx-vp9', 3, 192, 128],
+    ['converted', 'avi', 'mpeg4', 3, 192, 128], ['longDxv', 'mov', 'dxv', 24, 320, 192]
+  ]) {
     const filename = path.join(source, `${kind}.${extension}`);
-    const result = spawnSync(ffmpeg, ['-hide_banner', '-loglevel', 'error', '-nostdin', '-f', 'lavfi', '-i', 'testsrc2=size=192x128:rate=20', '-t', '3', '-an', '-c:v', encoder, '-threads', '2', '-y', filename], { windowsHide: true, encoding: 'utf8', timeout: 30000 });
+    const result = spawnSync(ffmpeg, ['-hide_banner', '-loglevel', 'error', '-nostdin', '-f', 'lavfi', '-i', `testsrc2=size=${width}x${height}:rate=20`, '-t', String(duration), '-an', '-c:v', encoder, ...(encoder === 'libopenh264' ? ['-b:v', '600k'] : []), '-threads', '2', '-y', filename], { windowsHide: true, encoding: 'utf8', timeout: 30000 });
     if (result.error || result.status) throw result.error || new Error(result.stderr);
     files.push({ kind, filename, hash: hash(await fs.readFile(filename)) });
   }

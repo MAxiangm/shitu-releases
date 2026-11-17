@@ -36,13 +36,14 @@
     <symbol id="i-folder-plus" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v10H3Z"/><path d="M12 10v6m-3-3h6"/></symbol>
     <symbol id="i-external" viewBox="0 0 24 24"><path d="M14 3h7v7m0-7L10 14M10 4H4v16h16v-6"/></symbol>
     <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m9 5 7 7-7 7"/></symbol>
+    <symbol id="i-settings" viewBox="0 0 24 24"><path d="M4 7h16M4 17h16M8 4v6m8 4v6"/></symbol>
     <symbol id="i-shield" viewBox="0 0 24 24"><path d="m12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6Z"/><path d="m8 12 3 3 5-6"/></symbol>
   </defs></svg>
   <div class="app-shell details-hidden">
     <header class="app-header">
       <button class="library-switch" id="libraryInfo" aria-label="管理素材库" title="管理素材库位置"><span class="library-icon"><svg class="icon"><use href="#i-folder"/></svg></span><span><strong id="libraryDisplayName">我的素材库</strong><small id="libraryDisplayStatus">本地存储 · 随时灵感</small></span><svg class="icon"><use href="#i-chevron"/></svg></button>
       <div class="brand"><div class="brand-mark"><span></span><span></span><span></span><span></span></div><div><strong>拾图</strong><span>SHITU LIBRARY</span></div></div>
-      <div class="header-actions"><button id="appUpdateButton" class="header-button update-button" type="button" title="检查拾图更新" aria-haspopup="dialog"><svg class="icon"><use href="#i-download"/></svg><span id="appUpdateLabel">更新</span></button><button id="pluginCenterButton" class="header-button" title="插件中心"><svg class="icon"><use href="#i-image"/></svg><span>插件</span></button><button id="backupButton" class="header-button" title="备份素材库"><svg class="icon"><use href="#i-shield"/></svg><span>备份</span></button><button id="backgroundMotionButton" class="header-button" type="button" aria-pressed="true" title="开启或暂停背景粒子与线条动画"><svg class="icon"><use href="#i-motion"/></svg><span id="backgroundMotionLabel">动效：开</span></button><button id="collectorButton" class="header-button collector-button" title="浏览器采集"><span>浏览器采集</span><svg class="icon"><use href="#i-arrow"/></svg></button><button class="icon-button" id="toggleDetails" aria-label="显示或隐藏详情面板" title="显示 / 隐藏详情" aria-pressed="false"><svg class="icon"><use href="#i-info"/></svg></button></div>
+      <div class="header-actions"><button id="videoTranscodeButton" class="header-button hidden" type="button" aria-haspopup="dialog" title="查看视频转码任务"><svg class="icon"><use href="#i-video"/></svg><span id="videoTranscodeLabel">视频转码</span></button><button id="settingsButton" class="header-button" type="button" aria-haspopup="dialog" title="设置转码设备"><svg class="icon"><use href="#i-settings"/></svg><span>设置</span></button><button id="appUpdateButton" class="header-button update-button" type="button" title="检查拾图更新" aria-haspopup="dialog"><svg class="icon"><use href="#i-download"/></svg><span id="appUpdateLabel">更新</span></button><button id="pluginCenterButton" class="header-button" title="插件中心"><svg class="icon"><use href="#i-image"/></svg><span>插件</span></button><button id="backupButton" class="header-button" title="备份素材库"><svg class="icon"><use href="#i-shield"/></svg><span>备份</span></button><button id="backgroundMotionButton" class="header-button" type="button" aria-pressed="true" title="开启或暂停背景粒子与线条动画"><svg class="icon"><use href="#i-motion"/></svg><span id="backgroundMotionLabel">动效：开</span></button><button id="collectorButton" class="header-button collector-button" title="浏览器采集"><span>浏览器采集</span><svg class="icon"><use href="#i-arrow"/></svg></button><button class="icon-button" id="toggleDetails" aria-label="显示或隐藏详情面板" title="显示 / 隐藏详情" aria-pressed="false"><svg class="icon"><use href="#i-info"/></svg></button></div>
     </header>
     <main class="workspace">
       <section class="page-heading"><div><div class="eyebrow">YOUR VISUAL COLLECTION</div><h1 id="pageTitle">全部素材<span class="title-dot">.</span></h1><p id="pageSubtitle">收集值得留下的灵感。</p></div></section>
@@ -105,6 +106,50 @@
   </div>
   <div id="collectorOverlay" class="modal-overlay hidden"><section class="modal collector-modal" role="dialog" aria-modal="true" aria-labelledby="collectorTitle"><div class="collector-heading"><div class="modal-icon"><svg class="icon"><use href="#i-browser"/></svg></div><button id="collectorClose" class="icon-button" aria-label="关闭浏览器采集设置"><svg class="icon"><use href="#i-close"/></svg></button></div><h2 id="collectorTitle">从网页，拾取灵感</h2><p>使用拾图的 Chrome 扩展，把网页上的图片和直链视频存入本地素材库。</p><div id="collectorStatus" class="collector-status">正在检查本地接收服务…</div><div id="collectorLastCapture" class="collector-last-capture hidden" role="status"></div><p class="collector-automatic">扩展安装后自动连接本机，无需输入连接码。</p><ol class="collector-steps"><li><strong>找到扩展目录</strong><span>点击下方「打开扩展目录」，记下文件夹位置。</span></li><li><strong>在 Chrome 加载扩展</strong><span>打开 chrome://extensions，开启「开发者模式」，选择「加载已解压的扩展程序」，然后选中刚才的扩展文件夹。首次加载完成即可使用。</span></li><li><strong>直接采集到素材库</strong><span>保持拾图打开。在网页图片或直链视频上，按住 Alt 再点鼠标右键即可导入。播放器分段流或受保护内容不支持直接采集。</span></li></ol><p id="collectorPath" class="collector-path"></p><div class="collector-actions"><button id="openExtensionFolder" class="secondary-button"><svg class="icon"><use href="#i-folder"/></svg>打开扩展目录</button><button id="refreshCollector" class="primary-button">刷新状态</button></div></section></div>
   <div id="libraryManagerOverlay" class="modal-overlay hidden"><section class="modal library-manager" role="dialog" aria-modal="true" aria-labelledby="managerTitle"><div class="collector-heading"><div class="modal-icon"><svg class="icon"><use href="#i-folder"/></svg></div><button id="managerCloseLibrary" class="icon-button" aria-label="关闭素材库管理"><svg class="icon"><use href="#i-close"/></svg></button></div><h2 id="managerTitle">管理素材库</h2><p>选择工作中的素材库，或把整库复制到新位置。</p><div class="manager-current"><span class="detail-label">当前素材库位置</span><code id="managerLibraryPath"></code><button id="managerRevealLibrary" class="text-button">在资源管理器中打开<svg class="icon"><use href="#i-external"/></svg></button></div><div class="manager-choices"><button id="managerOpenLibrary" class="manager-choice"><svg class="icon"><use href="#i-folder"/></svg><span><strong>打开其他素材库</strong><small>切换到已有的拾图素材库文件夹</small></span><svg class="icon"><use href="#i-chevron"/></svg></button><button id="managerCreateLibrary" class="manager-choice"><svg class="icon"><use href="#i-plus"/></svg><span><strong>新建素材库</strong><small>选择保存位置，创建一个独立的新库</small></span><svg class="icon"><use href="#i-chevron"/></svg></button></div><div class="manager-migrate"><strong>迁移当前素材库</strong><p>将整库复制到你选择的新位置，复制成功后切换。原位置的素材库完整保留。</p><button id="managerMigrateLibrary" class="secondary-button"><svg class="icon"><use href="#i-arrow"/></svg>选择迁移位置</button></div><p id="managerOperationStatus" class="library-operation-status hidden" role="status"></p></section></div>
+  <div id="videoTranscodeOverlay" class="modal-overlay hidden">
+    <section id="videoTranscodeDialog" class="modal video-transcode-modal" role="dialog" aria-modal="true" aria-labelledby="videoTranscodeTitle" tabindex="-1">
+      <div class="collector-heading"><div class="modal-icon"><svg class="icon"><use href="#i-video"/></svg></div><button id="videoTranscodeClose" class="icon-button" type="button" aria-label="关闭视频转码窗口"><svg class="icon"><use href="#i-close"/></svg></button></div>
+      <h2 id="videoTranscodeTitle">视频转码</h2>
+      <p id="videoTranscodeSummary">选择输出格式和码率。</p>
+      <form id="videoTranscodeForm">
+        <fieldset id="videoTranscodeOptions" class="video-transcode-options">
+          <label for="videoTranscodeFormat">输出格式<select id="videoTranscodeFormat"><option value="mp4">MP4（H.264）</option><option value="dxv">DXV Normal（MOV）</option></select></label>
+          <div id="videoTranscodeBitrateField"><label for="videoTranscodeBitrate">视频码率（Mbps）</label><div class="video-transcode-bitrate-row"><select id="videoTranscodeBitratePreset" aria-label="常用视频码率"><option value="5">5 Mbps</option><option value="10">10 Mbps</option><option value="20" selected>20 Mbps</option><option value="40">40 Mbps</option><option value="80">80 Mbps</option><option value="custom">自定义</option></select><input id="videoTranscodeBitrate" type="number" min="0.5" max="200" step="any" value="20" inputmode="decimal" required aria-describedby="videoTranscodeBitrateHint"></div><small id="videoTranscodeBitrateHint">可选 0.5–200 Mbps；数值越大，文件通常越大。</small></div>
+          <label id="videoTranscodeAlphaField" class="video-transcode-alpha hidden"><input id="videoTranscodeAlpha" type="checkbox">保留透明通道</label>
+        </fieldset>
+        <div class="video-transcode-device-row"><span id="videoTranscodeDeviceSummary">转码设备：自动选择</span><button id="videoTranscodeSettings" type="button" class="text-button">设备设置</button></div>
+        <p id="videoTranscodeExecutionNotice" class="video-transcode-execution-notice"></p>
+        <p id="videoTranscodeNotice" class="video-transcode-notice">结果作为新素材保存到原视频所在文件夹，原视频保留。MP4 不保留透明通道；DXV Normal 输出为 MOV，可选择是否保留透明通道。</p>
+        <p id="videoTranscodeStatus" class="video-transcode-status" role="status" aria-live="polite"></p>
+        <div id="videoTranscodeProgressArea" class="video-transcode-progress hidden"><progress id="videoTranscodeProgress" max="100" value="0" aria-label="视频转码总进度"></progress><span id="videoTranscodeCurrent"></span></div>
+        <ul id="videoTranscodeWorkers" class="video-transcode-workers hidden" aria-label="各设备转码进度"></ul>
+        <ul id="videoTranscodeErrors" class="video-transcode-errors hidden" aria-label="未完成的转码文件"></ul>
+        <div class="modal-actions"><button id="videoTranscodeCancel" type="button" class="secondary-button hidden">取消任务</button><button id="videoTranscodeBackground" type="button" class="secondary-button">关闭</button><button id="videoTranscodeStart" type="submit" class="primary-button">开始转码</button></div>
+      </form>
+    </section>
+  </div>
+  <div id="transcodeSettingsOverlay" class="modal-overlay hidden">
+    <section id="transcodeSettingsDialog" class="modal transcode-settings-modal" role="dialog" aria-modal="true" aria-labelledby="transcodeSettingsTitle" tabindex="-1">
+      <div class="collector-heading"><div class="modal-icon"><svg class="icon"><use href="#i-settings"/></svg></div><button id="transcodeSettingsClose" class="icon-button" type="button" aria-label="关闭设置"><svg class="icon"><use href="#i-close"/></svg></button></div>
+      <h2 id="transcodeSettingsTitle">设置 · 视频转码</h2>
+      <p>选择转码使用的处理器与显卡。</p>
+      <form id="transcodeSettingsForm">
+        <fieldset id="transcodeSettingsOptions" class="transcode-settings-options">
+          <label for="transcodeSettingsMode">转码模式<select id="transcodeSettingsMode"><option value="auto">自动选择</option><option value="cpu">CPU</option><option value="gpu">GPU</option><option value="hybrid">CPU + GPU 双线</option></select></label>
+          <small id="transcodeSettingsModeHint">MP4 优先使用可用 GPU。</small>
+          <div class="transcode-settings-cpu"><span>CPU 设备</span><strong id="transcodeSettingsCpuName">尚未检测</strong></div>
+          <label for="transcodeSettingsCpuThreads">CPU 线程数<input id="transcodeSettingsCpuThreads" type="number" min="1" max="64" step="1" value="1" required aria-describedby="transcodeSettingsCpuHint"></label>
+          <small id="transcodeSettingsCpuHint">检测后可选择使用的 CPU 线程数。</small>
+          <label for="transcodeSettingsGpu">GPU 设备<select id="transcodeSettingsGpu" aria-describedby="transcodeSettingsGpuHint"><option value="auto">自动选择可用 GPU</option></select></label>
+          <small id="transcodeSettingsGpuHint">首次检测可能需要几秒。</small>
+        </fieldset>
+        <ul id="transcodeSettingsDeviceNotes" class="transcode-settings-device-notes hidden" aria-label="不可用的 GPU"></ul>
+        <p class="video-transcode-notice">DXV 使用 CPU；GPU 与双线编码适用于 MP4。双线模式把批量视频分配给 CPU 和 GPU 同时处理。</p>
+        <p id="transcodeSettingsStatus" class="video-transcode-status" role="status" aria-live="polite"></p>
+        <div class="modal-actions"><button id="transcodeSettingsRefresh" type="button" class="secondary-button">重新检测</button><button id="transcodeSettingsCancel" type="button" class="secondary-button">取消</button><button id="transcodeSettingsSave" type="submit" class="primary-button">保存设置</button></div>
+      </form>
+    </section>
+  </div>
   <div id="progressPanel" class="progress-panel hidden" role="status"><div class="progress-top"><span class="spinner"></span><strong id="progressTitle">正在导入素材</strong><span id="progressCount"></span></div><div class="progress-track"><div id="progressFill"></div></div><p id="progressFile">正在准备…</p></div>
   <div id="appUpdateOverlay" class="modal-overlay hidden">
     <section id="appUpdateDialog" class="modal update-modal" role="dialog" aria-modal="true" aria-labelledby="appUpdateTitle" aria-describedby="appUpdateStatus" tabindex="-1">
@@ -120,6 +165,7 @@
   </div>
   <div id="folderContextMenu" class="folder-context-menu hidden" role="menu" aria-label="文件夹操作"></div>
   <div id="toastStack" class="toast-stack" aria-live="polite"></div>
+  <div id="assetDragGhost" class="asset-drag-ghost hidden" role="status" aria-live="polite"></div>
   <script src="./particle-background.js"></script>
   <script src="./cylinder-preview.js"></script>
   <script src="./plugin-center.js"></script>
@@ -127,6 +173,7 @@
   <script src="./folder-navigation.js"></script>
   <script src="./color-labels.js"></script>
   <script src="./video-hover.js"></script>
+  <script src="./asset-folder-drag.js"></script>
   <script src="./renderer.js"></script>
 </body>
 </html>

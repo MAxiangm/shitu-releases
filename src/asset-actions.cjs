@@ -14,8 +14,8 @@ function isWithin(root, filename) {
   return relative !== '' && relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
 }
 
-// Synchronous validation intentionally keeps native drag initiation in the
-// original dragstart turn. Renderer input is always IDs, never filesystem paths.
+// Synchronous validation keeps native drag initiation within the originating
+// mouse gesture. Renderer input is always IDs, never filesystem paths.
 function resolveAssetFiles(library, ids, expectedRoot) {
   if (!library) throw new Error('请先选择素材库');
   if (expectedRoot !== undefined && (typeof expectedRoot !== 'string' || !path.isAbsolute(expectedRoot) || !samePath(expectedRoot, library.root))) throw new Error('素材库已切换，请重新选择素材');
