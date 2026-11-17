@@ -39,13 +39,18 @@ jobs:
             .recovery/runtime
             ai-runtime
             node_modules
-          key: shitu-windows-binaries-${{ hashFiles('build-resources.json') }}
+            video-runtime
+          key: shitu-windows-binaries-${{ hashFiles('build-resources.json', 'video-runtime-manifest.json') }}
       - name: Restore binary dependencies from verified first release
         if: steps.resources.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
           if (-not (Test-Path -LiteralPath 'C:\Program Files\7-Zip\7z.exe')) { choco install 7zip --yes --no-progress }
           node scripts/prepare-build-resources.cjs
+      - name: Prepare video decoder and DXV test samples
+        run: |
+          node scripts/prepare-video-runtime.cjs
+          node scripts/prepare-video-test-fixtures.cjs
       - name: Check source
         run: node scripts/check.cjs
       - name: Run unit tests
@@ -54,6 +59,8 @@ jobs:
         run: node scripts/smoke.cjs
       - name: Smoke test update without executing an installer
         run: node scripts/smoke-update.cjs
+      - name: Smoke test real video decoding and preview
+        run: node scripts/smoke-video.cjs
       - name: Ensure NSIS compiler
         shell: pwsh
         run: |
@@ -79,4 +86,5 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           retention-days: 7
+
 
