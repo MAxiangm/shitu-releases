@@ -105,6 +105,8 @@ jobs:
         run: npm test
       - name: Smoke test application
         run: node scripts/smoke.cjs
+      - name: Smoke test nested folders and hierarchy persistence
+        run: node scripts/smoke-folders.cjs
       - name: Smoke test browser capture and saved receipts
         run: node scripts/smoke-collector.cjs
       - name: Smoke test AE package storage and folder export
