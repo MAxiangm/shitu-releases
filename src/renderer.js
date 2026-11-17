@@ -26,6 +26,15 @@ let videoPreviewSerial = 0;
 let projectPreviewView;
 let modelViewer;
 let modelViewerModule;
+const videoHover = window.ShituVideoHover.create({
+  prepare: (id, root, token) => api.prepareVideo(id, root, token),
+  cancel: (id, root, token) => api.cancelVideo(id, root, token),
+  allowed: () => !state.selectionMode && !state.previewId && !state.busy && !state.libraryChanging &&
+    !draggingAssets && !deletingAssets && !closing && !document.hidden &&
+    !document.querySelector('.modal-overlay:not(.hidden),.preview:not(.hidden),.sp-overlay:not([hidden])') &&
+    $('folderContextMenu').classList.contains('hidden'),
+  current: (asset, root) => state.library.root === root && state.library.assets.some(item => item.id === asset.id && item.hash === asset.hash)
+});
 const updateUi = {
   snapshot: { status: 'idle', currentVersion: '', latestVersion: '', progress: 0 },
   pending: false, preparingInstall: false, previousFocus: null, notices: new Set(), revision: 0
@@ -339,6 +348,7 @@ function receiveUpdateState(snapshot, notify = true) {
 }
 
 function showAppUpdate() {
+  videoHover.stop();
   updateUi.previousFocus = document.activeElement;
   renderAppUpdate();
   $('appUpdateOverlay').classList.remove('hidden');
@@ -629,6 +639,7 @@ function mediaFor(asset, kind) {
   return fallback;
 }
 function renderGallery(list) {
+  videoHover.clear();
   stopMarquee();
   const frag = document.createDocumentFragment();
   list.slice(0, state.limit).forEach((asset) => {
@@ -647,6 +658,10 @@ function renderGallery(list) {
     check.setAttribute('aria-hidden', 'true');
     check.append(icon('check'));
     thumb.append(mediaFor(asset, 'thumb'), check, el('span', 'asset-format', (asset.ext || '').toUpperCase()));
+    if (isVideo(asset)) {
+      thumb.title = '悬停静音播放 · 双击打开预览';
+      videoHover.attach(thumb, asset, state.library.root);
+    }
     if (isVideo(asset) || isModel(asset) || isProject(asset)) {
       const badge = el('span', 'asset-video-badge');
       badge.append(icon(isProject(asset) ? 'folder' : isModel(asset) ? 'grid' : 'video'), document.createTextNode(isProject(asset) ? 'AE 工程' : isModel(asset) ? '3D 模型' : '视频'));
@@ -713,6 +728,7 @@ function finishAssetDrag() {
   $('dropOverlay').classList.add('hidden');
 }
 function beginAssetDrag(event, asset) {
+  videoHover.stop();
   event.preventDefault();
   event.stopPropagation();
   if (state.selectionMode || asset.trashedAt || state.busy || state.libraryChanging) return;
@@ -725,6 +741,7 @@ function beginAssetDrag(event, asset) {
   catch (error) { finishAssetDrag(); messageError(error); }
 }
 async function showAssetContextMenu(id) {
+  videoHover.stop();
   if (!hasLibrary() || state.libraryChanging || draggingAssets) return;
   const root = state.library.root;
   if (!await waitForMetadata()) return;
@@ -845,11 +862,12 @@ function renderSelectionMode() {
   $('selectionModeButton').setAttribute('aria-pressed', String(state.selectionMode));
   $('selectionModeButton').querySelector('span').textContent = state.selectionMode ? '完成' : '选择';
   $('selectionModeButton').title = state.selectionMode ? '退出选择模式，恢复浏览和文件拖出' : '进入选择模式：点选或拖动框选';
-  $('selectionHint').textContent = state.selectionMode ? '点击选择 · 拖动框选 · Ctrl 追加 · Esc 退出' : 'Ctrl＋滚轮缩放 · 空格预览 · Ctrl 多选';
+  $('selectionHint').textContent = state.selectionMode ? '点击选择 · 拖动框选 · Ctrl 追加 · Esc 退出' : 'Ctrl＋滚轮缩放 · 空格预览 · 悬停视频播放';
   $('galleryScroller').dataset.selectionMode = String(state.selectionMode);
   $('gallery').querySelectorAll('.asset-card').forEach(card => { card.draggable = !state.selectionMode && card.dataset.trashed !== 'true'; });
 }
 function setSelectionMode(enabled) {
+  videoHover.stop();
   stopMarquee();
   state.selectionMode = enabled;
   renderSelectionMode();
@@ -1130,6 +1148,7 @@ function renderLibraryState() {
   $('managerCloseLibrary').disabled = state.libraryChanging;
 }
 function showLibraryManager() {
+  videoHover.stop();
   renderLibraryState();
   $('libraryManagerOverlay').classList.remove('hidden');
   $('managerCloseLibrary').focus();
@@ -1141,6 +1160,7 @@ function closeLibraryManager() {
 }
 async function changeLibrary(kind) {
   if (state.libraryChanging || state.busy) return;
+  videoHover.stop();
   state.libraryChanging = true;
   renderLibraryState();
   const text = kind === 'migrate' ? '请选择新位置。复制完成前请保持拾图打开…' : '正在准备素材库…';
@@ -1169,6 +1189,7 @@ async function changeLibrary(kind) {
   }
 }
 function modal({ title, description = '', value = '', input = true, confirm = '确定', cancel = '取消', destructive = false, parentOptions = null, parentId = null, colorValue }) {
+  videoHover.stop();
   closeFolderMenu();
   if (modalResolve) modalResolve(null);
   $('modalTitle').textContent = title;
@@ -1219,6 +1240,7 @@ function closeFolderMenu(restoreFocus = false) {
   folderMenuAnchor = null;
 }
 function showFolderMenu(folder, anchor, point) {
+  videoHover.stop();
   closeFolderMenu();
   if (!hasLibrary() || state.libraryChanging) return;
   const root = state.library.root, menu = $('folderContextMenu');
@@ -1270,6 +1292,7 @@ async function importImages(folder, paths) {
   if (!hasLibrary()) { toast('请先选择素材库位置'); return; }
   if (state.libraryChanging) return;
   if (state.busy) { toast('正在导入，请稍候'); return; }
+  videoHover.stop();
   state.busy = true;
   renderHeader(filteredAssets());
   $('progressPanel').classList.remove('hidden');
@@ -1523,6 +1546,7 @@ function displayPreviewAsset(asset, index, total) {
   }
 }
 function openPreview(id) {
+  videoHover.stop({ deferCancel: true });
   const list = filteredAssets();
   if (!list.some(asset => asset.id === id)) return;
   $('preview').classList.remove('hidden');
@@ -1531,6 +1555,8 @@ function openPreview(id) {
   $('previewClose').focus();
 }
 function resetPreviewMedia() {
+  const previousVideo = state.library.assets.find(asset => asset.id === $('preview').dataset.activeId && isVideo(asset));
+  if (previousVideo) Promise.resolve(api.releaseVideoViewer(previousVideo.id, state.library.root)).catch(() => {});
   videoPreviewSerial++;
   projectPreviewView = null;
   $('previewProject').replaceChildren();
@@ -1616,6 +1642,7 @@ async function refreshCollector(quiet = false) {
   } finally { refreshingCollector = false; $('refreshCollector').disabled = false; }
 }
 function showCollector() {
+  videoHover.stop();
   $('collectorOverlay').classList.remove('hidden');
   $('collectorClose').focus();
   refreshCollector();
@@ -1669,13 +1696,14 @@ $('galleryScroller').addEventListener('pointerdown', beginMarquee);
 for (const type of ['click', 'dblclick']) $('galleryScroller').addEventListener(type, event => {
   if (suppressMarqueeClick) { event.preventDefault(); event.stopImmediatePropagation(); }
 }, true);
-$('galleryScroller').addEventListener('scroll', () => { if (marquee?.active) updateMarquee(); });
+$('galleryScroller').addEventListener('scroll', () => { videoHover.stop(); if (marquee?.active) updateMarquee(); });
 $('galleryScroller').addEventListener('lostpointercapture', event => { if (marquee?.pointerId === event.pointerId) stopMarquee(true, true); });
 window.addEventListener('pointermove', moveMarquee, { passive: false });
 window.addEventListener('pointerup', event => { if (marquee?.pointerId === event.pointerId) stopMarquee(false, true); });
 window.addEventListener('pointercancel', event => { if (marquee?.pointerId === event.pointerId) stopMarquee(true, true); });
-window.addEventListener('blur', () => stopMarquee(true, true));
-window.addEventListener('resize', () => stopMarquee(true, true));
+window.addEventListener('blur', () => { videoHover.stop(); stopMarquee(true, true); });
+window.addEventListener('resize', () => { videoHover.stop(); stopMarquee(true, true); });
+document.addEventListener('visibilitychange', () => { if (document.hidden) videoHover.stop(); });
 $('searchInput').addEventListener('input', (e) => { state.search = e.target.value; state.limit = 240; state.selected.clear(); render(); });
 $('formatFilter').addEventListener('change', (e) => { state.format = e.target.value; state.limit = 240; state.selected.clear(); render(); });
 $('sortSelect').addEventListener('change', (e) => { state.sort = e.target.value; renderGallery(filteredAssets()); });
@@ -1716,7 +1744,7 @@ $('backupButton').addEventListener('click', () => run(async () => {
   finally { button.disabled = !hasLibrary() || state.libraryChanging; }
 }));
 $('collectorButton').addEventListener('click', showCollector);
-$('pluginCenterButton').addEventListener('click', () => run(() => openPluginCenter()));
+$('pluginCenterButton').addEventListener('click', () => { videoHover.stop(); run(() => openPluginCenter()); });
 $('appUpdateButton').addEventListener('click', showAppUpdate);
 $('setupAppUpdate').addEventListener('click', showAppUpdate);
 $('appUpdateClose').addEventListener('click', closeAppUpdate);
@@ -1905,6 +1933,7 @@ api.onProjectPreview?.(detail => {
   if (detail?.id === projectPreviewView?.id && detail.root === projectPreviewView.root) projectPreviewView.updateProgress(detail);
 });
 window.addEventListener('beforeunload', (event) => {
+  videoHover.stop();
   if (closeReady) return;
   flushDetailDrafts();
   if (!pendingSaves.size) return;

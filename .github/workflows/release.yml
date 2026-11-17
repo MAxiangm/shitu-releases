@@ -117,6 +117,8 @@ jobs:
         run: node scripts/smoke-update.cjs
       - name: Smoke test real video decoding and preview
         run: node scripts/smoke-video.cjs
+      - name: Smoke test video thumbnail hover playback
+        run: node scripts/smoke-hover-video.cjs
       - name: Smoke test model packaging and interactive preview
         run: |
           node scripts/smoke-model.cjs

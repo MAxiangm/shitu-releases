@@ -23,7 +23,9 @@ contextBridge.exposeInMainWorld('shitu', Object.freeze({
     return () => ipcRenderer.removeListener('shitu:plugin-event', listener);
   },
   getLibrary: () => call('get-library'),
-  prepareVideo: (id, expectedRoot) => call('prepare-video', id, expectedRoot),
+  prepareVideo: (id, expectedRoot, requestToken) => call('prepare-video', id, expectedRoot, requestToken),
+  cancelVideo: (id, expectedRoot, requestToken) => call('cancel-video', id, expectedRoot, requestToken),
+  releaseVideoViewer: (id, expectedRoot) => call('release-video-viewer', id, expectedRoot),
   prepareModel: (id, expectedRoot) => call('prepare-model', id, expectedRoot),
   prepareProjectPreview: (id, expectedRoot, compositionId) => call('prepare-project-preview', id, expectedRoot, compositionId),
   projectPreviewState: id => call('project-preview-state', id),

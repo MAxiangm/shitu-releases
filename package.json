@@ -1,7 +1,7 @@
 {
   "name": "shitu",
   "productName": "拾图",
-  "version": "0.15.0",
+  "version": "0.16.0",
   "description": "A local-first image library for Windows",
   "main": "src/main.cjs",
   "private": true,
@@ -21,6 +21,7 @@
     "test:folders": "node scripts/smoke-folders.cjs",
     "test:colors": "node scripts/smoke-colors.cjs",
     "test:video": "node scripts/smoke-video.cjs",
+    "test:video:hover": "node scripts/smoke-hover-video.cjs",
     "test:models": "node scripts/smoke-model.cjs",
     "test:collector": "node scripts/smoke-collector.cjs",
     "test:ae": "node scripts/smoke-ae.cjs",

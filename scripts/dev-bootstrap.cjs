@@ -11,8 +11,9 @@ const modelSmoke = process.env.SHITU_MODEL_SMOKE === '1';
 const aeSmoke = process.env.SHITU_AE_SMOKE === '1';
 const folderSmoke = process.env.SHITU_FOLDER_SMOKE === '1';
 const colorsSmoke = process.env.SHITU_COLORS_SMOKE === '1';
-if ([smoke, updateSmoke, videoSmoke, modelSmoke, aeSmoke, folderSmoke, colorsSmoke].filter(Boolean).length > 1) throw new Error('Choose one smoke test mode at a time.');
-const testing = smoke || updateSmoke || videoSmoke || modelSmoke || aeSmoke || folderSmoke || colorsSmoke;
+const hoverVideoSmoke = process.env.SHITU_HOVER_VIDEO_SMOKE === '1';
+if ([smoke, updateSmoke, videoSmoke, modelSmoke, aeSmoke, folderSmoke, colorsSmoke, hoverVideoSmoke].filter(Boolean).length > 1) throw new Error('Choose one smoke test mode at a time.');
+const testing = smoke || updateSmoke || videoSmoke || modelSmoke || aeSmoke || folderSmoke || colorsSmoke || hoverVideoSmoke;
 const base = testing
   ? path.resolve(process.env.SHITU_SMOKE_DIRECTORY)
   : path.join(root, '.recovery', 'development');
@@ -55,6 +56,12 @@ if (colorsSmoke) {
   if (!relative || relative.startsWith('..') || path.isAbsolute(relative) || fs.lstatSync(base).isSymbolicLink()) throw new Error('Color smoke directory must stay inside .recovery/tests.');
   const marker = JSON.parse(fs.readFileSync(path.join(base, 'color-smoke-fixture.json'), 'utf8'));
   if (!process.env.SHITU_COLORS_SMOKE_TOKEN || marker.token !== process.env.SHITU_COLORS_SMOKE_TOKEN) throw new Error('Color smoke marker does not match.');
+}
+if (hoverVideoSmoke) {
+  const relative = path.relative(path.join(root, '.recovery', 'tests'), base);
+  if (!relative || relative.startsWith('..') || path.isAbsolute(relative) || fs.lstatSync(base).isSymbolicLink()) throw new Error('Hover video smoke directory must stay inside .recovery/tests.');
+  const marker = JSON.parse(fs.readFileSync(path.join(base, 'hover-video-smoke-fixture.json'), 'utf8'));
+  if (!process.env.SHITU_HOVER_VIDEO_SMOKE_TOKEN || marker.token !== process.env.SHITU_HOVER_VIDEO_SMOKE_TOKEN) throw new Error('Hover video smoke marker does not match.');
 }
 for (const name of ['profile', 'sessions', 'crashes', 'plugins']) {
   fs.mkdirSync(path.join(base, name), { recursive: true });
@@ -173,6 +180,7 @@ if (modelSmoke) require('./model-smoke-bootstrap.cjs')({ root, base });
 if (aeSmoke) require('./ae-smoke-bootstrap.cjs')({ root, base });
 if (folderSmoke) require('./folders-smoke-bootstrap.cjs')({ root, base });
 if (colorsSmoke) require('./colors-smoke-bootstrap.cjs')({ root, base });
+if (hoverVideoSmoke) require('./hover-video-smoke-bootstrap.cjs')({ root, base });
 
 function configureUpdateSmoke() {
   // This branch only runs inside an explicitly marked, isolated smoke process.

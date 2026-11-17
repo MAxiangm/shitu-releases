@@ -13,6 +13,7 @@ const { createAppUpdater } = require('./app-updater.cjs');
 const { createUpdateTransport } = require('./update-transport.cjs');
 const { createUpdateScheduler, updateIntervalMs } = require('./update-scheduler.cjs');
 const { createVideoEngine } = require('./video-engine.cjs');
+const { createVideoPreviewRequests } = require('./video-preview-requests.cjs');
 const { createModelService } = require('./model-service.cjs');
 const { createAEProjectCollector } = require('./ae-projects.cjs');
 const { createAEPreviewEngine } = require('./ae-preview.cjs');
@@ -42,8 +43,7 @@ let modelService;
 let aeProjects;
 let aePreviewService;
 const videoPreviews = new Map();
-const videoRequests = new Set();
-let activeVideoRequest;
+const videoRequests = createVideoPreviewRequests();
 let appUpdater;
 let updateDiagnosticWrite = Promise.resolve();
 let updateScheduler;
@@ -65,43 +65,29 @@ function librarySnapshot() {
   return {root:null,assets:[],folders:[],tags:[],stats:{total:0,active:0,trashed:0,untagged:0,unfiled:0,bytes:0},needsLibrary:true,libraryError:status.error,legacyRoot:status.legacyRoot};
 }
 
-async function prepareVideo(id, expectedRoot) {
+async function prepareVideo(id, expectedRoot, requestToken) {
   const current = requireLibrary();
   if (current.root !== expectedRoot) throw new Error('素材库已切换，请重新选择视频');
   let asset = current.snapshot().assets.find(item => item.id === id);
   if (!asset || asset.mediaType !== 'video') throw new Error('请选择有效的视频素材');
   const source = current.getAssetPath(id, 'original');
-  // Reopening the same clip must not cancel the preparation it still needs.
-  if (activeVideoRequest?.library === current && activeVideoRequest.id === id &&
-      activeVideoRequest.source === source && activeVideoRequest.hash === asset.hash &&
-      !activeVideoRequest.controller.signal.aborted) return activeVideoRequest.promise;
-  // A single viewer is active; switching clips should stop its previous conversion.
-  for (const previous of videoRequests) previous.abort();
-  const controller = new AbortController();
-  videoRequests.add(controller);
-  const request = { library: current, id, source, hash: asset.hash, controller, promise: null };
-  activeVideoRequest = request;
-  request.promise = (async () => { try {
+  return videoRequests.prepare({ library: current, id, source, hash: asset.hash }, requestToken, async signal => {
     if (!asset.thumbnail || !asset.codec) {
-      const result = await current.refreshVideoMetadata([id], { signal: controller.signal });
+      const result = await current.refreshVideoMetadata([id], { signal });
       if (result.updated) {
         asset = result.snapshot.assets.find(item => item.id === id);
         if (library === current) sendActionEvent('library-changed');
       }
     }
-    controller.signal.throwIfAborted();
-    const result = await videoEngine.preview(source, { key: asset.hash, signal: controller.signal });
-    controller.signal.throwIfAborted();
+    signal.throwIfAborted();
+    const result = await videoEngine.preview(source, { key: asset.hash, signal });
+    signal.throwIfAborted();
     if (library !== current || current.getAssetPath(id, 'original') !== source) throw new Error('素材库已切换，请重新选择视频');
     const key = crypto.createHash('sha256').update(`${current.root}\0${id}\0${asset.hash}`).digest('hex');
     videoPreviews.set(key, { id, root: current.root, source, path: result.path });
     return { url: `shitu://asset/${encodeURIComponent(id)}?kind=preview&key=${key}`, width: result.width,
       height: result.height, duration: result.duration, codec: result.sourceCodec || asset.codec || result.codec, mimeType: result.mimeType };
-  } finally {
-    videoRequests.delete(controller);
-    if (activeVideoRequest === request) activeVideoRequest = null;
-  } })();
-  return request.promise;
+  });
 }
 async function switchLibrary(mode) {
   if(switchingLibrary || importing || draggingAssets || imagePlugins?.busy() || collector?.activeCount())throw new Error('请等待当前导入、采集、图片处理或拖放完成后再切换素材库');
@@ -118,7 +104,7 @@ async function switchLibrary(mode) {
     if(result.canceled)return {cancelled:true,snapshot:librarySnapshot()};
     selected=result.filePaths[0];
   }
-    for (const controller of videoRequests) controller.abort();
+    videoRequests.abortAll();
     videoPreviews.clear();
     modelService?.invalidate();
     aePreviewService?.invalidate();
@@ -159,7 +145,7 @@ function checkedHandler(channel, handler) {
   ipcMain.handle(`shitu:${channel}`, async (event, ...args) => {
     assertTrustedSender(event);
     if (installingUpdate && channel !== 'update-state') throw new Error('正在安装更新，请稍候');
-    if (channel.startsWith('update-') || ['prepare-video', 'prepare-model', 'prepare-project-preview', 'project-preview-state'].includes(channel)) return handler(...args);
+    if (channel.startsWith('update-') || ['prepare-video', 'cancel-video', 'release-video-viewer', 'prepare-model', 'prepare-project-preview', 'project-preview-state'].includes(channel)) return handler(...args);
     activeOperations++;
     try { return await handler(...args); }
     finally { activeOperations--; }
@@ -290,6 +276,8 @@ async function importPaths(paths, folderId = null) {
 
 function bindHandlers() {
   checkedHandler('prepare-video', prepareVideo);
+  checkedHandler('cancel-video', (id, expectedRoot, requestToken) => videoRequests.cancel(id, expectedRoot, requestToken));
+  checkedHandler('release-video-viewer', (id, expectedRoot) => videoRequests.releaseViewer(id, expectedRoot));
   checkedHandler('prepare-model', (id, expectedRoot) => modelService.prepare(requireLibrary(), id, expectedRoot));
   checkedHandler('prepare-project-preview', (id, expectedRoot, compositionId) => aePreviewService.prepare(requireLibrary(), id, { expectedRoot, compositionId }));
   checkedHandler('project-preview-state', id => aePreviewService.state(requireLibrary(), id));
@@ -522,7 +510,7 @@ else {
   app.on('window-all-closed', () => app.quit());
   app.on('will-quit', () => {
     updateScheduler?.dispose(); appUpdater?.dispose();
-    for (const controller of videoRequests) controller.abort();
+    videoRequests.abortAll();
     imagePlugins?.shutdown().catch(()=>{}); collector?.close().catch(()=>{}); videoEngine?.shutdown().catch(()=>{}); modelService?.shutdown().catch(()=>{}); aeProjects?.shutdown().catch(()=>{}); aePreviewService?.shutdown().catch(()=>{});
   });
 }
