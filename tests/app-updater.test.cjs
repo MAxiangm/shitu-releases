@@ -327,6 +327,34 @@ test('network failure preserves a downloaded update and a failed installer can r
   assert.equal(installations.length, 1);
 });
 
+test('network failures give actionable public messages and diagnostics never contain the raw error address', async t => {
+  const cases = [
+    [new Error('net::ERR_PROXY_CONNECTION_FAILED at https://private.example/?secret=hidden'), /系统代理/, 'ERR_PROXY_CONNECTION_FAILED'],
+    [new TypeError('fetch failed', { cause: Object.assign(new Error('private lookup details'), { code: 'ENOTFOUND' }) }), /解析 GitHub 地址/, 'ENOTFOUND'],
+    [new Error('net::ERR_CERT_AUTHORITY_INVALID'), /证书验证失败/, 'ERR_CERT_AUTHORITY_INVALID'],
+    [new Error('net::ERR_CONNECTION_RESET'), /连接 GitHub 时被中断/, 'ERR_CONNECTION_RESET'],
+    [new Error('net::ERR_TIMED_OUT'), /连接 GitHub 超时/, 'ERR_TIMED_OUT'],
+    [new Error('net::ERR_INTERNET_DISCONNECTED'), /网络连接已断开/, 'ERR_INTERNET_DISCONNECTED']
+  ];
+  for (const [error, expected, code] of cases) {
+    const diagnostics = [];
+    const item = await fixture(t, { fetch: async () => { throw error; }, updater: { onDiagnostic: detail => diagnostics.push(detail) } });
+    await assert.rejects(item.updater.check(), expected);
+    assert.equal(item.updater.state().status, 'error');
+    assert.deepEqual(diagnostics, [{ phase: 'check', code }]);
+    assert.doesNotMatch(JSON.stringify(diagnostics) + item.updater.state().error, /private\.example|secret=|lookup details/);
+  }
+});
+
+test('GitHub rate limits explain how to recover without claiming the current version is latest', async t => {
+  for (const status of [403, 429]) {
+    const item = await fixture(t, { fetch: async () => new Response('rate limited', { status, headers: { 'x-ratelimit-remaining': '0' } }) });
+    await assert.rejects(item.updater.check(), /请求次数暂时达到上限/);
+    assert.equal(item.updater.state().status, 'error');
+    assert.equal(item.updater.state().latestVersion, null);
+  }
+});
+
 test('dispose cancels an in-flight check without leaving a runnable installer', async t => {
   const item = await fixture(t, { fetch: async (_url, init) => new Promise((_resolve, reject) => {
     init.signal.addEventListener('abort', () => reject(init.signal.reason), { once: true });

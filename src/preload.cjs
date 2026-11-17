@@ -3,6 +3,7 @@ const call = (channel, ...args) => ipcRenderer.invoke(`shitu:${channel}`, ...arg
 contextBridge.exposeInMainWorld('shitu', Object.freeze({
   updateState: () => call('update-state'),
   checkUpdate: () => call('update-check'),
+  openUpdateRelease: () => call('update-open-release'),
   downloadUpdate: () => call('update-download'),
   installUpdate: () => call('update-install'),
   onUpdateState: callback => {

@@ -11,6 +11,28 @@ const REPOSITORY = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\/[A-Za-z0-9_.-]{1,100}$/;
 function publicError(message) {
   return Object.assign(new Error(message), { publicMessage: message });
 }
+function networkCode(error) {
+  const pending = [error], seen = new Set();
+  for (let index = 0; index < pending.length && index < 12; index++) {
+    const current = pending[index];
+    if (!current || seen.has(current)) continue;
+    seen.add(current);
+    const match = `${current.code || ''} ${current.message || ''}`.match(/\b(?:ERR_[A-Z0-9_]+|ENOTFOUND|EAI_AGAIN|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENETUNREACH|CERT_HAS_EXPIRED)\b/);
+    if (match) return match[0];
+    if (current.cause) pending.push(current.cause);
+    if (Array.isArray(current.errors)) pending.push(...current.errors.slice(0, 5));
+  }
+  return null;
+}
+function networkMessage(code) {
+  if (['ERR_NAME_NOT_RESOLVED', 'ENOTFOUND', 'EAI_AGAIN'].includes(code)) return '无法解析 GitHub 地址，请检查网络或代理，也可打开官方下载页。';
+  if (['ERR_PROXY_CONNECTION_FAILED', 'ERR_TUNNEL_CONNECTION_FAILED', 'ERR_NO_SUPPORTED_PROXIES'].includes(code)) return '无法连接系统代理，请检查代理连接后重试，也可打开官方下载页。';
+  if (['ERR_CERT_AUTHORITY_INVALID', 'ERR_CERT_DATE_INVALID', 'ERR_CERT_COMMON_NAME_INVALID', 'CERT_HAS_EXPIRED'].includes(code)) return 'GitHub 连接证书验证失败，请检查系统时间或网络代理。';
+  if (['ERR_INTERNET_DISCONNECTED', 'ERR_NETWORK_CHANGED', 'ENETUNREACH'].includes(code)) return '网络连接已断开或发生变化，请恢复网络后重新检查。';
+  if (['ERR_CONNECTION_TIMED_OUT', 'ERR_TIMED_OUT', 'ETIMEDOUT'].includes(code)) return '连接 GitHub 超时，请重试，也可打开官方下载页。';
+  if (['ERR_CONNECTION_RESET', 'ERR_CONNECTION_CLOSED', 'ERR_CONNECTION_REFUSED', 'ECONNRESET', 'ECONNREFUSED'].includes(code)) return '连接 GitHub 时被中断，请重试，也可打开官方下载页。';
+  return null;
+}
 function versionParts(value) {
   if (typeof value !== 'string' || !/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(value)) return null;
   const parts = value.split('.').map(Number);
@@ -53,7 +75,7 @@ async function hashFile(filename, signal) {
 }
 
 function createAppUpdater({ currentVersion, repository, cacheDir, enabled = true,
-  fetchImpl = globalThis.fetch, onEvent = () => {}, install: installCallback = async () => {} } = {}) {
+  fetchImpl = globalThis.fetch, onEvent = () => {}, onDiagnostic = () => {}, install: installCallback = async () => {} } = {}) {
   const configured = Boolean(enabled && typeof repository === 'string' && REPOSITORY.test(repository) &&
     !['.', '..'].includes(repository.split('/')[1]) && versionParts(currentVersion));
   if (configured && (typeof cacheDir !== 'string' || !path.isAbsolute(cacheDir))) {
@@ -87,10 +109,11 @@ function createAppUpdater({ currentVersion, repository, cacheDir, enabled = true
     });
     return holder.promise;
   }
-  function failure(error, fallback) {
+  function failure(error, fallback, phase) {
+    try { onDiagnostic({ phase, code: networkCode(error) || error?.name || 'Error' }); } catch {}
     if (error?.publicMessage) return error;
     if (error?.name === 'AbortError' || error?.name === 'TimeoutError') return publicError('更新操作已取消或超时，请重试');
-    return publicError(fallback);
+    return publicError(networkMessage(networkCode(error)) || fallback);
   }
   async function request(urlValue, signal, { accept = 'application/json', timeoutMs = 30000, fresh = false } = {}) {
     let url = trustedURL(urlValue);
@@ -117,7 +140,11 @@ function createAppUpdater({ currentVersion, repository, cacheDir, enabled = true
     throw publicError('GitHub 下载重定向次数过多');
   }
   async function json(response, limit) {
-    if (!response.ok || !response.body) throw publicError(`GitHub 更新服务暂时不可用（HTTP ${response.status}）`);
+    if (!response.ok || !response.body) {
+      const limited = response.status === 429 || response.status === 403 && response.headers.get('x-ratelimit-remaining') === '0';
+      try { await response.body?.cancel(); } catch {}
+      throw publicError(limited ? 'GitHub 请求次数暂时达到上限，请稍后重试，也可打开官方下载页。' : `GitHub 更新服务暂时不可用（HTTP ${response.status}）`);
+    }
     const chunks = []; let bytes = 0;
     for await (const chunk of response.body) {
       bytes += chunk.length;
@@ -187,7 +214,7 @@ function createAppUpdater({ currentVersion, repository, cacheDir, enabled = true
           totalBytes: selected.size, error: null,
           message: sameDownload ? '更新已下载，重启即可安装' : `发现新版本 ${selected.version}` });
       } catch (error) {
-        const safe = failure(error, '检查更新失败，请检查网络后重试');
+        const safe = failure(error, '检查更新失败，请检查网络后重试，也可打开官方下载页。', 'check');
         emit({ ...previous, status: ['available', 'downloaded'].includes(previous.status) ? previous.status : 'error',
           error: safe.message, message: safe.message });
         throw safe;
@@ -207,7 +234,10 @@ function createAppUpdater({ currentVersion, repository, cacheDir, enabled = true
         const filePath = path.join(cacheDir, `${selected.version}-${selected.sha256}.exe`);
         if (!await validFile(filePath, selected, signal)) {
           const response = await request(selected.downloadURL, signal, { accept: 'application/octet-stream', timeoutMs: 30 * 60 * 1000 });
-          if (!response.ok || !response.body) throw publicError(`安装包下载失败（HTTP ${response.status}）`);
+          if (!response.ok || !response.body) {
+            try { await response.body?.cancel(); } catch {}
+            throw publicError(`安装包下载失败（HTTP ${response.status}）`);
+          }
           const contentLength = response.headers.get('content-length');
           if (contentLength && (!/^\d+$/.test(contentLength) || Number(contentLength) !== selected.size)) {
             try { await response.body.cancel(); } catch {}
@@ -246,7 +276,7 @@ function createAppUpdater({ currentVersion, repository, cacheDir, enabled = true
           message: '更新已下载，重启即可安装' });
       } catch (error) {
         verified = null;
-        const safe = failure(error, '下载更新失败，请检查网络或磁盘空间后重试');
+        const safe = failure(error, '下载更新失败，请检查网络或磁盘空间后重试', 'download');
         emit({ status: 'available', progress: 0, downloadedBytes: 0, error: safe.message, message: safe.message });
         throw safe;
       } finally {
@@ -267,7 +297,7 @@ function createAppUpdater({ currentVersion, repository, cacheDir, enabled = true
         await installCallback({ ...verified });
         return state();
       } catch (error) {
-        const safe = failure(error, '启动更新安装程序失败，请重试');
+        const safe = failure(error, '启动更新安装程序失败，请重试', 'install');
         if (!validated) verified = null;
         emit({ status: verified ? 'downloaded' : 'available', error: safe.message, message: safe.message });
         throw safe;

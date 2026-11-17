@@ -181,6 +181,12 @@ function configureUpdateSmoke() {
   const assetName = `shitu-${fixture.nextVersion}-setup.exe`;
   const manifestURL = `https://github.com/${repository}/releases/download/${tag}/shitu-update.json`;
   const installerURL = `https://github.com/${repository}/releases/download/${tag}/${assetName}`;
+  const officialReleaseURL = `https://github.com/${repository}/releases/latest`;
+  const openedReleasePages = [];
+  electron.shell.openExternal = async address => {
+    assert.equal(address, officialReleaseURL, 'Only the fixed official release page may be opened');
+    openedReleasePages.push(address);
+  };
   const manifest = {
     schemaVersion: 1, version: fixture.nextVersion, platform: 'win32', arch: 'x64',
     installer: { name: assetName, size: installer.length, sha256 }
@@ -194,6 +200,7 @@ function configureUpdateSmoke() {
     ]
   };
   const networkRequests = [];
+  let updateNetworkBlocked = true;
   electron.net.fetch = async (url, options = {}) => {
     const address = String(url);
     assert.equal(options.redirect, 'manual');
@@ -207,6 +214,7 @@ function configureUpdateSmoke() {
       assert.equal(options.cache, 'no-store');
       assert.equal(options.headers['Cache-Control'], 'no-cache, no-store, max-age=0');
       assert.equal(options.headers.Pragma, 'no-cache');
+      if (updateNetworkBlocked) throw new Error('net::ERR_CONNECTION_RESET');
       return new Response(metadataAddress.href === manifestURL ? manifestBody : JSON.stringify(release),
         { headers: { 'content-type': 'application/json' } });
     }
@@ -222,6 +230,9 @@ function configureUpdateSmoke() {
     }
     throw new Error(`Smoke test refused unexpected network request: ${address}`);
   };
+  // The transport is the network boundary in production. Keep this UI/IPC smoke
+  // closed, while the separate live smoke exercises real Electron networking.
+  require(path.join(root, 'src', 'update-transport.cjs')).createUpdateTransport = ({ net }) => (...args) => net.fetch(...args);
 
   let installRequest = null, flushCount = 0, collectorClosed = false, uiResult = null;
   let collectorOptions = null, collectorBlockedDuringInstall = false;
@@ -272,7 +283,8 @@ function configureUpdateSmoke() {
       assert.deepEqual(failures, []);
       fs.writeFileSync(resultPath, JSON.stringify({
         ok: true, electron: process.versions.electron, currentVersion: fixture.currentVersion,
-        latestVersion: fixture.nextVersion, sha256, networkRequests, networkMocked: true, metadataFreshnessVerified: true,
+        latestVersion: fixture.nextVersion, sha256, networkRequests, networkMocked: true, updateTransportBoundaryMocked: true, metadataFreshnessVerified: true,
+        officialReleasePageRequests: openedReleasePages,
         installerExecuted: false, installRequest, libraryFlushCalls: flushCount,
         collectorClosed, collectorBlockedDuringInstall, quitObserved: true, userData: app.getPath('userData'), ...uiResult
       }, null, 2) + '\n');
@@ -291,16 +303,58 @@ function configureUpdateSmoke() {
     window.webContents.on('render-process-gone', (_event, details) => failures.push(JSON.stringify(details)));
     window.webContents.once('did-finish-load', async () => {
       try {
+        const errorUi = await window.webContents.executeJavaScript(`(async () => {
+          const initial = await api.updateState();
+          if (initial.status !== 'idle') throw new Error('Updater did not initialize before failure test');
+          document.getElementById('appUpdateButton').click();
+          document.getElementById('appUpdateCheck').click();
+          const deadline = Date.now() + 7000;
+          let failed;
+          while (true) {
+            failed = await api.updateState();
+            if (failed.status === 'error' && !document.getElementById('appUpdateCheck').disabled) break;
+            if (Date.now() > deadline) throw new Error('Failed update check did not finish');
+            await new Promise(resolve => setTimeout(resolve, 20));
+          }
+          const message = document.getElementById('appUpdateStatus').textContent;
+          if (!failed.error || message !== failed.error || /Error invoking remote method|shitu:update-|^Error:/.test(message))
+            throw new Error('Update error exposed the IPC wrapper instead of the public error');
+          if (/Error invoking remote method|shitu:update-/.test(document.getElementById('toastStack').textContent))
+            throw new Error('Update error toast exposed the IPC wrapper');
+          if (document.getElementById('appUpdateCheck').textContent !== '重新检查') throw new Error('Failed check is not retryable');
+          const fallback = document.getElementById('appUpdateOpenRelease');
+          if (!fallback || fallback.classList.contains('hidden') || fallback.disabled) throw new Error('Official download fallback is unavailable after a failed check');
+          fallback.click();
+          if (updateUi.pending) throw new Error('Opening the official page must not start an update operation');
+          return { updateErrorSanitized: true, updateErrorRetryEnabled: true, manualDownloadFallbackVerified: true };
+        })()`);
+        const fallbackDeadline = Date.now() + 5000;
+        while (!openedReleasePages.length) {
+          if (Date.now() > fallbackDeadline) throw new Error('The official download button did not open the fixed release URL');
+          await new Promise(resolve => setTimeout(resolve, 20));
+        }
+        assert.deepEqual(openedReleasePages, [officialReleaseURL]);
+        updateNetworkBlocked = false;
         uiResult = await window.webContents.executeJavaScript(`(async () => {
           const api = window.shitu;
           if (!api || !api.checkUpdate || !document.getElementById('appUpdateButton'))
             throw new Error('Update API or header button missing');
           const initial = await api.updateState();
-          if (initial.status !== 'idle' || initial.currentVersion !== ${JSON.stringify(fixture.currentVersion)})
+          if (initial.status !== 'error' || initial.currentVersion !== ${JSON.stringify(fixture.currentVersion)})
             throw new Error('Updater did not initialize as packaged application');
-          const downloaded = await api.checkUpdate();
+          document.getElementById('appUpdateCheck').click();
+          const retryDeadline = Date.now() + 7000;
+          let downloaded;
+          while (true) {
+            downloaded = await api.updateState();
+            if (downloaded.status === 'downloaded' && !document.getElementById('appUpdateCheck').disabled) break;
+            if (Date.now() > retryDeadline) throw new Error('Update retry did not recover and download');
+            await new Promise(resolve => setTimeout(resolve, 20));
+          }
           if (downloaded.status !== 'downloaded' || downloaded.latestVersion !== ${JSON.stringify(fixture.nextVersion)})
             throw new Error('GitHub check and automatic download did not finish');
+          if (!document.getElementById('appUpdateOpenRelease').classList.contains('hidden'))
+            throw new Error('Official download fallback remained visible after update recovery');
           document.getElementById('appUpdateButton').click();
           await Promise.race([
             new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))),
@@ -324,6 +378,29 @@ function configureUpdateSmoke() {
             panelBounds: { width: bounds.width, height: bounds.height }, panelDisplay: getComputedStyle(overlay).display,
             headerLabel: document.getElementById('appUpdateLabel').textContent };
         })()`);
+        Object.assign(uiResult, errorUi);
+        updateNetworkBlocked = true;
+        const preservedUi = await window.webContents.executeJavaScript(`(async () => {
+          document.getElementById('appUpdateCheck').click();
+          const deadline = Date.now() + 7000;
+          let failed;
+          while (true) {
+            failed = await api.updateState();
+            if (failed.error && !document.getElementById('appUpdateCheck').disabled) break;
+            if (Date.now() > deadline) throw new Error('Downloaded update recheck failure did not finish');
+            await new Promise(resolve => setTimeout(resolve, 20));
+          }
+          if (failed.status !== 'downloaded' || document.getElementById('appUpdateInstall').disabled ||
+              document.getElementById('appUpdateInstall').classList.contains('hidden'))
+            throw new Error('Network failure discarded the already verified downloaded update');
+          const text = document.getElementById('appUpdateStatus').textContent;
+          if (text !== failed.error || /Error invoking remote method|shitu:update-|^Error:/.test(text))
+            throw new Error('Downloaded state displayed a raw IPC error');
+          return { downloadedUpdatePreservedAfterCheckFailure: true };
+        })()`);
+        Object.assign(uiResult, preservedUi);
+        updateNetworkBlocked = false;
+        await window.webContents.executeJavaScript(`runUpdateAction(() => api.checkUpdate())`);
         assert.deepEqual(failures, []);
         // Pixel capture is optional on headless CI; the UI/IPC assertions above are required.
         try {

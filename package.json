@@ -1,7 +1,7 @@
 {
   "name": "shitu",
   "productName": "拾图",
-  "version": "0.13.1",
+  "version": "0.13.2",
   "description": "A local-first image library for Windows",
   "main": "src/main.cjs",
   "private": true,
@@ -17,6 +17,7 @@
     "release:draft": "node scripts/publish-github.cjs",
     "prepare:resources": "node scripts/prepare-build-resources.cjs",
     "test:updates": "node scripts/smoke-update.cjs",
+    "test:updates:live": "node scripts/smoke-update-live.cjs",
     "test:video": "node scripts/smoke-video.cjs",
     "test:models": "node scripts/smoke-model.cjs",
     "test:collector": "node scripts/smoke-collector.cjs",

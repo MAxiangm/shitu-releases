@@ -208,6 +208,8 @@ function renderAppUpdate() {
   $('appUpdateNotesArea').classList.toggle('hidden', !notes);
   $('appUpdateCheck').disabled = busy || status === 'disabled';
   $('appUpdateCheck').textContent = status === 'error' ? '重新检查' : '检查更新';
+  $('appUpdateOpenRelease').classList.toggle('hidden', !snapshot.error && status !== 'error');
+  $('appUpdateOpenRelease').disabled = status === 'installing' || updateUi.preparingInstall;
   $('appUpdateDownload').classList.toggle('hidden', !(['available', 'downloading'].includes(status) || (status === 'error' && latest)));
   $('appUpdateDownload').disabled = busy;
   $('appUpdateDownload').textContent = status === 'downloading' ? '正在下载…' : status === 'error' ? '重试下载' : '下载更新';
@@ -244,20 +246,30 @@ function closeAppUpdate() {
   if (target?.isConnected && !target.closest('[inert]') && !target.disabled) target.focus();
 }
 
+function updateErrorMessage(error) {
+  const message = typeof error === 'string' ? error : typeof error?.message === 'string' ? error.message : '';
+  // Electron wraps rejected main-process calls. Keep the public reason, without
+  // exposing the IPC channel or replacing a newer update-state error event.
+  return message.replace(/^Error invoking remote method ['"]shitu:update-(?:check|download|install|state|open-release)['"]:\s*(?:Error:\s*)?/, '').trim()
+    || '更新未完成，请稍后重试。';
+}
+
 async function runUpdateAction(action) {
   if (updateUi.pending) return;
+  const revision = updateUi.revision;
   updateUi.pending = true;
   renderAppUpdate();
   try {
     const result = await action();
     if (result?.status) receiveUpdateState(result);
   } catch (error) {
+    const message = updateErrorMessage(updateUi.revision !== revision && updateUi.snapshot.error ? updateUi.snapshot.error : error);
     updateUi.snapshot = {
       ...updateUi.snapshot,
-      status: ['checking', 'downloading', 'installing'].includes(updateUi.snapshot.status) ? 'error' : updateUi.snapshot.status,
-      error: error?.message || '更新未完成，请稍后重试。'
+      status: ['available', 'downloaded', 'disabled'].includes(updateUi.snapshot.status) ? updateUi.snapshot.status : 'error',
+      error: message
     };
-    messageError(error);
+    toast(message, true, 8000);
   } finally {
     updateUi.pending = false;
     updateUi.preparingInstall = false;
@@ -1446,6 +1458,10 @@ $('setupAppUpdate').addEventListener('click', showAppUpdate);
 $('appUpdateClose').addEventListener('click', closeAppUpdate);
 $('appUpdateOverlay').addEventListener('click', event => { if (event.target === $('appUpdateOverlay')) closeAppUpdate(); });
 $('appUpdateCheck').addEventListener('click', () => runUpdateAction(() => api.checkUpdate()));
+$('appUpdateOpenRelease').addEventListener('click', async () => {
+  try { await api.openUpdateRelease(); }
+  catch (error) { toast(updateErrorMessage(error), true, 8000); }
+});
 $('appUpdateDownload').addEventListener('click', () => runUpdateAction(() => api.downloadUpdate()));
 $('appUpdateInstall').addEventListener('click', installAppUpdate);
 $('collectorClose').addEventListener('click', closeCollector);

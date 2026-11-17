@@ -10,6 +10,7 @@ const { assetMenuTemplate } = require('./asset-menu.cjs');
 const sharp = require('sharp');
 const { createImagePlugins } = require('./image-plugins.cjs');
 const { createAppUpdater } = require('./app-updater.cjs');
+const { createUpdateTransport } = require('./update-transport.cjs');
 const { createUpdateScheduler, updateIntervalMs } = require('./update-scheduler.cjs');
 const { createVideoEngine } = require('./video-engine.cjs');
 const { createModelService } = require('./model-service.cjs');
@@ -44,6 +45,7 @@ const videoPreviews = new Map();
 const videoRequests = new Set();
 let activeVideoRequest;
 let appUpdater;
+let updateDiagnosticWrite = Promise.resolve();
 let updateScheduler;
 let installingUpdate = false;
 let activeOperations = 0;
@@ -198,12 +200,29 @@ async function checkForApplicationUpdate() {
   return state;
 }
 
+function recordUpdateDiagnostic(detail = {}) {
+  const entry = { time: new Date().toISOString() };
+  for (const key of ['phase', 'event', 'code']) if (typeof detail[key] === 'string' && /^[A-Za-z0-9_.:-]{1,80}$/.test(detail[key])) entry[key] = detail[key];
+  if (['github.com', 'api.github.com', 'objects.githubusercontent.com', 'release-assets.githubusercontent.com'].includes(detail.host)) entry.host = detail.host;
+  if (Number.isInteger(detail.status)) entry.status = detail.status;
+  // Diagnostics contain codes and service names, never headers, signed URLs or proxy addresses.
+  updateDiagnosticWrite = updateDiagnosticWrite.catch(() => {}).then(async () => {
+    const directory = path.join(app.getPath('userData'), 'updates');
+    const filename = path.join(directory, 'network.log');
+    await fs.mkdir(directory, { recursive: true });
+    const info = await fs.stat(filename).catch(() => null);
+    if (info?.size > 128 * 1024) await fs.writeFile(filename, '');
+    await fs.appendFile(filename, JSON.stringify(entry) + '\n');
+  }).catch(() => {});
+}
+
 function initializeAppUpdater() {
   appUpdater = createAppUpdater({
     currentVersion: app.getVersion(), repository: updateConfig.repository,
     cacheDir: path.join(app.getPath('userData'), 'updates'),
     enabled: app.isPackaged && process.platform === 'win32' && process.arch === 'x64',
-    fetchImpl: (url, options) => net.fetch(url, options),
+    fetchImpl: createUpdateTransport({ net, onDiagnostic: recordUpdateDiagnostic }),
+    onDiagnostic: recordUpdateDiagnostic,
     onEvent: state => sendActionEvent('update-state', state),
     install: installDownloadedUpdate
   });
@@ -275,6 +294,12 @@ function bindHandlers() {
   checkedHandler('prepare-project-preview', (id, expectedRoot, compositionId) => aePreviewService.prepare(requireLibrary(), id, { expectedRoot, compositionId }));
   checkedHandler('project-preview-state', id => aePreviewService.state(requireLibrary(), id));
   checkedHandler('update-state', () => appUpdater.state());
+  checkedHandler('update-open-release', async () => {
+    const repository = updateConfig.repository;
+    if (typeof repository !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9-]*\/[A-Za-z0-9_.-]+$/.test(repository) || ['.', '..'].includes(repository.split('/')[1])) throw new Error('尚未配置官方下载页');
+    await shell.openExternal(`https://github.com/${repository}/releases/latest`);
+    return { opened: true };
+  });
   checkedHandler('update-check', () => { updateScheduler?.recordManualCheck(); return checkForApplicationUpdate(); });
   checkedHandler('update-download', () => appUpdater.download());
   checkedHandler('update-install', () => { ensureUpdateCanInstall(); return appUpdater.install(); });
