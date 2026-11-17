@@ -1,6 +1,7 @@
 node_modules/
 .recovery/
 ai-runtime/
+video-runtime/
 dist/
 release-backup.json
 library/

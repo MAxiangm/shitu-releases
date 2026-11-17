@@ -4,6 +4,7 @@
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const { root, recoveredRuntime, inside, exists, readProject, resetDistDirectory, copyTree, packagePath } = require('./release-utils.cjs');
+const { verifyVideoRuntime } = require('./prepare-video-runtime.cjs');
 
 async function findDependency(name, from) {
   if (!/^(@[a-z0-9_.-]+\/)?[a-z0-9_.-]+$/i.test(name)) throw new Error(`Invalid dependency name: ${name}`);
@@ -41,6 +42,7 @@ async function copyProductionDependencies(project, appDirectory) {
 
 async function createPackage() {
   const project = await readProject();
+  await verifyVideoRuntime();
   const electronVersion = (await fs.readFile(path.join(recoveredRuntime, 'version'), 'utf8').catch(() => '')).trim();
   if (!electronVersion || !(await exists(path.join(recoveredRuntime, '拾图.exe')))) {
     throw new Error('Recovered Electron runtime is missing. Keep .recovery/extracted-0.10.7 from the original installer.');
@@ -64,7 +66,7 @@ async function createPackage() {
   if (await exists(path.join(recoveredRuntime, 'resources', 'default_app.asar'))) {
     await copyTree(path.join(recoveredRuntime, 'resources', 'default_app.asar'), path.join(target, 'resources', 'default_app.asar'));
   }
-  for (const directory of ['src', 'assets', 'ai-runtime']) await copyTree(path.join(root, directory), path.join(appDirectory, directory));
+  for (const directory of ['src', 'assets', 'ai-runtime', 'video-runtime']) await copyTree(path.join(root, directory), path.join(appDirectory, directory));
   const updateConfig = JSON.parse(await fs.readFile(path.join(root, 'update-config.json'), 'utf8'));
   if (updateConfig.repository !== '' && !/^[A-Za-z0-9][A-Za-z0-9-]*\/[A-Za-z0-9_.-]+$/.test(updateConfig.repository || '')) {
     throw new Error('update-config.json repository must be empty or owner/repo.');

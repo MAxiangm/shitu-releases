@@ -38,7 +38,8 @@ const { root, electronPath, devApp } = require('./runtime.cjs');
   fs.mkdirSync(reports, { recursive: true });
   fs.copyFileSync(resultPath, path.join(reports, 'update-smoke.json'));
   if (result.ok && result.quitObserved && result.installerExecuted === false && code === 0) {
-    fs.copyFileSync(path.join(base, 'screenshot.png'), path.join(reports, 'update-smoke.png'));
+    if (fs.existsSync(path.join(base, 'screenshot.png')))
+      fs.copyFileSync(path.join(base, 'screenshot.png'), path.join(reports, 'update-smoke.png'));
     console.log(JSON.stringify({ ...result, reportDirectory: base }, null, 2));
   } else {
     console.error(JSON.stringify({ ...result, exitCode: code, reportDirectory: base }, null, 2));

@@ -16,6 +16,7 @@ let marquee = null;
 let marqueeFrame = 0;
 let suppressMarqueeClick = false;
 let deletingAssets = false;
+let videoPreviewSerial = 0;
 const updateUi = {
   snapshot: { status: 'idle', currentVersion: '', latestVersion: '', progress: 0 },
   pending: false, preparingInstall: false, previousFocus: null, notices: new Set(), revision: 0
@@ -56,10 +57,17 @@ function date(value) {
   return Number.isNaN(d.getTime()) ? '—' : d.toLocaleString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false });
 }
 function dimensions(a) { return a.width && a.height ? `${a.width} × ${a.height}` : '尺寸未知'; }
-const videoExtensions = new Set(['mp4', 'webm', 'm4v', 'mov', 'ogv', 'avi', 'mkv']);
+function videoDuration(value) {
+  if (!Number.isFinite(Number(value)) || Number(value) <= 0) return '';
+  const seconds = Math.round(Number(value));
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor(seconds / 60) % 60;
+  return `${hours ? `${hours}:` : ''}${hours ? String(minutes).padStart(2, '0') : minutes}:${String(seconds % 60).padStart(2, '0')}`;
+}
+const videoExtensions = new Set(['mp4', 'm4v', 'mov', 'qt', 'webm', 'ogv', 'ogg', 'mkv', 'avi', 'wmv', 'asf', 'mpg', 'mpeg', 'mpe', 'm1v', 'm2v', 'mts', 'm2ts', 'ts', 'm2t', 'vob', 'flv', 'f4v', 'mxf', '3gp', '3g2', 'divx', 'dxv', 'rm', 'rmvb', 'dv']);
 function isVideo(asset) { return asset.mediaType === 'video' || videoExtensions.has((asset.ext || '').replace(/^\./, '').toLowerCase()); }
 function mimeType(asset) {
-  return asset.mimeType || ({ mp4: 'video/mp4', m4v: 'video/mp4', webm: 'video/webm', mov: 'video/quicktime', ogv: 'video/ogg', avi: 'video/x-msvideo', mkv: 'video/x-matroska', jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', svg: 'image/svg+xml', webp: 'image/webp', avif: 'image/avif' })[asset.ext.toLowerCase()] || '—';
+  return asset.mimeType || ({ mp4: 'video/mp4', m4v: 'video/mp4', f4v: 'video/mp4', webm: 'video/webm', mov: 'video/quicktime', qt: 'video/quicktime', dxv: 'video/quicktime', ogv: 'video/ogg', ogg: 'video/ogg', avi: 'video/x-msvideo', divx: 'video/x-msvideo', mkv: 'video/x-matroska', mpg: 'video/mpeg', mpeg: 'video/mpeg', mpe: 'video/mpeg', m1v: 'video/mpeg', m2v: 'video/mpeg', mts: 'video/mp2t', m2ts: 'video/mp2t', m2t: 'video/mp2t', ts: 'video/mp2t', vob: 'video/mpeg', wmv: 'video/x-ms-wmv', asf: 'video/x-ms-asf', flv: 'video/x-flv', mxf: 'application/mxf', '3gp': 'video/3gpp', '3g2': 'video/3gpp2', rm: 'application/vnd.rn-realmedia', rmvb: 'application/vnd.rn-realmedia-vbr', dv: 'video/dv', jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', svg: 'image/svg+xml', webp: 'image/webp', avif: 'image/avif' })[(asset.ext || '').toLowerCase()] || '—';
 }
 function selectedAssets() { return state.library.assets.filter((a) => state.selected.has(a.id)); }
 function currentFolder() { return state.folder || null; }
@@ -397,7 +405,7 @@ function renderHeader(list) {
     $('activeFilter').append(document.createTextNode('标签筛选'), clear);
   }
 }
-function imageFor(asset, kind, className = '') {
+function imageFor(asset, kind, className = '', videoThumbnail = false) {
   const img = el('img', className);
   img.draggable = false;
   img.src = api.assetUrl(asset.id, kind);
@@ -407,29 +415,17 @@ function imageFor(asset, kind, className = '') {
   img.addEventListener('error', () => {
     img.classList.add('hidden');
     const fallback = el('div', 'asset-fallback');
-    fallback.append(icon('image'), el('span', '', `${(asset.ext || '图像').toUpperCase()} · 暂无缩略图`));
+    fallback.append(icon(videoThumbnail ? 'video' : 'image'), el('span', '', `${(asset.ext || (videoThumbnail ? '视频' : '图像')).toUpperCase()} · 暂无缩略图`));
     img.parentElement?.append(fallback);
   }, { once: true });
   return img;
 }
 function mediaFor(asset, kind) {
   if (!isVideo(asset)) return imageFor(asset, kind);
-  const video = el('video');
-  video.muted = true;
-  video.preload = 'metadata';
-  video.playsInline = true;
-  video.setAttribute('aria-label', asset.name);
-  video.src = api.assetUrl(asset.id, 'original');
-  video.addEventListener('loadedmetadata', () => {
-    if (Number.isFinite(video.duration) && video.duration > 0) video.currentTime = Math.min(0.1, video.duration / 2);
-  }, { once: true });
-  video.addEventListener('error', () => {
-    video.classList.add('hidden');
-    const fallback = el('div', 'asset-fallback');
-    fallback.append(icon('video'), el('span', '', `${asset.ext.toUpperCase()} · 视频素材`));
-    video.parentElement?.append(fallback);
-  }, { once: true });
-  return video;
+  if (asset.thumbnail) return imageFor(asset, 'thumbnail', '', true);
+  const fallback = el('div', 'asset-fallback');
+  fallback.append(icon('video'), el('span', '', `${(asset.ext || '视频').toUpperCase()} · 视频素材`));
+  return fallback;
 }
 function renderGallery(list) {
   stopMarquee();
@@ -840,6 +836,10 @@ function renderDetails() {
   notes.addEventListener('change', () => saveTextInput(notes, 'notes'));
   box.append(field('备注', notes), el('div', 'detail-save-note', '修改后自动保存到本地素材库。'), el('div', 'detail-separator'));
   const metadata = one ? [['类型', isVideo(asset) ? '视频' : '图片'], ['格式', asset.ext.toUpperCase()], ['MIME', mimeType(asset)], ['尺寸', dimensions(asset)], ['文件大小', size(asset.size)], ['导入时间', date(asset.createdAt)]] : [['已选素材', `${assets.length} 个`], ['总大小', size(assets.reduce((n, a) => n + a.size, 0))]];
+  if (one && isVideo(asset)) {
+    if (videoDuration(asset.duration)) metadata.splice(4, 0, ['时长', videoDuration(asset.duration)]);
+    if (typeof asset.codec === 'string' && asset.codec) metadata.splice(4, 0, ['视频编码', asset.codec.toUpperCase()]);
+  }
   metadata.forEach(([key, value]) => { const row = el('div', 'metadata-row'); row.append(el('span', '', key), el('span', '', value)); box.append(row); });
   if (one && (asset.pageUrl || asset.sourceUrl)) {
     const sources = el('div', 'source-links');
@@ -1060,7 +1060,7 @@ const cylinderPreview = new window.ShituCylinderPreview({
   viewport: $('previewCylinder'), ring: $('previewCylinderRing'), parking: $('previewMediaParking'),
   media: [$('previewImage'), $('previewVideo'), $('previewFallback')],
   createThumbnail: asset => {
-    if (isVideo(asset)) return el('div', 'cylinder-video-placeholder', `视频 · ${asset.ext.toUpperCase()}`);
+    if (isVideo(asset)) return asset.thumbnail ? imageFor(asset, 'thumbnail', 'cylinder-thumb', true) : el('div', 'cylinder-video-placeholder', `视频 · ${(asset.ext || '').toUpperCase()}`);
     return imageFor(asset, 'thumb', 'cylinder-thumb');
   },
   onSelect: displayPreviewAsset,
@@ -1083,9 +1083,37 @@ function displayPreviewAsset(asset, index, total) {
   $('previewIndex').textContent = `${index + 1} / ${total}`;
   $('previewFallback').classList.add('hidden');
   if (isVideo(asset)) {
-    $('previewVideo').classList.remove('hidden');
-    $('previewVideo').src = api.assetUrl(asset.id, 'original');
-    $('previewVideo').setAttribute('aria-label', asset.name);
+    const serial = videoPreviewSerial;
+    const expectedRoot = state.library.root;
+    const video = $('previewVideo');
+    video.setAttribute('aria-label', asset.name);
+    video.controls = true;
+    video.preload = 'auto';
+    video.playsInline = true;
+    video.muted = true;
+    video.loop = true;
+    video.poster = asset.thumbnail ? api.assetUrl(asset.id, 'thumbnail') : '';
+    $('previewFallback').textContent = '正在准备视频预览，首次打开可能需要一点时间…';
+    $('previewFallback').classList.remove('hidden');
+    const stillCurrent = () => serial === videoPreviewSerial && state.previewId === asset.id && state.library.root === expectedRoot;
+    Promise.resolve().then(() => api.prepareVideo(asset.id, expectedRoot)).then(prepared => {
+      if (!stillCurrent()) return;
+      const url = new URL(prepared?.url);
+      if (url.protocol !== 'shitu:' || url.hostname !== 'asset' || decodeURIComponent(url.pathname.slice(1)) !== asset.id || url.searchParams.get('kind') !== 'preview')
+        throw new Error('视频预览地址无效，请重新打开素材');
+      video.dataset.previewSerial = String(serial);
+      video.src = url.href;
+      video.classList.remove('hidden');
+      const duration = videoDuration(prepared.duration);
+      const codec = typeof prepared.codec === 'string' && prepared.codec ? `视频编码 ${prepared.codec.toUpperCase()}` : '';
+      const dimensionsText = prepared.width && prepared.height ? `${prepared.width} × ${prepared.height}` : dimensions(asset);
+      $('previewMeta').textContent = [asset.ext.toUpperCase(), codec, dimensionsText, duration, size(asset.size)].filter(Boolean).join('  ·  ');
+    }).catch(error => {
+      if (!stillCurrent()) return;
+      video.classList.add('hidden');
+      $('previewFallback').textContent = `暂时无法预览此视频：${error?.message || '请稍后重试'}。可使用右上角按钮在系统播放器中打开，原文件仍完整保留。`;
+      $('previewFallback').classList.remove('hidden');
+    });
   } else {
     $('previewImage').src = api.assetUrl(asset.id, 'original');
     $('previewImage').alt = asset.name;
@@ -1100,8 +1128,11 @@ function openPreview(id) {
   $('previewClose').focus();
 }
 function resetPreviewMedia() {
+  videoPreviewSerial++;
   $('previewVideo').pause();
   $('previewVideo').removeAttribute('src');
+  $('previewVideo').removeAttribute('poster');
+  delete $('previewVideo').dataset.previewSerial;
   $('previewVideo').load();
   $('previewVideo').classList.add('hidden');
   $('previewImage').removeAttribute('src');
@@ -1268,7 +1299,7 @@ $('previewImage').addEventListener('error', () => {
 });
 $('previewVideo').addEventListener('error', () => {
   const asset = state.library.assets.find((item) => item.id === state.previewId);
-  if (asset && isVideo(asset) && $('previewVideo').hasAttribute('src')) {
+  if (asset && isVideo(asset) && $('previewVideo').hasAttribute('src') && $('previewVideo').dataset.previewSerial === String(videoPreviewSerial)) {
     $('previewVideo').classList.add('hidden');
     $('previewFallback').textContent = '此视频的编码暂无法在窗口中播放，可使用右上角按钮在系统播放器中打开。文件仍完整保留在素材库中。';
     $('previewFallback').classList.remove('hidden');
@@ -1280,8 +1311,9 @@ $('previewImage').addEventListener('load', () => {
 });
 $('previewVideo').addEventListener('loadeddata', () => {
   const asset = state.library.assets.find((item) => item.id === state.previewId);
-  if (asset && isVideo(asset)) { $('previewVideo').classList.remove('hidden'); $('previewFallback').classList.add('hidden'); }
+  if (asset && isVideo(asset) && $('previewVideo').dataset.previewSerial === String(videoPreviewSerial)) { $('previewVideo').classList.remove('hidden'); $('previewFallback').classList.add('hidden'); }
 });
+window.addEventListener('pagehide', resetPreviewMedia);
 $('galleryScroller').addEventListener('click', (e) => { if (performance.now() >= suppressAssetClickUntil && (e.target === $('galleryScroller') || e.target === $('gallery'))) { flushDetailDrafts(); state.selected.clear(); updateSelectionClasses(); renderSelection(); renderDetails(); } });
 
 document.addEventListener('keydown', (e) => {

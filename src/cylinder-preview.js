@@ -68,7 +68,7 @@ class ShituCylinderPreview {
     viewport.addEventListener('lostpointercapture', event => { if (event.target === viewport && event.pointerId === this.panDrag?.pointerId) this.endPan(); });
     viewport.addEventListener('auxclick', event => { if (event.button === 1) event.preventDefault(); });
     for (const item of media) {
-      for (const type of ['load', 'loadedmetadata']) item.addEventListener(type, () => { if (this.opened) this.updateZoom(); });
+      for (const type of ['load', 'loadedmetadata', 'loadeddata', 'resize']) item.addEventListener(type, () => { if (this.opened) this.updateZoom(); });
       item.addEventListener('error', () => { if (this.opened) this.resetZoom(); });
     }
   }
@@ -516,6 +516,7 @@ class ShituCylinderPreview {
     this.ensureFrame();
   }
   close() {
+    for (const item of this.media) if (item.tagName === 'VIDEO') item.pause();
     cancelAnimationFrame(this.frame); this.frame = 0;
     this.rotation = null;
     this.wheelRemainder = 0;

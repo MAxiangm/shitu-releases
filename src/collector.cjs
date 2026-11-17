@@ -31,6 +31,7 @@ function identify(buffer) {
   if (buffer[0] === 255 && buffer[1] === 216 && buffer[2] === 255) return { ext:'jpg',kind:'image' };
   if (/^GIF8[79]a/.test(buffer.subarray(0,6).toString())) return { ext:'gif',kind:'image' };
   if (buffer.subarray(0,4).toString() === 'RIFF' && buffer.subarray(8,12).toString() === 'WEBP') return { ext:'webp',kind:'image' };
+  if (buffer.subarray(0,4).toString() === 'RIFF' && buffer.subarray(8,12).toString() === 'AVI ') return { ext:'avi',kind:'video' };
   if (buffer.subarray(0,2).toString() === 'BM') return { ext:'bmp',kind:'image' };
   if (buffer.subarray(0,4).equals(Buffer.from([73,73,42,0])) || buffer.subarray(0,4).equals(Buffer.from([77,77,0,42]))) return { ext:'tiff',kind:'image' };
   if (buffer.subarray(4,8).toString() === 'ftyp') {
@@ -38,8 +39,14 @@ function identify(buffer) {
     if (/avif|avis/.test(brands)) return {ext:'avif',kind:'image'};
     return {ext:brands.startsWith('qt  ') ? 'mov' : 'mp4',kind:'video'};
   }
-  if (buffer.subarray(0,4).equals(Buffer.from([26,69,223,163]))) return {ext:'webm',kind:'video'};
+  if (buffer.length >= 12 && ['moov', 'mdat', 'wide', 'free'].includes(buffer.subarray(4,8).toString())) return {ext:'mov',kind:'video'};
+  if (buffer.subarray(0,4).equals(Buffer.from([26,69,223,163]))) return {ext:buffer.includes(Buffer.from('matroska'))?'mkv':'webm',kind:'video'};
   if (buffer.subarray(0,4).toString() === 'OggS') return {ext:'ogv',kind:'video'};
+  if (buffer.subarray(0,3).toString() === 'FLV') return {ext:'flv',kind:'video'};
+  if (buffer.subarray(0,4).equals(Buffer.from([0,0,1,186])) || buffer.subarray(0,4).equals(Buffer.from([0,0,1,179]))) return {ext:'mpg',kind:'video'};
+  if (buffer.length > 376 && buffer[0] === 0x47 && buffer[188] === 0x47 && buffer[376] === 0x47) return {ext:'ts',kind:'video'};
+  if (buffer.subarray(0,16).equals(Buffer.from('3026b2758e66cf11a6d900aa0062ce6c','hex'))) return {ext:'asf',kind:'video'};
+  if (buffer.subarray(0,4).equals(Buffer.from([6,14,43,52]))) return {ext:'mxf',kind:'video'};
   const text = buffer.toString('utf8').replace(/^\uFEFF/,'').trimStart();
   if (/^(?:<\?xml[^>]*>\s*)?(?:<!--[\s\S]*?-->\s*)*<svg(?:\s|>)/i.test(text)) return {ext:'svg',kind:'image'};
   return null;

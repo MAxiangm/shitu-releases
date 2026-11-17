@@ -12,6 +12,7 @@ const { spawnSync } = require('node:child_process');
 const { root, inside, exists, copyTree, assertNoLinks } = require('./release-utils.cjs');
 const { validateRepository } = require('./publish-github.cjs');
 const { sha256File } = require('./create-update-manifest.cjs');
+const { prepareVideoRuntime } = require('./prepare-video-runtime.cjs');
 
 function validateBootstrap(config) {
   validateRepository(config.repository);
@@ -88,6 +89,7 @@ async function restoreBuildResources() {
   const defaultApp = path.join(extracted, 'resources', 'default_app.asar');
   if (!(await exists(defaultApp))) throw new Error('Bootstrap installer is missing Electron default_app.asar.');
   await copyTree(defaultApp, path.join(runtime, 'resources', 'default_app.asar'));
+  await prepareVideoRuntime();
   console.log(`Build resources restored from ${config.repository}@${config.tag}; checked-out application source was preserved.`);
 }
 

@@ -1,7 +1,7 @@
 {
   "name": "shitu",
   "productName": "拾图",
-  "version": "0.10.8",
+  "version": "0.10.9",
   "description": "A local-first image library for Windows",
   "main": "src/main.cjs",
   "private": true,
@@ -15,7 +15,9 @@
     "sync:installer": "node scripts/sync-installer.cjs",
     "release:github": "node scripts/publish-github.cjs",
     "prepare:resources": "node scripts/prepare-build-resources.cjs",
-    "test:updates": "node scripts/smoke-update.cjs"
+    "test:updates": "node scripts/smoke-update.cjs",
+    "test:video": "node scripts/smoke-video.cjs",
+    "prepare:video": "node scripts/prepare-video-runtime.cjs"
   },
   "devDependencies": {
     "electron": "45.1.0",

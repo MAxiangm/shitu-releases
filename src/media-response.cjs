@@ -2,10 +2,10 @@ const fs = require('node:fs');
 const { stat } = require('node:fs/promises');
 const { Readable } = require('node:stream');
 const path = require('node:path');
-const MIME={'.jpg':'image/jpeg','.jpeg':'image/jpeg','.png':'image/png','.webp':'image/webp','.gif':'image/gif','.bmp':'image/bmp','.svg':'image/svg+xml','.avif':'image/avif','.tif':'image/tiff','.tiff':'image/tiff','.mp4':'video/mp4','.m4v':'video/mp4','.mov':'video/quicktime','.webm':'video/webm','.ogv':'video/ogg'};
+const { MIME } = require('./media-formats.cjs');
 async function mediaResponse(filename,request) {
   const {size}=await stat(filename);
-  const headers={'Content-Type':MIME[path.extname(filename).toLowerCase()]||'application/octet-stream','Cache-Control':'private, max-age=3600','Content-Security-Policy':"default-src 'none'; sandbox",'X-Content-Type-Options':'nosniff','Accept-Ranges':'bytes'};
+  const headers={'Content-Type':MIME[path.extname(filename).slice(1).toLowerCase()]||'application/octet-stream','Cache-Control':'private, max-age=3600','Content-Security-Policy':"default-src 'none'; sandbox",'X-Content-Type-Options':'nosniff','Accept-Ranges':'bytes'};
   let start=0,end=size-1,status=200;
   const range=request.headers.get('range');
   if(range) {

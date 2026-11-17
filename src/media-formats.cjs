@@ -1,0 +1,19 @@
+'use strict';
+const IMAGE = new Set(['jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp', 'tif', 'tiff', 'svg', 'avif']);
+const VIDEO = new Set(['mp4', 'm4v', 'mov', 'qt', 'webm', 'ogv', 'ogg', 'mkv', 'avi', 'wmv', 'asf',
+  'mpg', 'mpeg', 'mpe', 'm1v', 'm2v', 'mts', 'm2ts', 'ts', 'm2t', 'vob', 'flv', 'f4v', 'mxf',
+  '3gp', '3g2', 'divx', 'dxv', 'rm', 'rmvb', 'dv']);
+const SUPPORTED = new Set([...IMAGE, ...VIDEO]);
+const MIME = {
+  jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp', gif: 'image/gif',
+  bmp: 'image/bmp', tif: 'image/tiff', tiff: 'image/tiff', svg: 'image/svg+xml', avif: 'image/avif',
+  mp4: 'video/mp4', m4v: 'video/mp4', mov: 'video/quicktime', qt: 'video/quicktime',
+  webm: 'video/webm', ogv: 'video/ogg', ogg: 'video/ogg', mkv: 'video/x-matroska',
+  avi: 'video/x-msvideo', divx: 'video/x-msvideo', wmv: 'video/x-ms-wmv', asf: 'video/x-ms-asf',
+  mpg: 'video/mpeg', mpeg: 'video/mpeg', mpe: 'video/mpeg', m1v: 'video/mpeg', m2v: 'video/mpeg',
+  mts: 'video/mp2t', m2ts: 'video/mp2t', ts: 'video/mp2t', m2t: 'video/mp2t', vob: 'video/mpeg',
+  flv: 'video/x-flv', f4v: 'video/mp4', mxf: 'application/mxf', '3gp': 'video/3gpp',
+  '3g2': 'video/3gpp2', dxv: 'video/quicktime', rm: 'application/vnd.rn-realmedia',
+  rmvb: 'application/vnd.rn-realmedia-vbr', dv: 'video/dv'
+};
+module.exports = { IMAGE, VIDEO, SUPPORTED, MIME };

@@ -22,6 +22,7 @@ contextBridge.exposeInMainWorld('shitu', Object.freeze({
     return () => ipcRenderer.removeListener('shitu:plugin-event', listener);
   },
   getLibrary: () => call('get-library'),
+  prepareVideo: (id, expectedRoot) => call('prepare-video', id, expectedRoot),
   startAssetDrag: (ids, expectedRoot) => ipcRenderer.send('shitu:start-drag', ids, expectedRoot),
   copyAssetImage: (id, expectedRoot) => call('copy-asset-image', id, expectedRoot),
   copyAssetPaths: (ids, expectedRoot) => call('copy-asset-paths', ids, expectedRoot),

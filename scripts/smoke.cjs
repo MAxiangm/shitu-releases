@@ -24,6 +24,7 @@ const sharp = require('sharp');
   fs.mkdirSync(path.join(root, '.recovery', 'reports'), { recursive: true });
   fs.copyFileSync(resultFile, path.join(root, '.recovery', 'reports', 'smoke.json'));
   if (result.ok && code === 0) {
-    fs.copyFileSync(path.join(base, 'screenshot.png'), path.join(root, '.recovery', 'reports', 'smoke.png'));
+    if (fs.existsSync(path.join(base, 'screenshot.png')))
+      fs.copyFileSync(path.join(base, 'screenshot.png'), path.join(root, '.recovery', 'reports', 'smoke.png'));
   } else process.exitCode = 1;
 })().catch(error => { console.error(error.stack); process.exitCode = 1; });

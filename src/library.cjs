@@ -3,8 +3,17 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { createReadStream } = require('node:fs');
 
-const VIDEO = new Set(['mp4', 'webm', 'm4v', 'mov', 'ogv']);
-const SUPPORTED = new Set(['jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp', 'tif', 'tiff', 'svg', 'avif', ...VIDEO]);
+const { VIDEO, SUPPORTED } = require('./media-formats.cjs');
+function mediaMetadata(value = {}) {
+  const result = {};
+  for (const key of ['width', 'height', 'duration']) {
+    const number = Number(value[key]);
+    if (Number.isFinite(number) && number >= 0) result[key] = number;
+  }
+  if (typeof value.codec === 'string' && /^[a-zA-Z0-9_.-]{1,80}$/.test(value.codec)) result.codec = value.codec;
+  for (const key of ['hasAudio', 'hasAlpha']) if (typeof value[key] === 'boolean') result[key] = value[key];
+  return result;
+}
 const clone = value => structuredClone(value);
 const now = () => new Date().toISOString();
 const PENDING_DELETE = /^\.pending-delete-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -110,6 +119,8 @@ class Library {
       if (!asset || typeof asset.id !== 'string' || !/^[a-zA-Z0-9-]+$/.test(asset.id) || assetIds.has(asset.id) || typeof asset.name !== 'string' || !SUPPORTED.has(asset.ext) || !Array.isArray(asset.tags) || asset.tags.some(tag => typeof tag !== 'string') || typeof asset.hash !== 'string' || !/^[a-f0-9]{64}$/.test(asset.hash) || !Number.isFinite(asset.size) || asset.size < 0 || !Number.isFinite(asset.rating) || asset.rating < 0 || asset.rating > 5 || typeof asset.notes !== 'string' || (asset.folderId !== null && !folderIds.has(asset.folderId))) throw new Error('素材索引无效');
       if (asset.filename !== `originals/${asset.id}.${asset.ext}` || (asset.thumbnail !== null && asset.thumbnail !== `thumbnails/${asset.id}.jpg`)) throw new Error('素材路径无效');
       if ('mediaType' in asset && asset.mediaType !== (VIDEO.has(asset.ext) ? 'video' : 'image')) throw new Error('素材媒体类型无效');
+      if ('duration' in asset && (!Number.isFinite(asset.duration) || asset.duration < 0)) throw new Error('视频时长无效');
+      if ('codec' in asset && (typeof asset.codec !== 'string' || !/^[a-zA-Z0-9_.-]{1,80}$/.test(asset.codec))) throw new Error('视频编码无效');
       if ('sourceUrl' in asset) webUrl(asset.sourceUrl, '素材链接');
       if ('pageUrl' in asset) webUrl(asset.pageUrl, '来源网页');
       assetIds.add(asset.id);
@@ -216,7 +227,7 @@ class Library {
               }
               const timestamp = now();
               const copyInfo = await fs.stat(copied);
-              draft.assets.push({ id, name: path.basename(absolute, path.extname(absolute)), ext, mediaType: VIDEO.has(ext) ? 'video' : 'image', size: copyInfo.size, width: Number(dimensions.width) || 0, height: Number(dimensions.height) || 0, hash: copyHash, createdAt: timestamp, updatedAt: timestamp, tags: [], folderId, rating: 0, notes: '', trashedAt: null, filename, thumbnail, ...sourceMetadata });
+              draft.assets.push({ id, name: path.basename(absolute, path.extname(absolute)), ext, mediaType: VIDEO.has(ext) ? 'video' : 'image', size: copyInfo.size, width: Number(dimensions.width) || 0, height: Number(dimensions.height) || 0, ...mediaMetadata(dimensions), hash: copyHash, createdAt: timestamp, updatedAt: timestamp, tags: [], folderId, rating: 0, notes: '', trashedAt: null, filename, thumbnail, ...sourceMetadata });
               hashes.add(copyHash);
               created.push(copied);
               if (thumbnail) created.push(thumbnailPath);
@@ -433,6 +444,36 @@ class Library {
     if (kind !== 'original' && kind !== 'thumbnail') throw new Error('素材类型无效');
     const relative = kind === 'thumbnail' ? asset.thumbnail : asset.filename;
     return relative ? path.join(this.root, relative) : null;
+  }
+
+  refreshVideoMetadata(ids, { signal } = {}) {
+    return this._mutate(async () => {
+      signal?.throwIfAborted();
+      const selected = this._ids(ids);
+      const draft = clone(this.data);
+      let updated = 0;
+      const errors = [];
+      for (const asset of draft.assets) {
+        signal?.throwIfAborted();
+        if (!selected.has(asset.id) || !VIDEO.has(asset.ext) || !this.createThumbnail) continue;
+        if (asset.thumbnail && asset.codec && asset.width > 0 && asset.height > 0) continue;
+        try {
+          await this._checkManagedParent(asset.filename);
+          const relative = `thumbnails/${asset.id}.jpg`;
+          await this._checkManagedParent(relative);
+          const destination = path.join(this.root, relative);
+          const metadata = await this.createThumbnail(path.join(this.root, asset.filename), destination, { signal });
+          await fs.access(destination);
+          Object.assign(asset, mediaMetadata(metadata), { thumbnail: relative });
+          updated++;
+        } catch (error) {
+          signal?.throwIfAborted();
+          errors.push({ id: asset.id, message: error.message });
+        }
+      }
+      if (updated) await this._persist(draft);
+      return { snapshot: this.snapshot(), updated, errors };
+    });
   }
 
   exportAssets(ids, destDir) {

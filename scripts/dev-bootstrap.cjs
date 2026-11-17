@@ -6,8 +6,9 @@ const { app, dialog } = require('electron');
 const root = path.resolve(__dirname, '..');
 const smoke = process.env.SHITU_RECOVERY_SMOKE === '1';
 const updateSmoke = process.env.SHITU_UPDATE_SMOKE === '1';
-if (smoke && updateSmoke) throw new Error('Choose one smoke test mode at a time.');
-const testing = smoke || updateSmoke;
+const videoSmoke = process.env.SHITU_VIDEO_SMOKE === '1';
+if ([smoke, updateSmoke, videoSmoke].filter(Boolean).length > 1) throw new Error('Choose one smoke test mode at a time.');
+const testing = smoke || updateSmoke || videoSmoke;
 const base = testing
   ? path.resolve(process.env.SHITU_SMOKE_DIRECTORY)
   : path.join(root, '.recovery', 'development');
@@ -18,6 +19,14 @@ if (updateSmoke) {
   const marker = JSON.parse(fs.readFileSync(path.join(base, 'update-smoke-fixture.json'), 'utf8'));
   if (!process.env.SHITU_UPDATE_SMOKE_TOKEN || marker.token !== process.env.SHITU_UPDATE_SMOKE_TOKEN)
     throw new Error('Update smoke test marker does not match.');
+}
+if (videoSmoke) {
+  const relative = path.relative(path.join(root, '.recovery', 'tests'), base);
+  if (!relative || relative.startsWith('..') || path.isAbsolute(relative) || fs.lstatSync(base).isSymbolicLink())
+    throw new Error('Video smoke directory must be a real child of .recovery/tests.');
+  const marker = JSON.parse(fs.readFileSync(path.join(base, 'video-smoke-fixture.json'), 'utf8'));
+  if (!process.env.SHITU_VIDEO_SMOKE_TOKEN || marker.token !== process.env.SHITU_VIDEO_SMOKE_TOKEN)
+    throw new Error('Video smoke test marker does not match.');
 }
 for (const name of ['profile', 'sessions', 'crashes', 'plugins']) {
   fs.mkdirSync(path.join(base, name), { recursive: true });
@@ -86,11 +95,15 @@ if (smoke) {
             pluginsAvailable: Boolean(plugins), userInterface: true };
         })()`);
         if (failures.length) throw new Error(failures.join('\n'));
-        const screenshot = await window.webContents.capturePage();
-        fs.writeFileSync(path.join(base, 'screenshot.png'), screenshot.toPNG());
+        let screenshotCaptured = false;
+        try {
+          const screenshot = await window.webContents.capturePage();
+          fs.writeFileSync(path.join(base, 'screenshot.png'), screenshot.toPNG());
+          screenshotCaptured = true;
+        } catch {}
         fs.writeFileSync(path.join(base, 'result.json'), JSON.stringify({
           ok: true, electron: process.versions.electron, node: process.versions.node,
-          ...result, userData: app.getPath('userData'), library: process.env.SHITU_LIBRARY
+          ...result, screenshotCaptured, userData: app.getPath('userData'), library: process.env.SHITU_LIBRARY
         }, null, 2) + '\n');
         window.destroy();
         app.quit();
@@ -111,6 +124,7 @@ if (smoke) {
 }
 
 if (updateSmoke) configureUpdateSmoke();
+if (videoSmoke) require('./video-smoke-bootstrap.cjs')({ root, base });
 
 function configureUpdateSmoke() {
   // This branch only runs inside an explicitly marked, isolated smoke process.
@@ -248,7 +262,10 @@ function configureUpdateSmoke() {
           if (downloaded.status !== 'downloaded' || downloaded.latestVersion !== ${JSON.stringify(fixture.nextVersion)})
             throw new Error('GitHub check and automatic download did not finish');
           document.getElementById('appUpdateButton').click();
-          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          await Promise.race([
+            new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))),
+            new Promise(resolve => setTimeout(resolve, 250))
+          ]);
           const overlay = document.getElementById('appUpdateOverlay');
           const panel = document.getElementById('appUpdateDialog');
           const bounds = panel.getBoundingClientRect();
@@ -268,11 +285,14 @@ function configureUpdateSmoke() {
             headerLabel: document.getElementById('appUpdateLabel').textContent };
         })()`);
         assert.deepEqual(failures, []);
-        // Warm the hidden window's capture surface, then let Chromium commit it.
-        await window.webContents.capturePage(undefined, { stayHidden: false, stayAwake: true });
-        await new Promise(resolve => setTimeout(resolve, 350));
-        const screenshot = await window.webContents.capturePage(undefined, { stayHidden: false, stayAwake: true });
-        fs.writeFileSync(path.join(base, 'screenshot.png'), screenshot.toPNG());
+        // Pixel capture is optional on headless CI; the UI/IPC assertions above are required.
+        try {
+          await window.webContents.capturePage(undefined, { stayHidden: false, stayAwake: true });
+          await new Promise(resolve => setTimeout(resolve, 350));
+          const screenshot = await window.webContents.capturePage(undefined, { stayHidden: false, stayAwake: true });
+          fs.writeFileSync(path.join(base, 'screenshot.png'), screenshot.toPNG());
+          uiResult.screenshotCaptured = true;
+        } catch { uiResult.screenshotCaptured = false; }
         await window.webContents.executeJavaScript(`document.getElementById('appUpdateInstall').click()`);
       } catch (error) {
         try { fs.writeFileSync(path.join(base, 'failure.png'), (await window.webContents.capturePage()).toPNG()); } catch {}

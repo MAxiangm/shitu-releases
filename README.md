@@ -6,7 +6,7 @@ Windows 上的本地图片与视频素材库。支持文件与文件夹导入、
 
 ## 下载安装
 
-从 [最新正式版本](https://github.com/MAxiangm/shitu-releases/releases/latest) 下载 `shitu-版本号-setup.exe`，适用于 Windows 10/11 x64。安装到当前用户目录，无需管理员权限。首次启动新建素材库或选择已有素材库。
+从 [最新正式版本](https://github.com/MAxiangm/shitu-releases/releases/latest) 下载 `shitu-版本号-setup.exe`，适用于 Windows 10 22H2 / Windows 11 x64。安装到当前用户目录，无需管理员权限。首次启动新建素材库或选择已有素材库。
 
 **0.10.8 起支持 GitHub 自动更新。** 启动约 15 秒后检查新版本，此后每 6 小时检查一次；新版在后台下载。顶栏显示进度，下载完成后点击“重启并更新”。应用保存数据、等待旧进程退出，再安装并重新启动。也可以点击顶栏“更新”手动检查。
 
@@ -15,6 +15,16 @@ Windows 上的本地图片与视频素材库。支持文件与文件夹导入、
 ## 浏览器采集
 
 在应用中打开“浏览器采集”找到扩展目录，在 Chrome 的 `chrome://extensions` 开启开发者模式并加载该目录。扩展自动连接本机拾图。支持图片和可直接下载的视频，不处理受保护或分段视频流。
+
+## 视频格式与预览
+
+0.10.9 加入本地 FFmpeg 视频解码。支持导入 DXV/DXV3（常见为 MOV 容器）、MP4、MOV、AVI、MKV、WebM、WMV、ASF、MPEG、MTS/M2TS、TS、VOB、FLV、MXF、3GP、RM/RMVB、DV 等视频文件。支持的具体视频编码取决于内置解码器，不处理 DRM 加密内容。
+
+视频导入后生成 JPEG 缩略图，并读取尺寸、时长和视频编码。播放器可以直接播放的常规 MP4/WebM 会使用原文件；DXV、ProRes 等需要兼容解码的内容会在首次预览时生成本地 WebM 缓存（最长边约 1080p，VP9/Opus）。带透明通道且可解码的视频保留预览透明度。生成期间可以切换或关闭预览，过期任务会取消。
+
+**原视频不转码覆盖。** 导出和拖出仍使用原始文件；兼容预览保存在用户配置目录的 `video-previews` 中，不上传视频。解码组件随安装包提供，无需另装播放器。首次预览大视频需要一定处理时间。
+
+组件及许可证见 [视频运行时说明](docs/VIDEO_RUNTIME_LICENSE.md)。
 
 ## 本地开发
 
@@ -35,9 +45,13 @@ node scripts/start.cjs
 .\开发工具.cmd test
 .\开发工具.cmd smoke
 .\开发工具.cmd smoke-update
+.\开发工具.cmd video-fixtures
+.\开发工具.cmd smoke-video
 ```
 
 `smoke-update` 使用封闭的模拟 GitHub 响应与安装器启动记录，覆盖版本检查、下载校验、界面、IPC、数据保存和退出流程；不访问网络，也不执行安装器。
+
+`video-fixtures` 从 FFmpeg FATE 下载并校验 6 个小型 DXV/DXV3 测试样例；`smoke-video` 实际验证解码、缩略图、兼容预览和切换视频。测试样例不加入发布安装包。
 
 修改 `src/` 后重启开发实例即可。`src/main.cjs` 是主进程入口，界面位于 `src/renderer.js`、`src/index.html` 和 `src/styles.css`；浏览器扩展位于 `extension/`。
 
@@ -64,6 +78,7 @@ node scripts/start.cjs
 | `scripts/` | 启动、测试辅助、构建与发布脚本 |
 | `tests/` | 素材库、更新器与发布清单测试 |
 | `build-resources.json` | 引导安装包的固定版本与校验值 |
+| `video-runtime-manifest.json` | 视频解码组件的固定版本、来源和校验值 |
 | `.github/workflows/` | Windows 发布工作流 |
 
-`.recovery/`、`node_modules/`、`ai-runtime/`、构建结果和个人素材库不进入 Git 历史。第三方组件许可见 `src/AI_THIRD_PARTY_NOTICES.md` 及 `src/ai-licenses/`。
+`.recovery/`、`node_modules/`、`ai-runtime/`、`video-runtime/`、构建结果和个人素材库不进入 Git 历史。第三方组件许可见 `src/AI_THIRD_PARTY_NOTICES.md`、`src/ai-licenses/` 及 `docs/VIDEO_RUNTIME_LICENSE.md`。

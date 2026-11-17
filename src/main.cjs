@@ -10,6 +10,9 @@ const { assetMenuTemplate } = require('./asset-menu.cjs');
 const sharp = require('sharp');
 const { createImagePlugins } = require('./image-plugins.cjs');
 const { createAppUpdater } = require('./app-updater.cjs');
+const { createVideoEngine } = require('./video-engine.cjs');
+const { VIDEO, SUPPORTED } = require('./media-formats.cjs');
+const crypto = require('node:crypto');
 const { spawn } = require('node:child_process');
 const updateConfig = require('../update-config.json');
 
@@ -28,6 +31,9 @@ let libraryManager;
 let switchingLibrary=false;
 let draggingAssets=false;
 let imagePlugins;
+let videoEngine;
+const videoPreviews = new Map();
+const videoRequests = new Set();
 let appUpdater;
 let updateTimer;
 let updateInterval;
@@ -48,6 +54,35 @@ function librarySnapshot() {
   const status=libraryManager.status();
   return {root:null,assets:[],folders:[],tags:[],stats:{total:0,active:0,trashed:0,untagged:0,unfiled:0,bytes:0},needsLibrary:true,libraryError:status.error,legacyRoot:status.legacyRoot};
 }
+
+async function prepareVideo(id, expectedRoot) {
+  const current = requireLibrary();
+  if (current.root !== expectedRoot) throw new Error('素材库已切换，请重新选择视频');
+  let asset = current.snapshot().assets.find(item => item.id === id);
+  if (!asset || asset.mediaType !== 'video') throw new Error('请选择有效的视频素材');
+  const source = current.getAssetPath(id, 'original');
+  // A single viewer is active; switching clips should stop its previous conversion.
+  for (const previous of videoRequests) previous.abort();
+  const controller = new AbortController();
+  videoRequests.add(controller);
+  try {
+    if (!asset.thumbnail || !asset.codec) {
+      const result = await current.refreshVideoMetadata([id], { signal: controller.signal });
+      if (result.updated) {
+        asset = result.snapshot.assets.find(item => item.id === id);
+        if (library === current) sendActionEvent('library-changed');
+      }
+    }
+    controller.signal.throwIfAborted();
+    const result = await videoEngine.preview(source, { key: asset.hash, signal: controller.signal });
+    controller.signal.throwIfAborted();
+    if (library !== current || current.getAssetPath(id, 'original') !== source) throw new Error('素材库已切换，请重新选择视频');
+    const key = crypto.createHash('sha256').update(`${current.root}\0${id}\0${asset.hash}`).digest('hex');
+    videoPreviews.set(key, { id, root: current.root, source, path: result.path });
+    return { url: `shitu://asset/${encodeURIComponent(id)}?kind=preview&key=${key}`, width: result.width,
+      height: result.height, duration: result.duration, codec: result.sourceCodec || asset.codec || result.codec, mimeType: result.mimeType };
+  } finally { videoRequests.delete(controller); }
+}
 async function switchLibrary(mode) {
   if(switchingLibrary || importing || draggingAssets || imagePlugins?.busy() || collector?.activeCount())throw new Error('请等待当前导入、采集、图片处理或拖放完成后再切换素材库');
   if(mode==='migrate')requireLibrary();
@@ -63,6 +98,8 @@ async function switchLibrary(mode) {
     if(result.canceled)return {cancelled:true,snapshot:librarySnapshot()};
     selected=result.filePaths[0];
   }
+    for (const controller of videoRequests) controller.abort();
+    videoPreviews.clear();
     library=mode==='create'?await libraryManager.create(selected):mode==='migrate'?await libraryManager.migrate(selected):await libraryManager.open(selected);
     const snapshot=librarySnapshot();
     mainWindow.webContents.send('shitu:library-changed');
@@ -70,7 +107,8 @@ async function switchLibrary(mode) {
   } finally {switchingLibrary=false;}
 }
 
-async function createThumbnail(source, destination) {
+async function createThumbnail(source, destination, options) {
+  if (VIDEO.has(path.extname(source).slice(1).toLowerCase())) return videoEngine.thumbnail(source, destination, options);
   try {
     const metadata = await sharp(source, { limitInputPixels: 80_000_000 }).metadata();
     const oriented = metadata.autoOrient || metadata;
@@ -96,7 +134,7 @@ function checkedHandler(channel, handler) {
   ipcMain.handle(`shitu:${channel}`, async (event, ...args) => {
     assertTrustedSender(event);
     if (installingUpdate && channel !== 'update-state') throw new Error('正在安装更新，请稍候');
-    if (channel.startsWith('update-')) return handler(...args);
+    if (channel.startsWith('update-') || channel === 'prepare-video') return handler(...args);
     activeOperations++;
     try { return await handler(...args); }
     finally { activeOperations--; }
@@ -123,7 +161,7 @@ async function installDownloadedUpdate({ filePath }) {
       child.once('error', reject);
       child.once('spawn', () => { child.unref(); resolve(); });
     });
-    await Promise.allSettled([imagePlugins?.shutdown(), collector?.close()]);
+    await Promise.allSettled([imagePlugins?.shutdown(), collector?.close(), videoEngine?.shutdown()]);
     setTimeout(() => { mayClose = true; app.quit(); }, 150);
   } catch (error) {
     installingUpdate = false;
@@ -209,6 +247,7 @@ async function importPaths(paths, folderId = null) {
 }
 
 function bindHandlers() {
+  checkedHandler('prepare-video', prepareVideo);
   checkedHandler('update-state', () => appUpdater.state());
   checkedHandler('update-check', () => checkForApplicationUpdate());
   checkedHandler('update-download', () => appUpdater.download());
@@ -263,7 +302,7 @@ function bindHandlers() {
   });
   checkedHandler('import-files', async folderId => {
     requireLibrary();
-    const result = await dialog.showOpenDialog(mainWindow, { title: '导入图片或视频', properties: ['openFile', 'multiSelections'], filters: [{ name: '图片和视频', extensions: ['jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp', 'tif', 'tiff', 'svg', 'avif', 'mp4', 'webm', 'm4v', 'mov', 'ogv'] }] });
+    const result = await dialog.showOpenDialog(mainWindow, { title: '导入图片或视频', properties: ['openFile', 'multiSelections'], filters: [{ name: '图片和视频', extensions: [...SUPPORTED] }] });
     return result.canceled ? { snapshot: library.snapshot(), cancelled: true } : importPaths(result.filePaths, folderId);
   });
   checkedHandler('import-folder', async folderId => {
@@ -353,6 +392,7 @@ if (!app.requestSingleInstanceLock()) app.quit();
 else {
   app.on('second-instance', () => { if (mainWindow) { if (mainWindow.isMinimized()) mainWindow.restore(); mainWindow.focus(); } });
   app.whenReady().then(async () => {
+    videoEngine = createVideoEngine({ runtimeDir: path.join(__dirname, '..', 'video-runtime'), cacheDir: path.join(app.getPath('userData'), 'video-previews') });
     libraryManager=new LibraryManager({configPath:path.join(app.getPath('userData'),'library-location.json'),legacyRoot,createThumbnail,overrideRoot});
     await libraryManager.init();
     library=libraryManager.current();
@@ -378,6 +418,12 @@ else {
         const id = decodeURIComponent(url.pathname.slice(1));
         const kind = url.searchParams.get('kind') === 'original' ? 'original' : 'thumbnail';
         if(!library)return new Response(null,{status:404});
+        if (url.searchParams.get('kind') === 'preview') {
+          const preview = videoPreviews.get(url.searchParams.get('key'));
+          if (!preview || preview.id !== id || preview.root !== library.root ||
+              library.getAssetPath(id, 'original') !== preview.source) return new Response(null, { status: 404 });
+          return mediaResponse(preview.path, request);
+        }
         if(url.searchParams.get('kind') === 'editing') {
           const source = library.getAssetPath(id, 'original');
           if(!source)return new Response(null,{status:404});
@@ -401,6 +447,7 @@ else {
   app.on('window-all-closed', () => app.quit());
   app.on('will-quit', () => {
     clearTimeout(updateTimer); clearInterval(updateInterval); appUpdater?.dispose();
-    imagePlugins?.shutdown().catch(()=>{}); collector?.close().catch(()=>{});
+    for (const controller of videoRequests) controller.abort();
+    imagePlugins?.shutdown().catch(()=>{}); collector?.close().catch(()=>{}); videoEngine?.shutdown().catch(()=>{});
   });
 }
