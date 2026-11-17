@@ -1,5 +1,6 @@
 'use strict';
 const FolderTree = require('./folder-tree.js');
+const ColorLabels = require('./color-labels.js');
 
 function assetMenuTemplate(assets, folders, choose) {
   const one = assets.length === 1;
@@ -7,6 +8,9 @@ function assetMenuTemplate(assets, folders, choose) {
   const allTrashed = assets.every(asset => Boolean(asset.trashedAt));
   const anyTrashed = assets.some(asset => Boolean(asset.trashedAt));
   const allFavorite = assets.every(asset => (asset.rating || 0) >= 4);
+  const colorValues = assets.map(asset => ColorLabels.normalize(asset.colorLabel));
+  const commonColor = colorValues.length && colorValues.every(value => value === colorValues[0]) ? colorValues[0] : null;
+  const customColor = commonColor && ColorLabels.get(commonColor)?.custom ? ColorLabels.get(commonColor) : null;
   const item = (id, label, enabled = true) => ({ id, label, enabled, click: () => choose(id) });
   return [
     item('preview', '预览', one),
@@ -31,6 +35,16 @@ function assetMenuTemplate(assets, folders, choose) {
     { type: 'separator' },
     item('rename', '重命名', one && !anyTrashed),
     item('tags', one ? '编辑标签' : '批量添加标签', !anyTrashed),
+    {
+      id: 'color-label', label: '标记颜色', enabled: assets.length > 0,
+      submenu: [
+        { id: 'color-none', label: '清除颜色标记', type: 'checkbox', checked: assets.length > 0 && colorValues.every(value => value === null), click: () => choose('color-label', { colorLabel: null }) },
+        ...ColorLabels.palette.map(color => ({ id: `color-${color.id}`, label: color.name, type: 'checkbox', checked: assets.length > 0 && colorValues.every(value => value === color.id), click: () => choose('color-label', { colorLabel: color.id }) })),
+        ...(customColor ? [{ id: 'color-current-custom', label: customColor.name, type: 'checkbox', checked: true, click: () => choose('color-label', { colorLabel: customColor.id }) }] : []),
+        { type: 'separator' },
+        item('custom-color-label', '自定义颜色…', assets.length > 0)
+      ]
+    },
     {
       id: 'move-folder', label: '移入文件夹', enabled: !anyTrashed,
       submenu: [

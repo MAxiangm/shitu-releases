@@ -4,9 +4,11 @@ const api = window.shitu;
 const $ = (id) => document.getElementById(id);
 const SVG = 'http://www.w3.org/2000/svg';
 const folderTree = window.ShituFolders;
+const colorLabels = window.ShituColorLabels;
 const state = { library: { assets: [], folders: [], tags: [], stats: {}, root: null, needsLibrary: true }, view: 'all', folder: null, tag: null, selected: new Set(), selectionMode: false, anchor: null, search: '', format: 'all', sort: 'newest', limit: 240, previewId: null, details: false, busy: false, libraryChanging: false };
 let modalResolve = null;
 let modalHasParent = false;
+let modalHasColor = false;
 let folderMenuAnchor = null;
 const collapsedFolders = new Set();
 let metadataQueue = Promise.resolve(true);
@@ -51,6 +53,106 @@ function action(label, className, handler, glyph) {
   node.append(document.createTextNode(label));
   if (handler) node.addEventListener('click', handler);
   return node;
+}
+function colorMarker(value, className = '') {
+  const color = colorLabels.get(value);
+  if (!color) return null;
+  const marker = el('span', `color-label-mark ${className}`.trim());
+  marker.dataset.colorLabel = color.id;
+  marker.style.setProperty('--label-color', color.color);
+  marker.title = `颜色标记：${color.name}`;
+  marker.setAttribute('role', 'img');
+  marker.setAttribute('aria-label', marker.title);
+  return marker;
+}
+function colorPicker({ id, value = null, mixed = false, onChange }) {
+  const picker = el('div', 'color-label-picker');
+  picker.id = id;
+  picker.dataset.colorMixed = String(mixed);
+  picker.setAttribute('role', 'group');
+  picker.setAttribute('aria-label', '颜色标记');
+  const colors = el('div', 'color-label-options');
+  const options = [{ id: null, name: '无颜色', color: null }, ...colorLabels.palette];
+  for (const option of options) {
+    const selected = !mixed && (value || null) === option.id;
+    const button = action('', `color-label-swatch${option.id ? '' : ' color-label-clear'}`, () => onChange(option.id), option.id ? null : 'close');
+    button.id = `${id}-${option.id || 'none'}`;
+    button.dataset.colorLabel = option.id || '';
+    button.dataset.colorSelected = String(selected);
+    button.setAttribute('aria-pressed', String(selected));
+    button.setAttribute('aria-label', option.id ? `标记为${option.name}` : '清除颜色标记');
+    button.title = option.id ? option.name : '清除颜色标记';
+    if (option.color) button.style.setProperty('--label-color', option.color);
+    colors.append(button);
+  }
+  colors.addEventListener('keydown', event => {
+    if ([' ', 'Enter'].includes(event.key)) { event.stopPropagation(); return; }
+    if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
+    event.preventDefault(); event.stopPropagation();
+    const buttons = [...colors.querySelectorAll('button')], index = buttons.indexOf(document.activeElement);
+    const next = event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1 :
+      (index + (['ArrowRight', 'ArrowDown'].includes(event.key) ? 1 : -1) + buttons.length) % buttons.length;
+    buttons[next]?.focus();
+  });
+  const chosen = colorLabels.get(value);
+  const custom = action('', 'color-label-custom', () => run(async () => {
+    const selected = await chooseCustomColor(!mixed ? value : null);
+    if (selected !== null) await onChange(selected);
+  }));
+  custom.id = `${id}-custom`;
+  custom.dataset.colorAction = 'custom';
+  custom.dataset.colorSelected = String(!mixed && Boolean(chosen?.custom));
+  custom.setAttribute('aria-haspopup', 'dialog');
+  custom.setAttribute('aria-pressed', String(!mixed && Boolean(chosen?.custom)));
+  custom.setAttribute('aria-label', '自定义颜色');
+  if (!mixed && chosen?.custom) {
+    custom.append(colorMarker(chosen.id), document.createTextNode(chosen.name));
+  } else custom.append(document.createTextNode('自定义颜色…'));
+  custom.addEventListener('keydown', event => {
+    if ([' ', 'Enter'].includes(event.key)) event.stopPropagation();
+  });
+  const caption = el('span', 'color-label-caption', mixed ? '多种颜色' : chosen?.custom ? '点击色号调整颜色' : chosen?.name || '无颜色');
+  caption.setAttribute('aria-live', 'polite');
+  picker.append(colors, custom, caption);
+  return picker;
+}
+function chooseCustomColor(value) {
+  const initial = colorLabels.get(value)?.color || '#789fe8';
+  return modal({ title: '自定义标记颜色', description: '点击色块选择颜色，或输入 #RGB / #RRGGBB 色号。', input: false, confirm: '应用颜色', colorValue: initial });
+}
+function readCustomColor(showError = false) {
+  const text = $('modalColorHex').value.trim();
+  const valid = /^#(?:[a-f0-9]{3}|[a-f0-9]{6})$/i.test(text);
+  if (!valid) {
+    if (showError) {
+      $('modalColorHex').setAttribute('aria-invalid', 'true');
+      $('modalColorError').textContent = '请输入有效的颜色，例如 #5AF 或 #55AAFF。';
+      $('modalColorError').classList.remove('hidden');
+    }
+    return null;
+  }
+  const normalized = colorLabels.normalize(text);
+  $('modalColorPicker').value = normalized;
+  $('modalColorHex').removeAttribute('aria-invalid');
+  $('modalColorError').classList.add('hidden');
+  return normalized;
+}
+function saveAssetColor(ids, value, root = state.library.root) {
+  const colorLabel = colorLabels.normalize(value);
+  return saveMetadata(() => {
+    if (state.library.root !== root || state.libraryChanging) throw new Error('素材库已切换，请重新选择素材');
+    return api.updateAssets(ids, { colorLabel });
+  });
+}
+async function saveFolderColor(id, value, root) {
+  closeFolderMenu();
+  const colorLabel = colorLabels.normalize(value);
+  if (!await waitForMetadata() || state.library.root !== root || state.libraryChanging) return;
+  const saved = await saveMetadata(() => {
+    if (state.library.root !== root || state.libraryChanging) throw new Error('素材库已切换，请重新选择文件夹');
+    return api.setFolderColor(id, colorLabel);
+  });
+  if (saved) toast(colorLabel ? `文件夹已标记为${colorLabels.get(colorLabel).name}` : '已清除文件夹颜色标记');
 }
 function size(bytes) {
   if (!Number.isFinite(Number(bytes))) return '—';
@@ -409,6 +511,7 @@ function renderNavigation() {
     collapsedDepth = null;
     const row = el('div', 'folder-row');
     row.dataset.folderId = folder.id;
+    if (folder.colorLabel) row.dataset.colorLabel = folder.colorLabel;
     row.dataset.depth = String(folder.depth);
     row.style.setProperty('--folder-depth', String(folder.depth));
     const children = parents.has(folder.id), expanded = !collapsedFolders.has(folder.id);
@@ -426,8 +529,16 @@ function renderNavigation() {
     } else row.append(el('span', 'folder-toggle-spacer'));
     const item = action('', `nav-item${state.folder === folder.id ? ' active' : ''}`, () => changeView('all', folder.id), 'folder');
     item.dataset.folderId = folder.id;
-    item.append(el('span', 'nav-name', folder.name), el('span', 'nav-count', String(counts.get(folder.id) || 0)));
-    item.title = `${folder.path} · ${counts.get(folder.id) || 0} 个素材（含子文件夹）`;
+    const folderColor = colorLabels.get(folder.colorLabel);
+    if (folderColor) {
+      item.querySelector('.icon').style.color = folderColor.color;
+      item.querySelector('.icon').style.fill = `${folderColor.color}22`;
+    }
+    item.append(el('span', 'nav-name', folder.name));
+    const folderMark = colorMarker(folder.colorLabel, 'folder-color-mark');
+    if (folderMark) item.append(folderMark);
+    item.append(el('span', 'nav-count', String(counts.get(folder.id) || 0)));
+    item.title = `${folder.path} · ${counts.get(folder.id) || 0} 个素材（含子文件夹）${folderColor ? ` · ${folderColor.name}标记` : ''}`;
     if (state.folder === folder.id) item.setAttribute('aria-current', 'page');
     item.addEventListener('keydown', event => {
       if (event.key === 'ArrowRight' && children && collapsedFolders.has(folder.id) || event.key === 'ArrowLeft' && children && !collapsedFolders.has(folder.id)) {
@@ -525,7 +636,9 @@ function renderGallery(list) {
     card.setAttribute('role', 'listitem');
     card.tabIndex = 0;
     card.dataset.assetId = asset.id;
-    card.setAttribute('aria-label', asset.name);
+    const assetColor = colorLabels.get(asset.colorLabel);
+    card.setAttribute('aria-label', `${asset.name}${assetColor ? `，颜色标记：${assetColor.name}` : ''}`);
+    if (assetColor) card.dataset.colorLabel = assetColor.id;
     card.setAttribute('aria-selected', String(state.selected.has(asset.id)));
     card.draggable = !state.selectionMode && !asset.trashedAt;
     card.dataset.trashed = String(Boolean(asset.trashedAt));
@@ -542,11 +655,15 @@ function renderGallery(list) {
     const info = el('div', 'asset-card-info');
     const name = el('div', 'asset-name', asset.name);
     name.title = asset.name;
+    const nameRow = el('div', 'asset-name-row');
+    const mark = colorMarker(asset.colorLabel, 'asset-color-mark');
+    if (mark) nameRow.append(mark);
+    nameRow.append(name);
     const subline = el('div', 'asset-subline');
     subline.append(el('span', '', asset.width && asset.height ? dimensions(asset) : isVideo(asset) ? '视频素材' : '尺寸未知'));
     if (asset.rating) subline.append(el('span', 'asset-stars', '★'.repeat(asset.rating)));
     else subline.append(el('span', '', size(asset.size)));
-    info.append(name, subline);
+    info.append(nameRow, subline);
     if (asset.tags?.length) {
       const tags = el('div', 'asset-tags');
       asset.tags.slice(0, 3).forEach((tag) => tags.append(el('span', '', tag)));
@@ -642,6 +759,14 @@ async function showAssetContextMenu(id) {
       state.selected = new Set(ids); toggleDetails(true); $('detailTags').focus(); break;
     case 'folder':
       await saveMetadata(() => { checkRoot(); return api.updateAssets(ids, { folderId: result.folderId || null }); }); break;
+    case 'color-label':
+      await saveAssetColor(ids, result.colorLabel, root); break;
+    case 'custom-color-label': {
+      const shared = assets.every(asset => (asset.colorLabel || null) === (first.colorLabel || null));
+      const selected = await chooseCustomColor(shared ? first.colorLabel : null);
+      if (selected !== null) await saveAssetColor(ids, selected, root);
+      break;
+    }
     case 'favorite':
     case 'unfavorite':
       await saveMetadata(async () => {
@@ -861,6 +986,12 @@ function renderDetails() {
   folder.value = mixed ? '__mixed__' : asset.folderId || '';
   folder.addEventListener('change', () => updateSelected({ folderId: folder.value || null }));
   box.append(field('所在文件夹', folder));
+  const colorValues = assets.map(item => colorLabels.get(item.colorLabel)?.id || null);
+  const mixedColors = colorValues.some(value => value !== colorValues[0]);
+  const colorRoot = state.library.root, colorAssetIds = assets.map(item => item.id);
+  const picker = colorPicker({ id: 'detailColorLabels', value: colorValues[0], mixed: mixedColors,
+    onChange: value => saveAssetColor(colorAssetIds, value, colorRoot) });
+  box.append(field('颜色标记', picker));
   const tagsContainer = el('div');
   const tags = el('div', 'detail-tags');
   const commonTags = (asset.tags || []).filter((tag) => assets.every((a) => (a.tags || []).includes(tag)));
@@ -1037,7 +1168,7 @@ async function changeLibrary(kind) {
     for (const id of ['setupOperationStatus', 'managerOperationStatus']) $(id).classList.add('hidden');
   }
 }
-function modal({ title, description = '', value = '', input = true, confirm = '确定', cancel = '取消', destructive = false, parentOptions = null, parentId = null }) {
+function modal({ title, description = '', value = '', input = true, confirm = '确定', cancel = '取消', destructive = false, parentOptions = null, parentId = null, colorValue }) {
   closeFolderMenu();
   if (modalResolve) modalResolve(null);
   $('modalTitle').textContent = title;
@@ -1045,6 +1176,15 @@ function modal({ title, description = '', value = '', input = true, confirm = '�
   $('modalInput').value = value;
   $('modalInput').classList.toggle('hidden', !input);
   modalHasParent = Array.isArray(parentOptions);
+  modalHasColor = colorValue !== undefined;
+  $('modalColorField').classList.toggle('hidden', !modalHasColor);
+  $('modalColorError').classList.add('hidden');
+  $('modalColorHex').removeAttribute('aria-invalid');
+  if (modalHasColor) {
+    const initial = colorLabels.get(colorValue)?.color || '#789fe8';
+    $('modalColorPicker').value = initial;
+    $('modalColorHex').value = initial.toUpperCase();
+  }
   $('modalParentField').classList.toggle('hidden', !modalHasParent);
   $('modalParent').replaceChildren();
   if (modalHasParent) {
@@ -1056,7 +1196,7 @@ function modal({ title, description = '', value = '', input = true, confirm = '�
   $('modalCancel').textContent = cancel;
   $('modalOverlay').querySelector('.modal-icon use').setAttribute('href', destructive ? '#i-trash' : '#i-folder');
   $('modalOverlay').classList.remove('hidden');
-  setTimeout(() => { if (input) { $('modalInput').focus(); $('modalInput').select(); } else if (modalHasParent) $('modalParent').focus(); else $(destructive ? 'modalCancel' : 'modalConfirm').focus(); }, 30);
+  setTimeout(() => { if (modalHasColor) { $('modalColorHex').focus(); $('modalColorHex').select(); } else if (input) { $('modalInput').focus(); $('modalInput').select(); } else if (modalHasParent) $('modalParent').focus(); else $(destructive ? 'modalCancel' : 'modalConfirm').focus(); }, 30);
   return new Promise((resolve) => { modalResolve = resolve; });
 }
 function resolveModal(value) {
@@ -1093,6 +1233,10 @@ function showFolderMenu(folder, anchor, point) {
     }, glyph);
     button.dataset.folderAction = kind; button.setAttribute('role', 'menuitem'); return button;
   }));
+  const colorSection = el('div', 'folder-color-section');
+  colorSection.append(el('span', 'folder-color-title', '标记颜色'), colorPicker({ id: 'folderColorLabels', value: folder.colorLabel,
+    onChange: value => saveFolderColor(folder.id, value, root) }));
+  menu.append(colorSection);
   menu.classList.remove('hidden');
   const bounds = anchor.getBoundingClientRect();
   menu.style.left = `${Math.max(8, Math.min(point?.x ?? bounds.right - menu.offsetWidth, window.innerWidth - menu.offsetWidth - 8))}px`;
@@ -1600,9 +1744,25 @@ $('managerCloseLibrary').addEventListener('click', closeLibraryManager);
 $('libraryManagerOverlay').addEventListener('click', (event) => { if (event.target === $('libraryManagerOverlay')) closeLibraryManager(); });
 $('modalForm').addEventListener('submit', (e) => {
   e.preventDefault();
+  if (modalHasColor) {
+    const value = readCustomColor(true);
+    if (value === null) { $('modalColorHex').focus(); return; }
+    resolveModal(value);
+    return;
+  }
   const input = !$('modalInput').classList.contains('hidden'), name = $('modalInput').value.trim();
   if (input && !name) return;
   resolveModal(modalHasParent ? { name, parentId: $('modalParent').value || null } : input ? name : true);
+});
+const syncCustomColorPicker = () => {
+  $('modalColorHex').value = $('modalColorPicker').value.toUpperCase();
+  readCustomColor();
+};
+for (const event of ['input', 'change']) $('modalColorPicker').addEventListener(event, syncCustomColorPicker);
+$('modalColorHex').addEventListener('input', () => readCustomColor());
+$('modalColorHex').addEventListener('change', () => {
+  const value = readCustomColor(true);
+  if (value !== null) $('modalColorHex').value = value.toUpperCase();
 });
 $('modalCancel').addEventListener('click', () => resolveModal(null));
 $('modalOverlay').addEventListener('click', (e) => { if (e.target === $('modalOverlay')) resolveModal(null); });

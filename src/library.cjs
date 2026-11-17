@@ -7,6 +7,7 @@ const { VIDEO, MODEL, MODEL_NATIVE, PROJECT, SUPPORTED } = require('./media-form
 const { collectModelBundle, copyModelBundle, validateModelBundle, isSafeBundlePath } = require('./model-bundle.cjs');
 const { validateProjectBundle, copyProjectBundle } = require('./project-bundle.cjs');
 const FolderTree = require('./folder-tree.js');
+const ColorLabels = require('./color-labels.js');
 const mediaType = ext => PROJECT.has(ext) ? 'project' : MODEL.has(ext) ? 'model' : VIDEO.has(ext) ? 'video' : 'image';
 const bundleRelative = (id, ext) => `originals/${id}.${PROJECT.has(ext) ? 'project' : 'model'}`;
 const isBundle = ext => MODEL.has(ext) || PROJECT.has(ext);
@@ -192,9 +193,11 @@ class Library {
   _validate(data) {
     if (!data || ![1, 2].includes(data.version) || !Array.isArray(data.assets) || !Array.isArray(data.folders)) throw new Error('索引格式无效或版本不受支持');
     FolderTree.validate(data.folders);
+    for (const folder of data.folders) ColorLabels.normalize(folder.colorLabel);
     const folderIds = new Set(data.folders.map(folder => folder.id));
     const assetIds = new Set();
     for (const asset of data.assets) {
+      if (asset) ColorLabels.normalize(asset.colorLabel);
       if (!asset || typeof asset.id !== 'string' || !/^[a-zA-Z0-9-]+$/.test(asset.id) || assetIds.has(asset.id) || typeof asset.name !== 'string' || !SUPPORTED.has(asset.ext) || !Array.isArray(asset.tags) || asset.tags.some(tag => typeof tag !== 'string') || typeof asset.hash !== 'string' || !/^[a-f0-9]{64}$/.test(asset.hash) || !Number.isFinite(asset.size) || asset.size < 0 || !Number.isFinite(asset.rating) || asset.rating < 0 || asset.rating > 5 || typeof asset.notes !== 'string' || (asset.folderId !== null && !folderIds.has(asset.folderId))) throw new Error('素材索引无效');
       if (PROJECT.has(asset.ext)) {
         validateProjectBundle(asset.projectBundle);
@@ -250,14 +253,14 @@ class Library {
 
   snapshot() {
     this._ready();
-    const assets = clone(this.data.assets).map(asset => ({ ...asset, mediaType: mediaType(asset.ext) }));
+    const assets = clone(this.data.assets).map(asset => ({ ...asset, mediaType: mediaType(asset.ext), colorLabel: ColorLabels.normalize(asset.colorLabel) }));
     const active = assets.filter(asset => !asset.trashedAt);
     const tagCounts = new Map();
     for (const asset of active) for (const tag of asset.tags) tagCounts.set(tag, (tagCounts.get(tag) || 0) + 1);
     return {
       root: this.root,
       assets,
-      folders: clone(this.data.folders).map(folder => ({ ...folder, parentId: FolderTree.parentId(folder) })),
+      folders: clone(this.data.folders).map(folder => ({ ...folder, parentId: FolderTree.parentId(folder), colorLabel: ColorLabels.normalize(folder.colorLabel) })),
       tags: [...tagCounts].map(([name, count]) => ({ name, count })).sort((a, b) => a.name.localeCompare(b.name, 'zh-CN')),
       stats: { total: assets.length, active: active.length, trashed: assets.length - active.length, untagged: active.filter(a => !a.tags.length).length, unfiled: active.filter(a => !a.folderId).length, bytes: assets.reduce((sum, a) => sum + a.size, 0) }
     };
@@ -501,7 +504,7 @@ class Library {
       const selected = this._ids(ids);
       if (!patch || typeof patch !== 'object' || Array.isArray(patch)) throw new Error('修改内容无效');
       const clean = {};
-      for (const key of Object.keys(patch)) if (!['name', 'tags', 'folderId', 'rating', 'notes', 'sourceUrl', 'pageUrl'].includes(key)) throw new Error(`不支持修改 ${key}`);
+      for (const key of Object.keys(patch)) if (!['name', 'tags', 'folderId', 'rating', 'notes', 'sourceUrl', 'pageUrl', 'colorLabel'].includes(key)) throw new Error(`不支持修改 ${key}`);
       if ('name' in patch) clean.name = text(patch.name, '名称', 240);
       if ('sourceUrl' in patch) clean.sourceUrl = webUrl(patch.sourceUrl, '素材链接');
       if ('pageUrl' in patch) clean.pageUrl = webUrl(patch.pageUrl, '来源网页');
@@ -511,6 +514,7 @@ class Library {
       }
       if ('folderId' in patch) { this._folder(patch.folderId); clean.folderId = patch.folderId; }
       if ('rating' in patch) { if (!Number.isInteger(patch.rating) || patch.rating < 0 || patch.rating > 5) throw new Error('评分必须是 0 至 5 的整数'); clean.rating = patch.rating; }
+      if ('colorLabel' in patch) clean.colorLabel = ColorLabels.normalize(patch.colorLabel);
       if ('notes' in patch) { if (typeof patch.notes !== 'string' || patch.notes.length > 20000) throw new Error('备注格式无效或超过 20000 字符'); clean.notes = patch.notes; }
       const draft = clone(this.data);
       for (const asset of draft.assets) if (selected.has(asset.id)) Object.assign(asset, clean, { updatedAt: now() });
@@ -672,6 +676,18 @@ class Library {
       if (this.data.folders.some(folder => folder.id !== id && FolderTree.parentId(folder) === parentId && folder.name === name)) throw new Error('同级文件夹中已存在此名称');
       const draft = clone(this.data);
       draft.folders.find(folder => folder.id === id).name = name;
+      await this._persist(draft);
+      return this.snapshot();
+    });
+  }
+
+  setFolderColor(id, colorLabel) {
+    return this._mutate(async () => {
+      this._folder(id);
+      if (id === null) throw new Error('分类不存在');
+      colorLabel = ColorLabels.normalize(colorLabel);
+      const draft = clone(this.data);
+      Object.assign(draft.folders.find(folder => folder.id === id), { colorLabel, updatedAt: now() });
       await this._persist(draft);
       return this.snapshot();
     });

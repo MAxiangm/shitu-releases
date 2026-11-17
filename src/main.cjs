@@ -372,6 +372,7 @@ function bindHandlers() {
   checkedHandler('create-folder', (name, parentId = null) => requireLibrary().createFolder(name, parentId));
   checkedHandler('move-folder', (id, parentId = null) => requireLibrary().moveFolder(id, parentId));
   checkedHandler('rename-folder', (id, name) => requireLibrary().renameFolder(id, name));
+  checkedHandler('set-folder-color', (id, colorLabel) => requireLibrary().setFolderColor(id, colorLabel));
   checkedHandler('delete-folder', id => requireLibrary().deleteFolder(id));
   checkedHandler('export-assets', async ids => {
     requireLibrary();

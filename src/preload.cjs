@@ -49,6 +49,7 @@ contextBridge.exposeInMainWorld('shitu', Object.freeze({
   createFolder: (name, parentId = null) => call('create-folder', name, parentId),
   moveFolder: (id, parentId = null) => call('move-folder', id, parentId),
   renameFolder: (id, name) => call('rename-folder', id, name),
+  setFolderColor: (id, colorLabel) => call('set-folder-color', id, colorLabel),
   deleteFolder: id => call('delete-folder', id),
   exportAssets: ids => call('export-assets', ids),
   backup: () => call('backup'),
