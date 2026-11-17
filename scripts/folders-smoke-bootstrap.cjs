@@ -28,7 +28,7 @@ module.exports = function configureFoldersSmoke({ root, base }) {
     requests.push(details.url); callback({ cancel: true });
   }));
   app.on('browser-window-created', (_event, window) => {
-    window.show = () => {}; window.setSkipTaskbar(true); window.webContents.setBackgroundThrottling(false);
+    window.show = () => {}; window.setSkipTaskbar(true); window.setOpacity(0); window.showInactive(); window.webContents.setBackgroundThrottling(false);
     window.webContents.on('render-process-gone', (_event, details) => failures.push('Renderer exited: ' + details.reason));
     window.webContents.once('did-finish-load', async () => {
       if (!window.webContents.getURL().endsWith('/src/index.html')) return;
@@ -99,7 +99,7 @@ module.exports = function configureFoldersSmoke({ root, base }) {
             check(imported.snapshot.assets.find(item => item.id === imported.report.assetIds[0]).folderId === folderIds[index], 'Import selected the wrong folder');
             assetIds.push(imported.report.assetIds[0]); applyLibrary(imported.snapshot, false);
           }
-          selectFolder(rootA); check(filteredAssets().length === 3, 'A parent view did not include direct and nested assets');
+          selectFolder(rootA); check(filteredAssets().length === 1 && filteredAssets()[0].id === assetIds[0], 'A folder view mixed descendants into its direct assets');
           check(document.getElementById('breadcrumbCurrent').textContent.includes('项目 A'), 'Parent breadcrumb missing');
           browser.open = true;
           const count = row(rootA).querySelector('.nav-count'); check(count.textContent === '3', 'Tree count omitted descendant assets');
@@ -107,7 +107,7 @@ module.exports = function configureFoldersSmoke({ root, base }) {
           check(toggle() && toggle().getAttribute('aria-expanded') === 'true', 'Parent expander was not available');
           toggle().click(); check(!row(childA) || row(childA).getClientRects().length === 0, 'Collapsing a parent left child rows visible');
           toggle().click(); check(row(childA) && row(leafA), 'Expanding a parent did not restore nested rows');
-          selectFolder(childA); check(filteredAssets().length === 2, 'Child view did not include its descendant');
+          selectFolder(childA); check(filteredAssets().length === 1 && filteredAssets()[0].id === assetIds[1], 'Child view mixed its descendant into direct assets');
           selectFolder(leafA); check(filteredAssets().length === 1 && filteredAssets()[0].id === assetIds[2], 'Leaf folder view was not exact');
           check(document.getElementById('breadcrumbCurrent').textContent === '项目 A / 参考 / 细节', 'Breadcrumb did not show the complete hierarchy');
           changeView('all', rootA); state.selected = new Set([assetIds[1]]); toggleDetails(true); renderDetails();
@@ -148,7 +148,7 @@ module.exports = function configureFoldersSmoke({ root, base }) {
           changeView('all', rootB); browser.open = true; state.selected = new Set([assetIds[2]]); toggleDetails(true); renderDetails();
           window.__folderNavigationSmoke = { check, wait, rootA, rootB, childB, leafA };
           return { root: state.library.root, rootA, rootB, childB, leafA, assetIds, sameNameChildren: true, threeLevelCreation: true,
-            currentFolderDefault: true, createRootInsideChild: true, parentIncludesDescendants: true, expandableTree: true,
+            currentFolderDefault: true, createRootInsideChild: true, directFolderContents: true, expandableTree: true,
             detailFolderPaths: true, moveAssetIntoChild: true, folderMove: true, cycleRejected: true, subtreeDeletePreservesAssets: true,
             pathBarCreateRoot: true, pathBarCreateChild: true, upAndHistoryButtons: true, clickableAncestorBreadcrumbs: true,
             rootUpDisabled: true, movedBreadcrumbUpdated: true, deletedHistoryPruned: true };
@@ -171,10 +171,143 @@ module.exports = function configureFoldersSmoke({ root, base }) {
         await js(`document.getElementById('createFolderHere').click()`);
         altKey('Up'); await new Promise(resolve => setTimeout(resolve, 100));
         await js(`window.__folderNavigationSmoke.check(state.folder === '${result.childB}', 'Alt+Up navigated behind an open modal'); document.getElementById('modalCancel').click();`);
-        await js(`openPreview('${result.assetIds[2]}')`);
+        await js(`openPreview('${result.assetIds[1]}')`);
         altKey('Up'); await new Promise(resolve => setTimeout(resolve, 100));
         await js(`window.__folderNavigationSmoke.check(state.folder === '${result.childB}', 'Alt+Up navigated behind a media preview'); closePreview(); changeView('all', '${result.leafA}');`);
         result.nativeNavigationKeys = true; result.editableAndModalKeyGuards = true; result.previewKeyGuard = true;
+        const nativeKey = keyCode => {
+          window.webContents.sendInputEvent({ type: 'keyDown', keyCode });
+          if (keyCode === 'Enter') window.webContents.sendInputEvent({ type: 'char', keyCode: '\r' });
+          if (keyCode === 'Space') window.webContents.sendInputEvent({ type: 'char', keyCode: ' ' });
+          window.webContents.sendInputEvent({ type: 'keyUp', keyCode });
+        };
+        const nativeClick = async selector => {
+          const point = await js(`(() => {
+            const node = document.querySelector(${JSON.stringify(selector)});
+            if (!node) throw new Error('Native click target is missing: ' + ${JSON.stringify(selector)});
+            const r = node.getBoundingClientRect(), x = Math.round(r.left + r.width / 2), y = Math.round(r.top + r.height / 2);
+            const hit = document.elementFromPoint(x, y);
+            if (!r.width || !r.height || !hit || !node.contains(hit)) throw new Error('Native click target is covered: ' + ${JSON.stringify(selector)} + ' by ' + (hit?.id || hit?.className));
+            return { x, y };
+          })()`);
+          window.webContents.sendInputEvent({ type: 'mouseMove', ...point });
+          window.webContents.sendInputEvent({ type: 'mouseDown', button: 'left', clickCount: 1, ...point });
+          window.webContents.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 1, ...point });
+          await new Promise(resolve => setTimeout(resolve, 40));
+          return point;
+        };
+        const summary = '.folder-browser > summary';
+        await js(`document.querySelector('.folder-browser').open = false; document.getElementById('toastStack').replaceChildren();`);
+        await nativeClick(summary);
+        await js(`window.__folderNavigationSmoke.wait(() => document.querySelector('.folder-browser').open, 'Clicking the folder heading did not open the folder list')`);
+        await js(`(() => {
+          const popover = document.querySelector('.folder-browser .browser-popover'), row = document.querySelector('#folderNav .folder-row[data-folder-id="${result.rootB}"]');
+          const r = row.getBoundingClientRect(), hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+          window.__folderNavigationSmoke.check(getComputedStyle(popover).display !== 'none' && r.width > 0 && r.height > 0 && hit && row.contains(hit), 'Opened folder list is hidden or covered by the workspace');
+        })()`);
+        await nativeClick('[data-folder-toggle="' + result.rootB + '"]');
+        await js(`window.__folderNavigationSmoke.check(!document.querySelector('#folderNav .folder-row[data-folder-id="${result.childB}"]'), 'Native collapse left child rows visible')`);
+        await nativeClick('[data-folder-toggle="' + result.rootB + '"]');
+        await js(`window.__folderNavigationSmoke.check(!!document.querySelector('#folderNav .folder-row[data-folder-id="${result.childB}"]'), 'Native expand did not show child rows')`);
+        for (let attempt = 0; attempt < 3 && !result.dropdownScreenshotCaptured; attempt++) {
+          window.webContents.invalidate(); await new Promise(resolve => setTimeout(resolve, 150));
+          try {
+            const screenshot = await window.webContents.capturePage();
+            if (screenshot.isEmpty()) throw new Error('Folder dropdown has no rendered frame');
+            await fs.writeFile(path.join(base, 'folder-dropdown.png'), screenshot.toPNG()); result.dropdownScreenshotCaptured = true;
+          } catch {}
+        }
+        await nativeClick('#folderNav .nav-item[data-folder-id="' + result.childB + '"]');
+        await js(`window.__folderNavigationSmoke.wait(() => state.folder === '${result.childB}' && !document.querySelector('.folder-browser').open, 'Selecting a folder did not navigate and close the dropdown')`);
+        await nativeClick(summary); await nativeClick('#searchInput');
+        await js(`window.__folderNavigationSmoke.check(!document.querySelector('.folder-browser').open, 'Outside click did not close the folder dropdown')`);
+        await js(`document.querySelector('.folder-browser > summary').focus()`);
+        nativeKey('Enter');
+        await js(`window.__folderNavigationSmoke.wait(() => document.querySelector('.folder-browser').open, 'Enter did not open the focused folder heading')`);
+        nativeKey('Escape');
+        await js(`window.__folderNavigationSmoke.wait(() => !document.querySelector('.folder-browser').open, 'Escape did not close the folder dropdown')`);
+        await js(`state.selected = new Set(['${result.assetIds[2]}']); updateSelectionClasses(); document.querySelector('.folder-browser > summary').focus();`);
+        nativeKey('Space');
+        await js(`window.__folderNavigationSmoke.wait(() => document.querySelector('.folder-browser').open && !state.previewId, 'Space on the folder heading opened media or failed to open the folder list')`);
+        await nativeClick(summary);
+        await js(`window.__folderNavigationSmoke.check(!document.querySelector('.folder-browser').open, 'Second native heading click did not close the folder list'); changeView('all', '${result.leafA}');`);
+        result.nativeFolderDropdown = true; result.folderDropdownHitTest = true; result.nativeFolderExpandSelect = true;
+        result.dropdownOutsideAndEscape = true; result.dropdownKeyboardDisclosure = true;
+        await js(`(() => {
+          const { check } = window.__folderNavigationSmoke;
+          const cards = () => [...document.querySelectorAll('#folderGallery .folder-card')].map(node => node.dataset.folderId).sort();
+          changeView('all');
+          check(JSON.stringify(cards()) === JSON.stringify(['${result.rootA}', '${result.rootB}'].sort()), 'Library root did not show only top-level folders');
+          check(filteredAssets().length === ${fixture.samples.length}, 'All assets view lost its global scope');
+          changeView('all', '${result.rootB}');
+          check(JSON.stringify(cards()) === JSON.stringify(['${result.childB}']), 'Parent did not show its direct child folder only');
+          check(filteredAssets().length === 1 && filteredAssets()[0].id === '${result.assetIds[3]}', 'Parent folder mixed descendant assets into direct contents');
+        })()`);
+        const childClickPoint = await nativeClick('#folderGallery .folder-card[data-folder-id="' + result.childB + '"] .folder-card-open');
+        window.webContents.sendInputEvent({ type: 'mouseDown', button: 'left', clickCount: 2, ...childClickPoint });
+        window.webContents.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 2, ...childClickPoint });
+        await js(`window.__folderNavigationSmoke.wait(() => state.folder === '${result.childB}', 'Native child folder click did not enter it')`);
+        await js(`(() => {
+          const { check } = window.__folderNavigationSmoke;
+          check(!state.selected.size, 'Opening a folder card selected an asset');
+          const cards = [...document.querySelectorAll('#folderGallery .folder-card')].map(node => node.dataset.folderId);
+          check(cards.length === 1 && cards[0] === '${result.leafA}', 'Nested child card did not appear after entering its parent');
+          check(filteredAssets().length === 1 && filteredAssets()[0].id === '${result.assetIds[1]}', 'Nested folder did not show its direct asset');
+          document.querySelector('#folderGallery .folder-card-open').focus();
+        })()`);
+        await new Promise(resolve => setTimeout(resolve, 320));
+        nativeKey('Enter');
+        await js(`window.__folderNavigationSmoke.wait(() => state.folder === '${result.leafA}', 'Enter did not open the focused child folder card')`);
+        await js(`(() => {
+          const { check } = window.__folderNavigationSmoke;
+          check(document.querySelectorAll('#folderGallery .folder-card').length === 0, 'Leaf folder showed unrelated child folders');
+          check(filteredAssets().length === 1 && filteredAssets()[0].id === '${result.assetIds[2]}', 'Leaf folder did not show its own asset');
+          check(document.getElementById('folderBreadcrumbs').textContent.includes('项目 B') && document.getElementById('folderBreadcrumbs').textContent.includes('细节'), 'Child card navigation did not update breadcrumbs');
+        })()`);
+        const emptyFolders = await js(`(async () => {
+          const first = await api.createFolder('空分类', '${result.rootA}');
+          const parent = first.folders.find(folder => folder.name === '空分类').id;
+          const second = await api.createFolder('空子分类', parent);
+          const child = second.folders.find(folder => folder.name === '空子分类').id;
+          applyLibrary(second, false); changeView('all', parent);
+          const { check } = window.__folderNavigationSmoke;
+          check(filteredAssets().length === 0, 'Empty folder fixture unexpectedly contains assets');
+          check(document.querySelector('#folderGallery .folder-card[data-folder-id="' + child + '"]'), 'Empty child folder was omitted');
+          check(document.getElementById('emptyState').classList.contains('hidden'), 'Folder-only page incorrectly says it is empty');
+          return { parent, child };
+        })()`);
+        await new Promise(resolve => setTimeout(resolve, 320));
+        await nativeClick('#folderGallery .folder-card[data-folder-id="' + emptyFolders.child + '"] .folder-card-open');
+        await js(`window.__folderNavigationSmoke.wait(() => state.folder === '${emptyFolders.child}', 'Empty child folder could not be opened')`);
+        await js(`(() => {
+          const { check } = window.__folderNavigationSmoke;
+          check(filteredAssets().length === 0 && document.querySelectorAll('#folderGallery .folder-card').length === 0, 'Empty child folder showed unrelated contents');
+          check(!document.getElementById('emptyState').classList.contains('hidden'), 'A truly empty child folder lacks its empty state');
+          document.getElementById('folderUp').click(); check(state.folder === '${emptyFolders.parent}', 'Up did not return from the empty child');
+          for (const view of ['recent', 'favorites', 'unfiled', 'trash']) {
+            changeView(view);
+            check(document.getElementById('folderChildren').getClientRects().length === 0, 'Virtual view showed root folder cards: ' + view);
+          }
+        })()`);
+        await js(`(async () => {
+          const clean = await api.deleteFolder('${emptyFolders.parent}'); applyLibrary(clean, false);
+          changeView('all', '${result.rootA}');
+          window.__folderNavigationSmoke.check(document.querySelectorAll('#folderGallery .folder-card').length === 0, 'Deleted child folder stayed in the direct folder grid');
+          changeView('all', '${result.childB}');
+          document.getElementById('toastStack').replaceChildren();
+        })()`);
+        for (let attempt = 0; attempt < 3 && !result.childFoldersScreenshotCaptured; attempt++) {
+          window.webContents.invalidate(); await new Promise(resolve => setTimeout(resolve, 150));
+          try {
+            const screenshot = await window.webContents.capturePage();
+            if (screenshot.isEmpty()) throw new Error('Child folder page has no rendered frame');
+            await fs.writeFile(path.join(base, 'folder-children.png'), screenshot.toPNG()); result.childFoldersScreenshotCaptured = true;
+          } catch {}
+        }
+        await js(`changeView('all', '${result.leafA}')`);
+        result.directChildFolderCards = true; result.nativeFolderCardOpen = true; result.keyboardFolderCardOpen = true; result.doubleClickStaysOneLevel = true;
+        result.emptyChildFoldersVisible = true; result.folderOnlyPageNotEmpty = true; result.virtualViewsHideFolders = true;
+        result.deletedChildCardRemoved = true;
         const library = new Library({ root: result.root }); await library.init();
         const snapshot = library.snapshot();
         assert.equal(snapshot.folders.length, 4); assert.equal(snapshot.assets.length, fixture.samples.length);

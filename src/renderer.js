@@ -443,10 +443,9 @@ function applyLibrary(library, preserveSelection = true) {
 function filteredAssets() {
   const terms = state.search.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
   const weekAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
-  const folderScope = state.folder ? folderTree.descendantIds(state.library.folders, state.folder) : null;
   const list = state.library.assets.filter((a) => {
     if (state.view === 'trash' ? !a.trashedAt : Boolean(a.trashedAt)) return false;
-    if (folderScope && !folderScope.has(a.folderId)) return false;
+    if (state.folder && a.folderId !== state.folder) return false;
     if (!state.folder && state.view === 'recent' && new Date(a.createdAt).getTime() < weekAgo) return false;
     if (!state.folder && state.view === 'favorites' && (a.rating || 0) < 4) return false;
     if (!state.folder && state.view === 'unfiled' && a.folderId) return false;
@@ -494,6 +493,10 @@ function changeView(view, folder = null, tag = null) {
   render();
 }
 function folderLocation() { return { view: state.view, folder: state.folder, tag: state.tag }; }
+function directChildFolders() {
+  if (!hasLibrary() || state.view !== 'all' || state.tag) return [];
+  return state.library.folders.filter(folder => folderTree.parentId(folder) === currentFolder());
+}
 function canNavigateFolders() { return hasLibrary() && !state.libraryChanging && !state.busy && !draggingAssets && !deletingAssets && !closing; }
 function navigateFolderHistory(direction) {
   if (!canNavigateFolders()) return;
@@ -647,7 +650,8 @@ function renderHeader(list) {
   $('breadcrumbCurrent').title = folderPath;
   $('pageTitle').replaceChildren(document.createTextNode(name), el('span', 'title-dot', '.'));
   $('pageSubtitle').textContent = state.folder ? '把相关的灵感放在一起。' : { all: '收集值得留下的灵感。', recent: '过去 7 天，为灵感留个位置。', favorites: '四星及以上的素材，值得再次回看。', unfiled: '为散落的灵感，找到一个位置。', trash: '暂时放下的素材，随时可以恢复。' }[state.view];
-  $('resultCount').textContent = `${list.length.toLocaleString()} 个素材${state.search || state.format !== 'all' || state.tag ? ' · 筛选结果' : ''}`;
+  const childCount = directChildFolders().length;
+  $('resultCount').textContent = `${childCount ? `${childCount} 个文件夹 · ` : ''}${list.length.toLocaleString()} 个素材${state.search || state.format !== 'all' || state.tag ? ' · 素材筛选结果' : ''}`;
   $('importFiles').disabled = state.busy || state.libraryChanging || !hasLibrary();
   $('importFolder').disabled = state.busy || state.libraryChanging || !hasLibrary();
   $('activeFilter').replaceChildren();
@@ -693,9 +697,44 @@ function mediaFor(asset, kind) {
   fallback.append(icon('video'), el('span', '', `${(asset.ext || '视频').toUpperCase()} · 视频素材`));
   return fallback;
 }
+function renderFolderChildren() {
+  const children = directChildFolders();
+  const counts = new Map(), childCounts = new Map();
+  state.library.assets.filter(asset => !asset.trashedAt).forEach(asset => counts.set(asset.folderId, (counts.get(asset.folderId) || 0) + 1));
+  state.library.folders.forEach(folder => { const parentId = folderTree.parentId(folder); childCounts.set(parentId, (childCounts.get(parentId) || 0) + 1); });
+  $('folderChildrenTitle').textContent = state.folder ? '子文件夹' : '文件夹';
+  $('folderChildren').classList.toggle('hidden', !children.length);
+  $('folderGallery').replaceChildren(...children.map(folder => {
+    const card = el('article', 'folder-card'); card.dataset.folderId = folder.id; card.setAttribute('role', 'listitem'); card.draggable = false;
+    const open = action('', 'folder-card-open', event => {
+      event.stopPropagation();
+      if (performance.now() < suppressAssetClickUntil) return;
+      suppressAssetClickUntil = performance.now() + 300;
+      changeView('all', folder.id);
+    }, 'folder');
+    open.draggable = false; open.setAttribute('aria-label', `打开文件夹「${folder.name}」`); open.title = `打开文件夹：${folder.name}`;
+    const color = colorLabels.get(folder.colorLabel);
+    if (color) { card.dataset.colorLabel = color.id; open.querySelector('.icon').style.color = color.color; open.querySelector('.icon').style.fill = `${color.color}22`; }
+    const text = el('span', 'folder-card-text'), name = el('span', 'folder-card-name');
+    const mark = colorMarker(folder.colorLabel, 'folder-color-mark'); if (mark) name.append(mark);
+    name.append(el('span', '', folder.name));
+    const subfolders = childCounts.get(folder.id) || 0, assets = counts.get(folder.id) || 0;
+    text.append(name, el('span', 'folder-card-meta', `${subfolders} 个子文件夹 · ${assets} 个素材`)); open.append(text);
+    const more = action('', 'folder-card-more', event => { event.stopPropagation(); showFolderMenu(folder, event.currentTarget); }, 'more');
+    more.title = `管理文件夹「${folder.name}」`; more.setAttribute('aria-label', more.title); more.setAttribute('aria-haspopup', 'menu');
+    card.addEventListener('keydown', event => { if ([' ', 'Enter', 'Delete', 'Backspace'].includes(event.key)) event.stopPropagation(); });
+    card.addEventListener('dragstart', event => event.preventDefault());
+    card.addEventListener('contextmenu', event => { event.preventDefault(); event.stopPropagation(); showFolderMenu(folder, more, { x: event.clientX, y: event.clientY }); });
+    card.append(open, more); return card;
+  }));
+  return children;
+}
 function renderGallery(list) {
   videoHover.clear();
   stopMarquee();
+  const childFolders = renderFolderChildren();
+  $('assetSectionTitle').classList.toggle('hidden', !childFolders.length || !list.length);
+  $('assetSectionTitle').textContent = state.folder ? '当前文件夹素材' : '全部素材';
   const frag = document.createDocumentFragment();
   list.slice(0, state.limit).forEach((asset) => {
     const card = el('article', `asset-card${state.selected.has(asset.id) ? ' selected' : ''}`);
@@ -757,8 +796,8 @@ function renderGallery(list) {
   renderSelectionMode();
   $('loadMore').classList.toggle('hidden', list.length <= state.limit);
   $('loadMore').textContent = `加载更多 · 还有 ${Math.max(0, list.length - state.limit).toLocaleString()} 个`;
-  $('emptyState').classList.toggle('hidden', list.length > 0);
-  if (!list.length) renderEmpty();
+  $('emptyState').classList.toggle('hidden', list.length > 0 || childFolders.length > 0);
+  if (!list.length && !childFolders.length) renderEmpty();
 }
 function selectForAssetAction(id) {
   if (state.selected.has(id)) return;
@@ -1739,9 +1778,21 @@ $('folderContextMenu').addEventListener('keydown', event => {
 window.addEventListener('resize', () => closeFolderMenu());
 // Collection menus use native disclosure controls and keep the workspace clear.
 const collectionMenus = [...document.querySelectorAll('.collection-menu')];
-for (const menu of collectionMenus) menu.addEventListener('toggle', () => {
-  if (menu.open) collectionMenus.filter(other => other !== menu).forEach(other => { other.open = false; });
-});
+for (const menu of collectionMenus) {
+  const summary = menu.querySelector('summary');
+  summary.addEventListener('keydown', event => {
+    // Keep native disclosure activation away from the gallery's Space preview.
+    if ([' ', 'Enter', 'Delete', 'Backspace'].includes(event.key)) event.stopPropagation();
+  });
+  menu.addEventListener('toggle', () => {
+    summary.setAttribute('aria-expanded', String(menu.open));
+    if (menu.classList.contains('folder-browser')) summary.title = `${menu.open ? '收起' : '展开'}文件夹列表`;
+    if (menu.open) {
+      videoHover.stop();
+      collectionMenus.filter(other => other !== menu).forEach(other => { other.open = false; });
+    }
+  });
+}
 document.addEventListener('click', event => {
   if (!event.target.closest('.collection-menu') || event.target.closest('.collection-menu .nav-item,.collection-menu .tag-pill,#newFolder')) {
     collectionMenus.forEach(menu => { menu.open = false; });

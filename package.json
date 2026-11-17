@@ -1,7 +1,7 @@
 {
   "name": "shitu",
   "productName": "拾图",
-  "version": "0.17.0",
+  "version": "0.18.0",
   "description": "A local-first image library for Windows",
   "main": "src/main.cjs",
   "private": true,
