@@ -1,0 +1,82 @@
+name: Build Windows release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  windows:
+    # The first installer is built and published locally to bootstrap later CI.
+    if: github.event_name == 'workflow_dispatch' || github.ref_name != 'v0.10.8'
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Verify tag matches package version
+        if: github.event_name == 'push'
+        shell: pwsh
+        run: |
+          $expected = 'v' + (Get-Content package.json -Raw | ConvertFrom-Json).version
+          if ($env:GITHUB_REF_NAME -ne $expected) { throw "Tag must be $expected" }
+      - name: Restore pinned binary dependency cache
+        id: resources
+        uses: actions/cache@v4
+        with:
+          path: |
+            .recovery/extracted-0.10.7
+            .recovery/runtime
+            ai-runtime
+            node_modules
+          key: shitu-windows-binaries-${{ hashFiles('build-resources.json') }}
+      - name: Restore binary dependencies from verified first release
+        if: steps.resources.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          if (-not (Test-Path -LiteralPath 'C:\Program Files\7-Zip\7z.exe')) { choco install 7zip --yes --no-progress }
+          node scripts/prepare-build-resources.cjs
+      - name: Check source
+        run: node scripts/check.cjs
+      - name: Run unit tests
+        run: npm test
+      - name: Smoke test application
+        run: node scripts/smoke.cjs
+      - name: Smoke test update without executing an installer
+        run: node scripts/smoke-update.cjs
+      - name: Ensure NSIS compiler
+        shell: pwsh
+        run: |
+          $compiler = 'C:\Program Files (x86)\NSIS\makensis.exe'
+          if (-not (Test-Path -LiteralPath $compiler)) { choco install nsis --yes --no-progress }
+          if (-not (Test-Path -LiteralPath $compiler)) { throw 'NSIS compiler is unavailable' }
+          "MAKENSIS=$compiler" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Build installer and update manifest
+        run: node scripts/build-installer.cjs
+      - name: Publish complete release
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/publish-github.cjs --publish
+      - name: Upload manual validation build
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v7
+        with:
+          name: shitu-windows-validation-${{ github.run_id }}
+          path: |
+            dist/shitu-*-setup.exe
+            dist/shitu-update.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
