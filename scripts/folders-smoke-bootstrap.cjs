@@ -10,11 +10,14 @@ module.exports = function configureFoldersSmoke({ root, base }) {
   const fixture = require(path.join(base, 'folder-smoke-fixture.json'));
   const resultPath = path.join(base, 'result.json');
   const failures = [], requests = [];
-  let completed = false;
+  let completed = false, libraryPickerTarget = null;
   const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
   require(path.join(root, 'src', 'collector.cjs')).createCollector = () => ({ start: async () => ({}), info: () => ({ enabled: false }), activeCount: () => 0, close: async () => {} });
   dialog.showErrorBox = (title, message) => failures.push(`${title}: ${message}`);
-  dialog.showOpenDialog = async () => { throw new Error('Folder smoke must not open a native file picker'); };
+  dialog.showOpenDialog = async () => {
+    if (!libraryPickerTarget) throw new Error('Folder smoke must not open a native file picker');
+    return { canceled: false, filePaths: [libraryPickerTarget] };
+  };
   shell.openPath = async () => { throw new Error('Folder smoke must not launch external applications'); };
   shell.openExternal = async () => { throw new Error('Folder smoke must not open the browser'); };
   const fail = async error => {
@@ -47,18 +50,34 @@ module.exports = function configureFoldersSmoke({ root, base }) {
           };
           const createUI = async (name, parentId, kind = 'plus') => {
             if (kind === 'context') await openManage(parentId, 'create');
+            else if (kind === 'path') { document.getElementById('createFolderHere').click(); await wait(() => !document.getElementById('modalOverlay').classList.contains('hidden'), 'Path bar create folder modal did not open'); }
             else { browser.open = true; document.getElementById('newFolder').click(); await wait(() => !document.getElementById('modalOverlay').classList.contains('hidden'), 'Create folder modal did not open'); }
             const parents = document.getElementById('modalParent');
-            if (kind === 'context') check(parents.value === parentId, 'New child defaulted to the wrong parent');
+            if (kind === 'context' || kind === 'path') check(parents.value === (parentId || ''), 'New child defaulted to the wrong parent');
             parents.value = parentId || ''; document.getElementById('modalInput').value = name;
             document.getElementById('modalForm').requestSubmit();
             await wait(() => state.library.folders.some(item => item.name === name && (item.parentId || null) === parentId), 'Created folder was not persisted');
             return state.library.folders.find(item => item.name === name && (item.parentId || null) === parentId).id;
           };
           const initial = await api.getLibrary(); check(initial.stats.total === 0 && !initial.folders.length, 'Folder test library was not empty');
-          const rootA = await createUI('项目 A', null);
+          check(document.getElementById('folderUp').disabled, 'Up must be disabled at the library root');
+          check(document.getElementById('folderBack').disabled && document.getElementById('folderForward').disabled, 'A fresh library must not have navigation history');
+          const rootA = await createUI('项目 A', null, 'path');
           const childA = await createUI('参考', rootA, 'context');
-          const leafA = await createUI('细节', childA, 'context');
+          const leafA = await createUI('细节', childA, 'path');
+          selectFolder(leafA);
+          const navigate = async (id, expected) => { document.getElementById(id).click(); await wait(() => state.folder === expected, 'Navigation did not reach the expected folder: ' + id); };
+          const breadcrumb = async expected => { const button = document.querySelector('#folderBreadcrumbs [data-folder-id="' + (expected || '') + '"]'); check(button, 'Ancestor breadcrumb is missing'); button.click(); await wait(() => state.folder === expected, 'Ancestor breadcrumb did not navigate'); };
+          check(!document.getElementById('folderUp').disabled, 'Up must be enabled inside a folder');
+          check(document.querySelector('#folderBreadcrumbs [aria-current="page"]')?.textContent.includes('细节'), 'Current breadcrumb is not identified');
+          await navigate('folderUp', childA);
+          await navigate('folderBack', leafA);
+          await navigate('folderForward', childA);
+          await breadcrumb(rootA);
+          await navigate('folderBack', childA);
+          await navigate('folderForward', rootA);
+          await breadcrumb(null);
+          check(document.getElementById('folderUp').disabled && state.view === 'all', 'Library root did not disable Up');
           selectFolder(leafA);
           browser.open = true; document.getElementById('newFolder').click();
           await wait(() => !document.getElementById('modalOverlay').classList.contains('hidden'), 'Current child create modal did not open');
@@ -106,9 +125,11 @@ module.exports = function configureFoldersSmoke({ root, base }) {
           await openManage(leafA, 'move'); document.getElementById('modalParent').value = childB; document.getElementById('modalForm').requestSubmit();
           await wait(() => state.library.folders.find(item => item.id === leafA)?.parentId === childB, 'Folder move did not persist');
           check(state.library.assets.find(item => item.id === assetIds[2]).folderId === leafA, 'Moving a folder changed the image assignment');
+          check(document.getElementById('folderBreadcrumbs').textContent.includes('项目 B') && !document.getElementById('folderBreadcrumbs').textContent.includes('项目 A'), 'Moved folder breadcrumb kept its old parent');
           const extra = await api.createFolder('待整理子级', childA); applyLibrary(extra, false);
           const deleteLeaf = extra.folders.find(item => item.name === '待整理子级').id;
           const imported = await api.importPaths([samples[4].filename], deleteLeaf); assetIds.push(imported.report.assetIds[0]); applyLibrary(imported.snapshot, false);
+          changeView('all', childA); changeView('all', deleteLeaf); changeView('all', rootA);
           await openManage(childA, 'delete');
           const description = document.getElementById('modalDescription').textContent;
           check(description.includes('1 个子文件夹') && description.includes('保留') && description.includes('未分类'), 'Delete confirmation did not explain subtree and asset preservation');
@@ -116,11 +137,44 @@ module.exports = function configureFoldersSmoke({ root, base }) {
           await wait(() => !state.library.folders.some(item => item.id === childA || item.id === deleteLeaf), 'Subtree deletion left orphan folder nodes');
           check(state.library.assets.find(item => item.id === assetIds[4]).folderId === null, 'Deleted subtree assets did not return to unfiled');
           check(state.library.assets.find(item => item.id === assetIds[0]).folderId === rootA && state.library.assets.find(item => item.id === assetIds[2]).folderId === leafA, 'Delete changed assets outside its subtree');
+          for (const direction of ['folderBack', 'folderForward']) {
+            let visits = 0;
+            while (!document.getElementById(direction).disabled) {
+              check(visits++ < 100, 'Navigation history did not terminate');
+              document.getElementById(direction).click();
+              check(![childA, deleteLeaf].includes(state.folder), 'Navigation history restored a deleted folder');
+            }
+          }
           changeView('all', rootB); browser.open = true; state.selected = new Set([assetIds[2]]); toggleDetails(true); renderDetails();
+          window.__folderNavigationSmoke = { check, wait, rootA, rootB, childB, leafA };
           return { root: state.library.root, rootA, rootB, childB, leafA, assetIds, sameNameChildren: true, threeLevelCreation: true,
             currentFolderDefault: true, createRootInsideChild: true, parentIncludesDescendants: true, expandableTree: true,
-            detailFolderPaths: true, moveAssetIntoChild: true, folderMove: true, cycleRejected: true, subtreeDeletePreservesAssets: true };
+            detailFolderPaths: true, moveAssetIntoChild: true, folderMove: true, cycleRejected: true, subtreeDeletePreservesAssets: true,
+            pathBarCreateRoot: true, pathBarCreateChild: true, upAndHistoryButtons: true, clickableAncestorBreadcrumbs: true,
+            rootUpDisabled: true, movedBreadcrumbUpdated: true, deletedHistoryPruned: true };
         })()`);
+        const js = code => window.webContents.executeJavaScript(code);
+        const altKey = keyCode => {
+          window.webContents.sendInputEvent({ type: 'keyDown', keyCode, modifiers: ['alt'] });
+          window.webContents.sendInputEvent({ type: 'keyUp', keyCode, modifiers: ['alt'] });
+        };
+        await js(`changeView('all', '${result.rootB}'); changeView('all', '${result.leafA}'); document.getElementById('folderUp').focus();`);
+        altKey('Up');
+        await js(`window.__folderNavigationSmoke.wait(() => state.folder === '${result.childB}', 'Alt+Up did not navigate to the parent')`);
+        altKey('Left');
+        await js(`window.__folderNavigationSmoke.wait(() => state.folder === '${result.leafA}', 'Alt+Left did not navigate back')`);
+        altKey('Right');
+        await js(`window.__folderNavigationSmoke.wait(() => state.folder === '${result.childB}', 'Alt+Right did not navigate forward')`);
+        await js(`document.getElementById('searchInput').focus()`);
+        altKey('Up'); await new Promise(resolve => setTimeout(resolve, 100));
+        await js(`window.__folderNavigationSmoke.check(state.folder === '${result.childB}', 'Alt+Up navigated while editing the search input')`);
+        await js(`document.getElementById('createFolderHere').click()`);
+        altKey('Up'); await new Promise(resolve => setTimeout(resolve, 100));
+        await js(`window.__folderNavigationSmoke.check(state.folder === '${result.childB}', 'Alt+Up navigated behind an open modal'); document.getElementById('modalCancel').click();`);
+        await js(`openPreview('${result.assetIds[2]}')`);
+        altKey('Up'); await new Promise(resolve => setTimeout(resolve, 100));
+        await js(`window.__folderNavigationSmoke.check(state.folder === '${result.childB}', 'Alt+Up navigated behind a media preview'); closePreview(); changeView('all', '${result.leafA}');`);
+        result.nativeNavigationKeys = true; result.editableAndModalKeyGuards = true; result.previewKeyGuard = true;
         const library = new Library({ root: result.root }); await library.init();
         const snapshot = library.snapshot();
         assert.equal(snapshot.folders.length, 4); assert.equal(snapshot.assets.length, fixture.samples.length);
@@ -156,6 +210,20 @@ module.exports = function configureFoldersSmoke({ root, base }) {
             await fs.writeFile(path.join(base, 'nested-folders.png'), png); screenshotCaptured = true;
           } catch (error) { screenshotError = error.message; }
         }
+        const secondRoot = path.join(base, 'second-library');
+        await new Library({ root: secondRoot }).init();
+        libraryPickerTarget = secondRoot;
+        await js(`(async () => {
+          const next = await api.openLibrary(); applyLibrary(next.snapshot, false);
+          const { check } = window.__folderNavigationSmoke;
+          check(state.library.root !== ${JSON.stringify(result.root)}, 'The isolated second library was not opened');
+          check(state.folder === null && state.view === 'all', 'The new library retained the previous folder');
+          check(document.getElementById('folderBack').disabled && document.getElementById('folderForward').disabled, 'Navigation history crossed library boundaries');
+          check(document.getElementById('folderUp').disabled && !document.getElementById('createFolderHere').disabled, 'Empty library navigation controls are incorrect');
+          applyLibrary({ ...next.snapshot, root: null, needsLibrary: true }, false);
+          check(document.getElementById('folderUp').disabled && document.getElementById('createFolderHere').disabled, 'Navigation controls are enabled without a library');
+        })()`);
+        result.libraryHistoryReset = true; result.noLibraryControlsDisabled = true;
         const report = { ok: true, electron: process.versions.electron, ...result, root: undefined, assetIds: undefined,
           reopenedHierarchy: true, backupHierarchy: true, originalBytesUnchanged: true, indexVersion: 2,
           browserNetworkRequests: 0, screenshotCaptured, ...(screenshotCaptured ? {} : { screenshotError }), userData: app.getPath('userData') };

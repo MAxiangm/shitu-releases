@@ -4,6 +4,7 @@ const api = window.shitu;
 const $ = (id) => document.getElementById(id);
 const SVG = 'http://www.w3.org/2000/svg';
 const folderTree = window.ShituFolders;
+const folderNavigation = window.ShituFolderNavigation.create({ limit: 80 });
 const colorLabels = window.ShituColorLabels;
 const state = { library: { assets: [], folders: [], tags: [], stats: {}, root: null, needsLibrary: true }, view: 'all', folder: null, tag: null, selected: new Set(), selectionMode: false, anchor: null, search: '', format: 'all', sort: 'newest', limit: 240, previewId: null, details: false, busy: false, libraryChanging: false };
 let modalResolve = null;
@@ -473,7 +474,10 @@ function filteredAssets() {
   };
   return list.sort(comparators[state.sort]);
 }
-function changeView(view, folder = null) {
+function changeView(view, folder = null, tag = null) {
+  flushDetailDrafts();
+  videoHover.stop();
+  closeFolderMenu();
   state.view = view;
   state.folder = folder;
   if (folder) {
@@ -482,12 +486,62 @@ function changeView(view, folder = null) {
       visited.add(current.id); collapsedFolders.delete(current.id);
     }
   }
-  state.tag = null;
+  state.tag = tag;
   state.selected.clear();
   state.anchor = null;
   state.limit = 240;
   $('galleryScroller').scrollTop = 0;
   render();
+}
+function folderLocation() { return { view: state.view, folder: state.folder, tag: state.tag }; }
+function canNavigateFolders() { return hasLibrary() && !state.libraryChanging && !state.busy && !draggingAssets && !deletingAssets && !closing; }
+function navigateFolderHistory(direction) {
+  if (!canNavigateFolders()) return;
+  const destination = folderNavigation.travel(direction, state.library.root, state.library.folders);
+  if (destination) changeView(destination.view, destination.folder, destination.tag);
+}
+function navigateFolderUp() {
+  if (!canNavigateFolders()) return;
+  const destination = window.ShituFolderNavigation.parent(folderLocation(), state.library.folders);
+  if (destination) changeView(destination.view, destination.folder, destination.tag);
+}
+function renderFolderNavigation() {
+  const ready = hasLibrary(), enabled = canNavigateFolders();
+  folderNavigation.record(ready ? state.library.root : null, folderLocation(), state.library.folders);
+  const history = folderNavigation.state(ready ? state.library.root : null, state.library.folders);
+  const parent = window.ShituFolderNavigation.parent(folderLocation(), state.library.folders);
+  $('folderBack').disabled = !enabled || !history.canBack;
+  $('folderForward').disabled = !enabled || !history.canForward;
+  $('folderUp').disabled = !enabled || !parent;
+  $('createFolderHere').disabled = !enabled;
+  $('createFolderHere').title = state.folder ? `在「${viewName()}」中新建子文件夹` : '在素材库中新建文件夹';
+  const breadcrumbs = $('folderBreadcrumbs');
+  breadcrumbs.replaceChildren();
+  if (!ready) { breadcrumbs.append(el('span', 'folder-path-placeholder', '尚未打开素材库')); return; }
+  const addCrumb = (name, folder, current = false, glyph) => {
+    if (breadcrumbs.childNodes.length) { const separator = el('span', 'folder-breadcrumb-separator'); separator.setAttribute('aria-hidden', 'true'); separator.append(icon('chevron')); breadcrumbs.append(separator); }
+    const button = action('', 'folder-breadcrumb', () => changeView('all', folder), glyph);
+    button.append(el('span', '', name));
+    button.dataset.folderId = folder || '';
+    button.title = name;
+    button.disabled = !enabled || (current && !state.tag);
+    if (current) button.setAttribute('aria-current', 'page');
+    breadcrumbs.append(button);
+  };
+  const currentIsRoot = !state.folder && state.view === 'all';
+  addCrumb('全部素材', null, currentIsRoot, 'folder');
+  if (state.folder) {
+    const folders = new Map(state.library.folders.map(folder => [folder.id, folder]));
+    const chain = [], visited = new Set();
+    for (let current = folders.get(state.folder); current && !visited.has(current.id); current = folders.get(folderTree.parentId(current))) { visited.add(current.id); chain.unshift(current); }
+    chain.forEach(folder => addCrumb(folder.name, folder.id, folder.id === state.folder));
+    breadcrumbs.title = `全部素材 / ${chain.map(folder => folder.name).join(' / ')}`;
+  } else if (!currentIsRoot) {
+    const separator = el('span', 'folder-breadcrumb-separator'); separator.setAttribute('aria-hidden', 'true'); separator.append(icon('chevron'));
+    const current = el('span', 'folder-breadcrumb', viewName()); current.setAttribute('aria-current', 'page');
+    breadcrumbs.append(separator, current); breadcrumbs.title = viewName();
+  } else breadcrumbs.title = '全部素材';
+  breadcrumbs.querySelector('[aria-current="page"]')?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
 }
 function renderNavigation() {
   const active = state.library.assets.filter((a) => !a.trashedAt);
@@ -551,7 +605,7 @@ function renderNavigation() {
     item.title = `${folder.path} · ${counts.get(folder.id) || 0} 个素材（含子文件夹）${folderColor ? ` · ${folderColor.name}标记` : ''}`;
     if (state.folder === folder.id) item.setAttribute('aria-current', 'page');
     item.addEventListener('keydown', event => {
-      if (event.key === 'ArrowRight' && children && collapsedFolders.has(folder.id) || event.key === 'ArrowLeft' && children && !collapsedFolders.has(folder.id)) {
+      if (!event.altKey && (event.key === 'ArrowRight' && children && collapsedFolders.has(folder.id) || event.key === 'ArrowLeft' && children && !collapsedFolders.has(folder.id))) {
         event.preventDefault(); event.stopPropagation();
         if (event.key === 'ArrowRight') collapsedFolders.delete(folder.id); else collapsedFolders.add(folder.id);
         renderNavigation(); $('folderNav').querySelector(`.nav-item[data-folder-id="${CSS.escape(folder.id)}"]`)?.focus();
@@ -586,6 +640,7 @@ function renderNavigation() {
   $('storageLabel').textContent = `${active.length.toLocaleString()} 个素材 · ${size(active.reduce((n, a) => n + a.size, 0))}`;
 }
 function renderHeader(list) {
+  renderFolderNavigation();
   const name = viewName();
   const folderPath = state.folder ? folderTree.path(state.library.folders, state.folder) : name;
   $('breadcrumbCurrent').textContent = folderPath;
@@ -1120,6 +1175,7 @@ function render() {
   renderLibraryState();
 }
 function renderLibraryState() {
+  renderFolderNavigation();
   const ready = hasLibrary();
   $('libraryOnboarding').classList.toggle('hidden', ready);
   $('setupAppUpdate').classList.toggle('hidden', ready);
@@ -1655,6 +1711,13 @@ function showCollector() {
 function closeCollector() { clearInterval(collectorRefreshTimer); $('collectorOverlay').classList.add('hidden'); $('collectorButton').focus(); }
 
 $('newFolder').addEventListener('click', () => createFolder());
+$('createFolderHere').addEventListener('click', () => { if (canNavigateFolders()) createFolder(currentFolder()); });
+$('folderBack').addEventListener('click', () => navigateFolderHistory('back'));
+$('folderForward').addEventListener('click', () => navigateFolderHistory('forward'));
+$('folderUp').addEventListener('click', navigateFolderUp);
+$('folderNavigation').addEventListener('keydown', event => {
+  if ([' ', 'Enter', 'Delete', 'Backspace'].includes(event.key)) event.stopPropagation();
+});
 document.addEventListener('pointerdown', event => {
   if (!$('folderContextMenu').classList.contains('hidden') && !$('folderContextMenu').contains(event.target) && !event.target.closest('.folder-more')) closeFolderMenu();
 });
@@ -1888,6 +1951,11 @@ document.addEventListener('keydown', (e) => {
   }
   if ((e.ctrlKey || e.metaKey) && ['k', 'f'].includes(e.key.toLowerCase())) { e.preventDefault(); $('searchInput').focus(); $('searchInput').select(); return; }
   if (editing) return;
+  if (e.altKey && !e.ctrlKey && !e.metaKey && ['ArrowLeft', 'ArrowRight', 'ArrowUp'].includes(e.key)) {
+    e.preventDefault(); e.stopPropagation();
+    if (e.key === 'ArrowUp') navigateFolderUp(); else navigateFolderHistory(e.key === 'ArrowLeft' ? 'back' : 'forward');
+    return;
+  }
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a') {
     e.preventDefault(); state.selected = new Set(filteredAssets().map((a) => a.id)); updateSelectionClasses(); renderSelection(); renderDetails();
   } else if (e.key === ' ' && state.selected.size) {

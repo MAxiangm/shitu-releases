@@ -23,7 +23,7 @@ const { root, electronPath, devApp } = require('./runtime.cjs');
   const fixture = { token: crypto.randomUUID(), samples, backupDirectory: path.join(base, 'backups') };
   await fs.writeFile(path.join(base, 'folder-smoke-fixture.json'), JSON.stringify(fixture));
   const env = { ...process.env, SHITU_FOLDER_SMOKE: '1', SHITU_FOLDER_SMOKE_TOKEN: fixture.token, SHITU_SMOKE_DIRECTORY: base };
-  for (const key of ['ELECTRON_RUN_AS_NODE', 'SHITU_AE_SMOKE', 'SHITU_VIDEO_SMOKE', 'SHITU_UPDATE_SMOKE', 'SHITU_RECOVERY_SMOKE', 'SHITU_MODEL_SMOKE']) delete env[key];
+  for (const key of ['ELECTRON_RUN_AS_NODE', 'SHITU_AE_SMOKE', 'SHITU_VIDEO_SMOKE', 'SHITU_UPDATE_SMOKE', 'SHITU_RECOVERY_SMOKE', 'SHITU_MODEL_SMOKE', 'SHITU_COLORS_SMOKE', 'SHITU_HOVER_VIDEO_SMOKE']) delete env[key];
   const exitCode = await new Promise((resolve, reject) => {
     const child = spawn(electronPath(), [devApp()], { cwd: root, env, windowsHide: true, stdio: 'inherit' });
     const timer = setTimeout(() => { child.kill(); reject(new Error(`Folder UI smoke timed out: ${base}`)); }, 90000);
