@@ -63,6 +63,8 @@ let updateDiagnosticWrite = Promise.resolve();
 let updateScheduler;
 let installingUpdate = false;
 let activeOperations = 0;
+let historyBusy = false;
+const metadataSaves = new Set();
 const indexPage = pathToFileURL(path.join(__dirname, 'index.html')).href;
 const overrideRoot = process.env.SHITU_LIBRARY;
 const legacyRoot = path.join(app.isPackaged ? path.dirname(process.execPath) : app.getAppPath(), 'library');
@@ -73,20 +75,64 @@ function requireLibrary() {
   if(!library)throw new Error('请先选择素材库位置');
   return library;
 }
+function historyState(current = library) {
+  return { root: current?.root || null, canUndo: false, canRedo: false, undoLabel: null, redoLabel: null,
+    undoId: null, redoId: null, undoCount: 0, redoCount: 0, warning: null, ...current?.historyState(), busy: historyBusy };
+}
+function withHistory(snapshot, current = library) { return { ...snapshot, history: historyState(current) }; }
+function sendHistory() { sendActionEvent('history', historyState()); }
 function librarySnapshot() {
-  if(library)return library.snapshot();
+  if(library)return withHistory(library.snapshot());
   const status=libraryManager.status();
-  return {root:null,assets:[],folders:[],tags:[],stats:{total:0,active:0,trashed:0,untagged:0,unfiled:0,bytes:0},needsLibrary:true,libraryError:status.error,legacyRoot:status.legacyRoot};
+  return {root:null,assets:[],folders:[],tags:[],history:historyState(),stats:{total:0,active:0,trashed:0,untagged:0,unfiled:0,bytes:0},needsLibrary:true,libraryError:status.error,legacyRoot:status.legacyRoot};
+}
+async function saveUserMetadata(method, args, { recordHistory = false, expectedRoot } = {}) {
+  const current = requireLibrary();
+  if (closing || historyBusy) throw new Error('正在保存撤销或重做，请稍后再修改');
+  if (expectedRoot !== undefined && (typeof expectedRoot !== 'string' || expectedRoot !== current.root)) throw new Error('素材库已切换，请重新选择素材');
+  const save = Promise.resolve().then(() => current[method](...args, ...(recordHistory ? [{ recordHistory: true }] : [])));
+  metadataSaves.add(save);
+  try {
+    const snapshot = await save;
+    if (library !== current) throw new Error('素材库已切换，请重新选择素材');
+    return withHistory(snapshot, current);
+  } finally { metadataSaves.delete(save); sendHistory(); }
+}
+function ensureHistoryAvailable() {
+  if (closing || switchingLibrary || importing || draggingAssets || installingUpdate || videoTranscodeService?.busy() || imagePlugins?.busy() || collector?.activeCount())
+    throw new Error('请等待当前导入、转码、处理或拖放完成后再撤销或重做');
+}
+async function replayHistory(direction, expectedRoot, expectedId) {
+  const current = requireLibrary();
+  if (typeof expectedRoot !== 'string' || expectedRoot !== current.root) throw new Error('素材库已切换，请重新选择素材');
+  if (expectedId !== undefined && (typeof expectedId !== 'string' || !/^[a-zA-Z0-9-]{1,128}$/.test(expectedId))) throw new Error('操作历史标识无效');
+  if (historyBusy) throw new Error('正在撤销或重做，请稍候');
+  ensureHistoryAvailable();
+  historyBusy = true; sendHistory();
+  try {
+    // User edits may still be saving when Ctrl+Z arrives. Keep their ordering,
+    // then replay only the requested top entry against the latest index.
+    await Promise.allSettled([...metadataSaves]);
+    await current.flush();
+    ensureHistoryAvailable();
+    if (library !== current) throw new Error('素材库已切换，请重新选择素材');
+    const snapshot = await current[direction]({ expectedId });
+    historyBusy = false;
+    sendActionEvent('library-changed');
+    return withHistory(snapshot, current);
+  } finally { historyBusy = false; sendHistory(); }
 }
 
-async function prepareVideo(id, expectedRoot, requestToken, profile = 'full') {
-  if (!['full', 'hover'].includes(profile) || (profile === 'hover' && typeof requestToken !== 'string')) throw new Error('视频预览请求无效');
+async function prepareVideo(id, expectedRoot, requestToken, profile = 'full', requestSerial) {
+  if (!['full', 'hover', 'quick'].includes(profile) || (profile === 'hover' && typeof requestToken !== 'string')) throw new Error('视频预览请求无效');
+  if (requestSerial !== undefined && (!Number.isSafeInteger(requestSerial) || requestSerial < 0)) throw new Error('视频预览请求序号无效');
   const current = requireLibrary();
   if (current.root !== expectedRoot) throw new Error('素材库已切换，请重新选择视频');
   let asset = current.snapshot().assets.find(item => item.id === id);
   if (!asset || asset.mediaType !== 'video') throw new Error('请选择有效的视频素材');
   const source = current.getAssetPath(id, 'original');
-  return videoRequests.prepare({ library: current, id, source, hash: asset.hash, profile }, requestToken, async signal => {
+  const owner = { id, current, profile, requestSerial };
+  return videoRequests.prepare({ library: current, id, source, hash: asset.hash, profile }, requestToken, async (signal, onProgress) => {
     if (profile === 'full' && (!asset.thumbnail || !asset.codec)) {
       const result = await current.refreshVideoMetadata([id], { signal });
       if (result.updated) {
@@ -95,20 +141,29 @@ async function prepareVideo(id, expectedRoot, requestToken, profile = 'full') {
       }
     }
     signal.throwIfAborted();
-    const result = profile === 'hover'
+    const engineProfile = profile === 'full' ? 'full' : 'hover';
+    const ready = profile === 'quick' ? await videoEngine.getReadyPreview(source, { key: asset.hash, signal }) : null;
+    const result = ready || (engineProfile === 'hover'
       ? await videoEngine.hoverPreview(source, { key: asset.hash, signal, metadata: asset })
-      : await videoEngine.preview(source, { key: asset.hash, signal });
+      : await videoEngine.preview(source, { key: asset.hash, signal, metadata: asset, onProgress }));
     signal.throwIfAborted();
     if (library !== current || current.getAssetPath(id, 'original') !== source) throw new Error('素材库已切换，请重新选择视频');
-    const key = crypto.createHash('sha256').update(`${current.root}\0${id}\0${asset.hash}\0${profile}`).digest('hex');
+    const previewStat = await fs.stat(result.path);
+    const key = crypto.createHash('sha256').update(`${current.root}\0${id}\0${asset.hash}\0${profile}\0${previewStat.size}:${previewStat.mtimeMs}:${previewStat.ctimeMs}`).digest('hex');
     videoPreviews.set(key, { id, root: current.root, source, path: result.path });
     return { url: `shitu://asset/${encodeURIComponent(id)}?kind=preview&key=${key}`, width: result.width,
       height: result.height, duration: result.duration, sourceDuration: result.sourceDuration || result.duration,
-      profile, codec: result.sourceCodec || asset.codec || result.codec, mimeType: result.mimeType };
-  });
+      profile, previewOnly: profile === 'quick' && !ready && !result.direct,
+      codec: result.sourceCodec || asset.codec || result.codec, mimeType: result.mimeType };
+  }, event => forwardVideoProgress(event, owner));
+}
+function forwardVideoProgress(event, owner) {
+  if (!owner || owner.current !== library) return;
+  sendActionEvent('video-preview', { id: owner.id, root: owner.current.root, profile: owner.profile, requestSerial: owner.requestSerial,
+    state: event.state, progress: Number.isFinite(event.progress) ? Math.max(0, Math.min(100, event.progress)) : undefined });
 }
 async function switchLibrary(mode) {
-  if(switchingLibrary || importing || draggingAssets || movingAssets || videoTranscodeService?.busy() || imagePlugins?.busy() || collector?.activeCount())throw new Error('请等待当前导入、采集、转码、图片处理或拖放完成后再切换素材库');
+  if(switchingLibrary || importing || draggingAssets || movingAssets || historyBusy || metadataSaves.size || videoTranscodeService?.busy() || imagePlugins?.busy() || collector?.activeCount())throw new Error('请等待当前导入、采集、转码、图片处理或保存完成后再切换素材库');
   if(mode==='migrate')requireLibrary();
   switchingLibrary=true;
   try {
@@ -130,6 +185,7 @@ async function switchLibrary(mode) {
     const snapshot=librarySnapshot();
     aePreviewService?.scheduleLibrary(library);
     mainWindow.webContents.send('shitu:library-changed');
+    sendHistory();
     return {snapshot};
   } finally {switchingLibrary=false;}
 }
@@ -240,6 +296,7 @@ function initializeAppUpdater() {
 
 function sendActionEvent(channel, payload) {
   if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) mainWindow.webContents.send(`shitu:${channel}`, payload);
+  if (channel === 'library-changed') sendHistory();
 }
 
 function recordUiDiagnostic(detail = {}) {
@@ -258,6 +315,7 @@ function recordUiDiagnostic(detail = {}) {
 function startAssetDrag(ids, expectedRoot) {
   if (draggingAssets) return;
   try {
+    if (historyBusy || closing) throw new Error('正在保存撤销或重做，请稍后再拖放');
     if (typeof expectedRoot !== 'string') throw new Error('素材库信息已失效，请重新选择素材');
     const current = requireLibrary();
     const { assets, files } = resolveAssetFiles(current, ids, expectedRoot);
@@ -275,13 +333,10 @@ function startAssetDrag(ids, expectedRoot) {
 }
 
 async function moveAssetsToFolder(ids, folderId, expectedRoot) {
-  const current = requireLibrary();
-  if (typeof expectedRoot !== 'string' || current.root !== expectedRoot) throw new Error('素材库已切换，请重新选择素材');
+  if (typeof expectedRoot !== 'string') throw new Error('素材库已切换，请重新选择素材');
   movingAssets++;
   try {
-    const snapshot = await current.moveAssetsToFolder(ids, folderId);
-    if (library !== current) throw new Error('素材库已切换，请重新选择素材');
-    return snapshot;
+    return await saveUserMetadata('moveAssetsToFolder', [ids, folderId], { expectedRoot, recordHistory: true });
   } finally { movingAssets--; }
 }
 
@@ -304,6 +359,7 @@ async function copyAssetPaths(ids, expectedRoot) {
 
 async function importPaths(paths, folderId = null) {
   requireLibrary();
+  if (historyBusy || closing) throw new Error('正在保存撤销或重做，请稍后再导入');
   if (importing) throw new Error('正在导入素材，请等待当前任务完成');
   if (!Array.isArray(paths) || paths.some(p => typeof p !== 'string' || !path.isAbsolute(p))) throw new Error('无效的导入路径');
   importing = true;
@@ -317,6 +373,9 @@ async function importPaths(paths, folderId = null) {
 }
 
 function bindHandlers() {
+  checkedHandler('get-history-state', () => historyState());
+  checkedHandler('undo-history', (expectedRoot, expectedId) => replayHistory('undo', expectedRoot, expectedId));
+  checkedHandler('redo-history', (expectedRoot, expectedId) => replayHistory('redo', expectedRoot, expectedId));
   checkedHandler('transcode-devices', refresh => {
     if (refresh !== undefined && typeof refresh !== 'boolean') throw new Error('设备检测参数无效');
     return transcodeDevices.discover({ refresh: refresh === true });
@@ -332,12 +391,12 @@ function bindHandlers() {
   });
   checkedHandler('video-transcode-state', () => videoTranscodeService.state());
   checkedHandler('video-transcode-start', async request => {
-    if (closing || switchingLibrary || importing || draggingAssets || imagePlugins?.busy()) throw new Error('请等待当前素材操作完成后再转码');
+    if (closing || switchingLibrary || importing || draggingAssets || historyBusy || imagePlugins?.busy()) throw new Error('请等待当前素材操作完成后再转码');
     const settings = await transcodeSettings.get();
     const devices = request?.format === 'dxv' || settings.mode === 'cpu'
       ? { cpu: { name: os.cpus()[0]?.model || 'CPU', logicalProcessors: Math.max(1, Math.min(128, os.availableParallelism?.() || os.cpus().length || 1)) }, gpus: [] }
       : await transcodeDevices.discover();
-    if (closing || switchingLibrary || importing || draggingAssets || imagePlugins?.busy()) throw new Error('当前无法开始转码，请稍后重试');
+    if (closing || switchingLibrary || importing || draggingAssets || historyBusy || imagePlugins?.busy()) throw new Error('当前无法开始转码，请稍后重试');
     const plan = executionPlan(settings, devices, { format: request?.format, total: request?.ids?.length || 0 });
     return videoTranscodeService.start({ ...request, executionPlan: plan });
   });
@@ -362,7 +421,10 @@ function bindHandlers() {
   checkedHandler('plugin-install', id => imagePlugins.install(id));
   checkedHandler('plugin-set-enabled', (id, enabled) => imagePlugins.setEnabled(id, enabled));
   checkedHandler('plugin-uninstall', id => imagePlugins.uninstall(id));
-  checkedHandler('plugin-run', request => imagePlugins.run(request));
+  checkedHandler('plugin-run', request => {
+    if (historyBusy || closing) throw new Error('正在保存撤销或重做，请稍后再处理素材');
+    return imagePlugins.run(request);
+  });
   checkedHandler('plugin-cancel', id => imagePlugins.cancel(id));
   ipcMain.on('shitu:start-drag', (event, ids, expectedRoot) => {
     try { assertTrustedSender(event); } catch { return; }
@@ -408,28 +470,30 @@ function bindHandlers() {
   });
   checkedHandler('import-files', async folderId => {
     requireLibrary();
+    if (historyBusy || closing) throw new Error('正在保存撤销或重做，请稍后再导入');
     const result = await dialog.showOpenDialog(mainWindow, { title: '导入图片、视频、模型或 AE 工程', properties: ['openFile', 'multiSelections'], filters: [{ name: '支持的素材', extensions: [...SUPPORTED] }, { name: 'AE 工程', extensions: [...PROJECT] }, { name: '3D 模型', extensions: [...MODEL] }] });
     return result.canceled ? { snapshot: library.snapshot(), cancelled: true } : importPaths(result.filePaths, folderId);
   });
   checkedHandler('import-folder', async folderId => {
     requireLibrary();
+    if (historyBusy || closing) throw new Error('正在保存撤销或重做，请稍后再导入');
     const result = await dialog.showOpenDialog(mainWindow, { title: '导入文件夹中的素材（包含子文件夹）', properties: ['openDirectory'] });
     return result.canceled ? { snapshot: library.snapshot(), cancelled: true } : importPaths(result.filePaths, folderId);
   });
   checkedHandler('import-paths', importPaths);
-  checkedHandler('update-assets', (ids, patch) => requireLibrary().updateAssets(ids, patch));
+  checkedHandler('update-assets', (ids, patch) => saveUserMetadata('updateAssets', [ids, patch], { recordHistory: true }));
   checkedHandler('move-assets-to-folder', moveAssetsToFolder);
-  checkedHandler('set-trash', (ids, trashed) => requireLibrary().setTrash(ids, trashed));
+  checkedHandler('set-trash', (ids, trashed) => saveUserMetadata('setTrash', [ids, trashed]));
   checkedHandler('delete-permanently', (ids, expectedRoot) => {
     const current = requireLibrary();
     if (typeof expectedRoot !== 'string' || expectedRoot !== current.root) throw new Error('素材库已切换，请重新选择素材');
-    return current.deletePermanently(ids);
+    return saveUserMetadata('deletePermanently', [ids], { expectedRoot });
   });
-  checkedHandler('create-folder', (name, parentId = null) => requireLibrary().createFolder(name, parentId));
-  checkedHandler('move-folder', (id, parentId = null) => requireLibrary().moveFolder(id, parentId));
-  checkedHandler('rename-folder', (id, name) => requireLibrary().renameFolder(id, name));
-  checkedHandler('set-folder-color', (id, colorLabel) => requireLibrary().setFolderColor(id, colorLabel));
-  checkedHandler('delete-folder', id => requireLibrary().deleteFolder(id));
+  checkedHandler('create-folder', (name, parentId = null) => saveUserMetadata('createFolder', [name, parentId]));
+  checkedHandler('move-folder', (id, parentId = null) => saveUserMetadata('moveFolder', [id, parentId], { recordHistory: true }));
+  checkedHandler('rename-folder', (id, name) => saveUserMetadata('renameFolder', [id, name], { recordHistory: true }));
+  checkedHandler('set-folder-color', (id, colorLabel) => saveUserMetadata('setFolderColor', [id, colorLabel], { recordHistory: true }));
+  checkedHandler('delete-folder', id => saveUserMetadata('deleteFolder', [id]));
   checkedHandler('export-assets', async ids => {
     requireLibrary();
     const result = await dialog.showOpenDialog(mainWindow, { title: '选择导出文件夹', properties: ['openDirectory', 'createDirectory'] });
@@ -494,7 +558,7 @@ async function createWindow() {
   mainWindow.on('close', event => {
     if (mayClose) { mayClose=false; closing=false; return; }
     event.preventDefault();
-    if (switchingLibrary || importing || draggingAssets || imagePlugins?.busy() || collector?.activeCount()) {
+    if (switchingLibrary || importing || draggingAssets || historyBusy || metadataSaves.size || imagePlugins?.busy() || collector?.activeCount()) {
       dialog.showMessageBox(mainWindow, { type: 'info', title: '素材操作进行中', message: '请等待素材操作完成后再关闭拾图。图片处理任务可在插件中心取消。', buttons: ['知道了'] });
       return;
     }
@@ -551,9 +615,11 @@ else {
     });
     collector=createCollector({library:{snapshot:()=>requireLibrary().snapshot(),importPaths:(...args)=>{
       if (installingUpdate) throw new Error('正在安装更新，暂时无法采集');
+      if (historyBusy || closing) throw new Error('正在保存撤销或重做，暂时无法采集');
       return requireLibrary().importPaths(...args);
-    }},appVersion:app.getVersion(),isReady:()=>Boolean(library)&&!switchingLibrary&&!installingUpdate,configPath:path.join(app.getPath('userData'),'collector.json'),allowPrivate:!app.isPackaged && process.env.SHITU_TEST_ALLOW_PRIVATE==='1',onImported:result=>{
+    }},appVersion:app.getVersion(),isReady:()=>Boolean(library)&&!switchingLibrary&&!installingUpdate&&!historyBusy&&!closing,configPath:path.join(app.getPath('userData'),'collector.json'),allowPrivate:!app.isPackaged && process.env.SHITU_TEST_ALLOW_PRIVATE==='1',onImported:result=>{
       if(mainWindow&&!mainWindow.isDestroyed())mainWindow.webContents.send('shitu:library-changed');
+      sendHistory();
       sendActionEvent('web-capture', result);
     }});
     try {await collector.start();} catch(error) {collectorError=error.message;}

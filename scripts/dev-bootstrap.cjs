@@ -15,11 +15,25 @@ const hoverVideoSmoke = process.env.SHITU_HOVER_VIDEO_SMOKE === '1';
 const assetDragSmoke = process.env.SHITU_ASSET_DRAG_SMOKE === '1';
 const transcodeSmoke = process.env.SHITU_TRANSCODE_SMOKE === '1';
 const uiRecoverySmoke = process.env.SHITU_UI_RECOVERY_SMOKE === '1';
-if ([smoke, updateSmoke, videoSmoke, modelSmoke, aeSmoke, folderSmoke, colorsSmoke, hoverVideoSmoke, assetDragSmoke, transcodeSmoke, uiRecoverySmoke].filter(Boolean).length > 1) throw new Error('Choose one smoke test mode at a time.');
-const testing = smoke || updateSmoke || videoSmoke || modelSmoke || aeSmoke || folderSmoke || colorsSmoke || hoverVideoSmoke || assetDragSmoke || transcodeSmoke || uiRecoverySmoke;
+const undoSmoke = process.env.SHITU_UNDO_SMOKE === '1';
+const folderPanelSmoke = process.env.SHITU_FOLDER_PANEL_SMOKE === '1';
+if ([smoke, updateSmoke, videoSmoke, modelSmoke, aeSmoke, folderSmoke, colorsSmoke, hoverVideoSmoke, assetDragSmoke, transcodeSmoke, uiRecoverySmoke, undoSmoke, folderPanelSmoke].filter(Boolean).length > 1) throw new Error('Choose one smoke test mode at a time.');
+const testing = smoke || updateSmoke || videoSmoke || modelSmoke || aeSmoke || folderSmoke || colorsSmoke || hoverVideoSmoke || assetDragSmoke || transcodeSmoke || uiRecoverySmoke || undoSmoke || folderPanelSmoke;
 const base = testing
   ? path.resolve(process.env.SHITU_SMOKE_DIRECTORY)
   : path.join(root, '.recovery', 'development');
+if (folderPanelSmoke) {
+  const relative = path.relative(path.join(root, '.recovery', 'tests'), base);
+  if (!relative || relative.startsWith('..') || path.isAbsolute(relative) || fs.lstatSync(base).isSymbolicLink()) throw new Error('Folder panel smoke directory must stay inside .recovery/tests.');
+  const marker = JSON.parse(fs.readFileSync(path.join(base, 'folder-panel-smoke-fixture.json'), 'utf8'));
+  if (!process.env.SHITU_FOLDER_PANEL_SMOKE_TOKEN || marker.token !== process.env.SHITU_FOLDER_PANEL_SMOKE_TOKEN) throw new Error('Folder panel smoke marker does not match.');
+}
+if (undoSmoke) {
+  const relative = path.relative(path.join(root, '.recovery', 'tests'), base);
+  if (!relative || relative.startsWith('..') || path.isAbsolute(relative) || fs.lstatSync(base).isSymbolicLink()) throw new Error('Undo smoke directory must stay inside .recovery/tests.');
+  const marker = JSON.parse(fs.readFileSync(path.join(base, 'undo-smoke-fixture.json'), 'utf8'));
+  if (!process.env.SHITU_UNDO_SMOKE_TOKEN || marker.token !== process.env.SHITU_UNDO_SMOKE_TOKEN) throw new Error('Undo smoke marker does not match.');
+}
 if (updateSmoke) {
   const relative = path.relative(path.join(root, '.recovery', 'tests'), base);
   if (!relative || relative.startsWith('..') || path.isAbsolute(relative) || fs.lstatSync(base).isSymbolicLink())
@@ -205,6 +219,8 @@ if (hoverVideoSmoke) require('./hover-video-smoke-bootstrap.cjs')({ root, base }
 if (assetDragSmoke) require('./asset-drag-smoke-bootstrap.cjs')({ root, base });
 if (transcodeSmoke) require('./transcode-smoke-bootstrap.cjs')({ root, base });
 if (uiRecoverySmoke) require('./ui-recovery-smoke-bootstrap.cjs')({ root, base });
+if (undoSmoke) require('./undo-smoke-bootstrap.cjs')({ root, base });
+if (folderPanelSmoke) require('./folder-panel-smoke-bootstrap.cjs')({ root, base });
 
 function configureUpdateSmoke() {
   // This branch only runs inside an explicitly marked, isolated smoke process.

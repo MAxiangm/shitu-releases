@@ -37,6 +37,9 @@
     <symbol id="i-external" viewBox="0 0 24 24"><path d="M14 3h7v7m0-7L10 14M10 4H4v16h16v-6"/></symbol>
     <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m9 5 7 7-7 7"/></symbol>
     <symbol id="i-settings" viewBox="0 0 24 24"><path d="M4 7h16M4 17h16M8 4v6m8 4v6"/></symbol>
+    <symbol id="i-pin" viewBox="0 0 24 24"><path d="M9 3h6l-1 6 4 4H6l4-4-1-6ZM12 13v8"/></symbol>
+    <symbol id="i-undo" viewBox="0 0 24 24"><path d="M9 5 4 10l5 5M4 10h10a6 6 0 0 1 0 12"/></symbol>
+    <symbol id="i-redo" viewBox="0 0 24 24"><path d="m15 5 5 5-5 5M20 10H10a6 6 0 0 0 0 12"/></symbol>
     <symbol id="i-shield" viewBox="0 0 24 24"><path d="m12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6Z"/><path d="m8 12 3 3 5-6"/></symbol>
   </defs></svg>
   <div class="app-shell details-hidden">
@@ -45,12 +48,13 @@
       <div class="brand"><div class="brand-mark"><span></span><span></span><span></span><span></span></div><div><strong>拾图</strong><span>SHITU LIBRARY</span></div></div>
       <div class="header-actions"><button id="videoTranscodeButton" class="header-button hidden" type="button" aria-haspopup="dialog" title="查看视频转码任务"><svg class="icon"><use href="#i-video"/></svg><span id="videoTranscodeLabel">视频转码</span></button><button id="settingsButton" class="header-button" type="button" aria-haspopup="dialog" title="设置转码设备"><svg class="icon"><use href="#i-settings"/></svg><span>设置</span></button><button id="appUpdateButton" class="header-button update-button" type="button" title="检查拾图更新" aria-haspopup="dialog"><svg class="icon"><use href="#i-download"/></svg><span id="appUpdateLabel">更新</span></button><button id="pluginCenterButton" class="header-button" title="插件中心"><svg class="icon"><use href="#i-image"/></svg><span>插件</span></button><button id="backupButton" class="header-button" title="备份素材库"><svg class="icon"><use href="#i-shield"/></svg><span>备份</span></button><button id="backgroundMotionButton" class="header-button" type="button" aria-pressed="true" title="开启或暂停背景粒子与线条动画"><svg class="icon"><use href="#i-motion"/></svg><span id="backgroundMotionLabel">动效：开</span></button><button id="collectorButton" class="header-button collector-button" title="浏览器采集"><span>浏览器采集</span><svg class="icon"><use href="#i-arrow"/></svg></button><button class="icon-button" id="toggleDetails" aria-label="显示或隐藏详情面板" title="显示 / 隐藏详情" aria-pressed="false"><svg class="icon"><use href="#i-info"/></svg></button></div>
     </header>
+    <aside id="folderSidebar" class="folder-sidebar hidden" aria-label="文件夹侧栏"></aside>
     <main class="workspace">
       <section class="page-heading"><div><div class="eyebrow">YOUR VISUAL COLLECTION</div><h1 id="pageTitle">全部素材<span class="title-dot">.</span></h1><p id="pageSubtitle">收集值得留下的灵感。</p></div></section>
       <div class="collection-navigation" aria-label="素材导航">
         <nav id="mainNav" aria-label="资料库"></nav>
         <div class="collection-menus">
-          <details class="collection-menu folder-browser"><summary id="folderBrowserToggle" aria-controls="folderNav" aria-expanded="false" title="展开文件夹列表"><svg class="icon"><use href="#i-folder"/></svg><span id="folderBrowserLabel">文件夹</span><svg class="icon tiny"><use href="#i-chevron"/></svg></summary><div class="browser-popover"><div class="section-label section-heading"><span>文件夹</span><button id="newFolder" class="icon-button" aria-label="新建文件夹" title="新建文件夹"><svg class="icon"><use href="#i-plus"/></svg></button></div><nav id="folderNav" aria-label="文件夹层级"></nav><p class="sidebar-hint" id="folderHint">还没有文件夹，点击右上角 ＋ 新建</p></div></details>
+          <details id="folderBrowser" class="collection-menu folder-browser"><summary id="folderBrowserToggle" aria-controls="folderNav" aria-expanded="false" title="展开文件夹列表"><svg class="icon"><use href="#i-folder"/></svg><span id="folderBrowserLabel">文件夹</span><svg class="icon tiny"><use href="#i-chevron"/></svg></summary><div id="folderPanel" class="browser-popover"><div class="section-label section-heading"><span>文件夹</span><div class="folder-panel-heading-actions"><button id="newFolder" class="icon-button" aria-label="新建文件夹" title="新建文件夹"><svg class="icon"><use href="#i-plus"/></svg></button><button id="folderPanelPin" class="folder-panel-pin" type="button" aria-label="固定到左侧" aria-pressed="false" title="固定到左侧"><svg class="icon" aria-hidden="true"><use href="#i-pin"/></svg><span id="folderPanelPinLabel">固定</span></button></div></div><nav id="folderNav" aria-label="文件夹层级"></nav><p class="sidebar-hint" id="folderHint">还没有文件夹，点击右上角 ＋ 新建</p></div></details>
           <details class="collection-menu tag-browser"><summary><svg class="icon"><use href="#i-tag"/></svg>标签<span id="tagCount" class="small-count">0</span><svg class="icon tiny"><use href="#i-chevron"/></svg></summary><div class="browser-popover"><div class="section-label">标签</div><div id="tagNav" class="tag-nav"></div><p class="sidebar-hint" id="tagHint">选择图片，为它添加第一个标签</p></div></details>
         </div>
       </div>
@@ -62,6 +66,7 @@
           <button id="folderUp" class="folder-navigation-button" type="button" aria-label="返回上一级" title="返回上一级（Alt＋↑）" disabled><svg class="icon" aria-hidden="true"><use href="#i-arrow-up"/></svg></button>
         </div>
         <nav id="folderBreadcrumbs" class="folder-breadcrumbs" aria-label="当前文件夹路径"><span class="folder-path-placeholder">尚未打开素材库</span></nav>
+        <div class="history-actions" role="group" aria-label="撤销与重做"><button id="undoHistoryButton" class="folder-navigation-button" type="button" aria-label="撤销" title="撤销（Ctrl＋Z）" disabled><svg class="icon" aria-hidden="true"><use href="#i-undo"/></svg></button><button id="redoHistoryButton" class="folder-navigation-button" type="button" aria-label="重做" title="重做（Ctrl＋Shift＋Z）" disabled><svg class="icon" aria-hidden="true"><use href="#i-redo"/></svg></button></div>
         <button id="createFolderHere" class="secondary-button folder-create-button" type="button" disabled><svg class="icon" aria-hidden="true"><use href="#i-folder-plus"/></svg><span>新建文件夹</span></button>
       </div>
       <div id="activeFilter" class="active-filter hidden"></div>
@@ -78,6 +83,7 @@
   <div id="preview" class="preview hidden" role="dialog" aria-modal="true" aria-label="圆柱素材预览">
     <div class="preview-window">
     <div class="preview-top"><div><strong id="previewName"></strong><span id="previewMeta"></span></div><div class="preview-actions"><button id="previewBack" class="preview-back hidden" title="返回圆柱阵列 (Esc)"><svg class="icon"><use href="#i-arrow"/></svg>返回阵列</button><button id="previewOpen" class="icon-button" aria-label="使用系统应用打开" title="使用系统应用打开"><svg class="icon"><use href="#i-external"/></svg></button><button id="previewClose" class="icon-button" aria-label="关闭预览" title="关闭预览 (Esc)"><svg class="icon"><use href="#i-close"/></svg></button></div></div>
+    <div id="previewVideoStatus" class="preview-video-status hidden" role="status" aria-live="polite"><span id="previewVideoStatusText"></span><progress id="previewVideoProgress" class="hidden" max="100" value="0" aria-label="完整视频准备进度"></progress><button id="previewVideoRetry" class="text-button hidden" type="button">重试完整预览</button></div>
     <button id="previewPrev" class="preview-arrow previous" aria-label="向左转动圆柱"><svg class="icon"><use href="#i-chevron"/></svg></button>
     <div id="previewCylinder" class="cylinder-viewport" aria-label="圆柱图片阵列"><div class="cylinder-scene"><div id="previewCylinderRing" class="cylinder-ring"></div></div><div id="previewFocus" class="preview-focus hidden"><div id="previewFocusContent" class="preview-focus-content"></div></div></div>
     <div id="previewMediaParking" class="hidden"><img id="previewImage" class="hidden" alt=""><video id="previewVideo" class="hidden" controls playsinline preload="metadata"></video><p id="previewFallback" class="hidden">此格式无法在窗口中预览，可使用右上角按钮在系统应用中打开。</p></div>
@@ -174,6 +180,7 @@
   <script src="./color-labels.js"></script>
   <script src="./video-hover.js"></script>
   <script src="./asset-folder-drag.js"></script>
+  <script src="./history-ui.js"></script>
   <script src="./renderer.js"></script>
 </body>
 </html>

@@ -115,6 +115,69 @@ test('preview is cached, corrupt cache regenerates, and only one job serves conc
   assert.equal((await instance.probe(regenerated.path)).codec, 'vp9');
 });
 
+test('ready full preview is stat-bound, ignores stale metadata and never starts cold work', requireRuntime, async t => {
+  const directory = await fixture(t), source = await sample(directory, 'avi', 'mpeg4');
+  const instance = engine(t, directory), key = digest(await fs.readFile(source));
+  assert.equal(await instance.getReadyPreview(source, { key }), null);
+  assert.equal(instance.busy(), false);
+  const first = await instance.preview(source, { key });
+  const ready = await instance.getReadyPreview(source, { key });
+  assert.equal(ready.path, first.path); assert.equal(ready.cached, true);
+  assert.equal(await instance.getReadyPreview(source, { key: 'f'.repeat(64) }), null);
+  const metadataPath = `${first.path}.json`, metadata = await fs.readFile(metadataPath, 'utf8');
+  await fs.writeFile(metadataPath, 'invalid cache metadata');
+  assert.equal(await instance.getReadyPreview(source, { key }), null);
+  const regenerated = await instance.preview(source, { key });
+  assert.equal(regenerated.cached, false); assert.equal((await instance.probe(regenerated.path)).codec, 'vp9');
+  await fs.writeFile(regenerated.path, Buffer.alloc((await fs.stat(regenerated.path)).size, 5));
+  assert.equal(await instance.getReadyPreview(source, { key }), null, 'Same-size corruption must invalidate by its file stamp');
+  const repaired = await instance.preview(source, { key }); assert.equal(repaired.cached, false);
+  assert.ok(metadata.length > 0);
+  await fs.appendFile(source, 'source changed');
+  assert.equal(await instance.getReadyPreview(source, { key }), null);
+  await assert.rejects(instance.preview(source, { key }), /内容已变化/);
+});
+
+test('stat caches skip repeated hashing and probing while trusted metadata and operation progress remain isolated', requireRuntime, async t => {
+  const directory = await fixture(t), source = await sample(directory, 'avi', 'mpeg4'), key = digest(await fs.readFile(source));
+  const script = `
+    const fs = require('node:fs'); const cp = require('node:child_process');
+    let reads = 0, probes = 0; const originalRead = fs.createReadStream, originalSpawn = cp.spawn;
+    fs.createReadStream = (...args) => { reads++; return originalRead(...args); };
+    cp.spawn = (file, ...args) => { if (file.includes('ffprobe')) probes++; return originalSpawn(file, ...args); };
+    const { createVideoEngine } = require(process.argv[1]);
+    (async () => {
+      const engine = createVideoEngine({ runtimeDir: process.argv[2], cacheDir: process.argv[3] });
+      try {
+        const metadata = await engine.probe(process.argv[4]); const initialProbes = probes;
+        await engine.probe(process.argv[4]); const repeatedProbes = probes;
+        const progress = []; await engine.preview(process.argv[4], { key: process.argv[5], metadata, onProgress: value => progress.push(value.state) });
+        const afterFirst = { reads, probes }; const warmProgress = [];
+        const ready = await engine.getReadyPreview(process.argv[4], { key: process.argv[5] });
+        await engine.preview(process.argv[4], { key: process.argv[5], onProgress: value => warmProgress.push(value.state) });
+        console.log(JSON.stringify({ initialProbes, repeatedProbes, afterFirst, afterWarm: { reads, probes }, progress, warmProgress, ready: !!ready }));
+      } finally { await engine.shutdown(); }
+    })().catch(error => { console.error(error); process.exitCode = 1; });`;
+  const result = spawnSync(process.execPath, ['-e', script, path.join(root, 'src/video-engine.cjs'), runtime, path.join(directory, 'cache'), source, key],
+    { encoding: 'utf8', windowsHide: true, timeout: 30000 });
+  assert.ifError(result.error); assert.equal(result.status, 0, result.stderr);
+  const observed = JSON.parse(result.stdout);
+  assert.equal(observed.initialProbes, 1); assert.equal(observed.repeatedProbes, 1);
+  assert.equal(observed.afterFirst.probes, 2, 'Only the output is probed when complete trusted source metadata was supplied');
+  assert.deepEqual(observed.afterWarm, observed.afterFirst, 'Warm requests must not scan source/output bytes or launch probes');
+  assert.ok(observed.progress.includes('converting')); assert.equal(observed.progress.at(-1), 'ready');
+  assert.deepEqual(observed.warmProgress, ['ready']); assert.equal(observed.ready, true);
+});
+
+test('a source changed during full encoding is rejected and cannot become a ready preview', requireRuntime, async t => {
+  const directory = await fixture(t), source = await sample(directory, 'avi', 'mpeg4');
+  const instance = engine(t, directory), key = digest(await fs.readFile(source)); let changed = false;
+  await assert.rejects(instance.preview(source, { key, onProgress: event => {
+    if (!changed && event.state === 'converting') { changed = true; require('node:fs').appendFileSync(source, 'changed during encoding'); }
+  } }), /预览准备期间发生变化/);
+  assert.equal(await instance.getReadyPreview(source, { key }), null);
+});
+
 test('one cancelled subscriber does not cancel another preview subscriber', requireRuntime, async t => {
   const directory = await fixture(t);
   const source = await sample(directory, 'avi', 'mpeg4');

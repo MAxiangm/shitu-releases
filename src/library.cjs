@@ -8,6 +8,7 @@ const { collectModelBundle, copyModelBundle, validateModelBundle, isSafeBundlePa
 const { validateProjectBundle, copyProjectBundle } = require('./project-bundle.cjs');
 const FolderTree = require('./folder-tree.js');
 const ColorLabels = require('./color-labels.js');
+const { MetadataHistory, sameField } = require('./metadata-history.cjs');
 const mediaType = ext => PROJECT.has(ext) ? 'project' : MODEL.has(ext) ? 'model' : VIDEO.has(ext) ? 'video' : 'image';
 const bundleRelative = (id, ext) => `originals/${id}.${PROJECT.has(ext) ? 'project' : 'model'}`;
 const isBundle = ext => MODEL.has(ext) || PROJECT.has(ext);
@@ -50,7 +51,14 @@ async function removeBundleFiles(directory, paths) {
   for (const relative of paths) await fs.unlink(path.join(directory, relative)).catch(error => { if (error.code !== 'ENOENT') throw error; });
   for (const relative of folders) await fs.rmdir(path.join(directory, relative)).catch(error => { if (error.code !== 'ENOENT') throw error; });
 }
-function mediaMetadata(value = {}) {
+const VIDEO_PREVIEW_METADATA = Object.freeze({
+  pixelFormat: value => typeof value === 'string' && /^[a-zA-Z0-9_.-]{1,80}$/.test(value),
+  audioCodec: value => typeof value === 'string' && /^[a-zA-Z0-9_.-]{0,80}$/.test(value),
+  streamIndex: value => Number.isInteger(value) && value >= 0 && value <= 2147483647,
+  colorSpace: value => typeof value === 'string' && /^[a-zA-Z0-9_.-]{0,80}$/.test(value),
+  rotation: value => Number.isFinite(value) && value >= -360 && value <= 360
+});
+function mediaMetadata(value = {}, video = false) {
   const result = {};
   for (const key of ['width', 'height', 'duration']) {
     const number = Number(value[key]);
@@ -58,6 +66,7 @@ function mediaMetadata(value = {}) {
   }
   if (typeof value.codec === 'string' && /^[a-zA-Z0-9_.-]{1,80}$/.test(value.codec)) result.codec = value.codec;
   for (const key of ['hasAudio', 'hasAlpha']) if (typeof value[key] === 'boolean') result[key] = value[key];
+  if (video) for (const [key, valid] of Object.entries(VIDEO_PREVIEW_METADATA)) if (valid(value[key])) result[key] = value[key];
   return result;
 }
 const clone = value => structuredClone(value);
@@ -166,6 +175,7 @@ class Library {
     this.prepareProjectBundle = prepareProjectBundle;
     this.data = null;
     this._queue = Promise.resolve();
+    this._history = new MetadataHistory();
   }
 
   async init() {
@@ -214,6 +224,7 @@ class Library {
         projectPreviewMetadata(asset.projectPreview, asset.hash);
       }
       if ('codec' in asset && (typeof asset.codec !== 'string' || !/^[a-zA-Z0-9_.-]{1,80}$/.test(asset.codec))) throw new Error('视频编码无效');
+      for (const [key, valid] of Object.entries(VIDEO_PREVIEW_METADATA)) if (key in asset && !valid(asset[key])) throw new Error('视频预览信息无效');
       if ('sourceUrl' in asset) webUrl(asset.sourceUrl, '素材链接');
       if ('pageUrl' in asset) webUrl(asset.pageUrl, '来源网页');
       assetIds.add(asset.id);
@@ -251,6 +262,29 @@ class Library {
     return result;
   }
 
+  historyState() { this._ready(); return this._history.state(); }
+
+  _recordHistory(options) {
+    if (!options || typeof options !== 'object' || Array.isArray(options) ||
+        (options.recordHistory !== undefined && typeof options.recordHistory !== 'boolean')) throw new Error('操作历史设置无效');
+    return options.recordHistory === true;
+  }
+
+  _replayHistory(direction, { expectedId } = {}) {
+    return this._mutate(async () => {
+      const entry = this._history.peek(direction, expectedId);
+      const draft = this._history.apply(this.data, entry, direction);
+      try { this._validate(draft); }
+      catch (error) { throw new Error(`操作发生冲突：${error.message}`); }
+      await this._persist(draft);
+      this._history.commit(direction, entry);
+      return this.snapshot();
+    });
+  }
+
+  undo(options = {}) { return this._replayHistory('undo', options); }
+  redo(options = {}) { return this._replayHistory('redo', options); }
+
   snapshot() {
     this._ready();
     const assets = clone(this.data.assets).map(asset => ({ ...asset, mediaType: mediaType(asset.ext), colorLabel: ColorLabels.normalize(asset.colorLabel) }));
@@ -259,6 +293,7 @@ class Library {
     for (const asset of active) for (const tag of asset.tags) tagCounts.set(tag, (tagCounts.get(tag) || 0) + 1);
     return {
       root: this.root,
+      history: this.historyState(),
       assets,
       folders: clone(this.data.folders).map(folder => ({ ...folder, parentId: FolderTree.parentId(folder), colorLabel: ColorLabels.normalize(folder.colorLabel) })),
       tags: [...tagCounts].map(([name, count]) => ({ name, count })).sort((a, b) => a.name.localeCompare(b.name, 'zh-CN')),
@@ -451,7 +486,7 @@ class Library {
                 }
                 const timestamp = now();
                 const copyInfo = await fs.stat(copied);
-                draft.assets.push({ id, name: path.basename(absolute, path.extname(absolute)), ext, mediaType: VIDEO.has(ext) ? 'video' : 'image', size: copyInfo.size, width: Number(dimensions.width) || 0, height: Number(dimensions.height) || 0, ...mediaMetadata(dimensions), hash: copyHash, createdAt: timestamp, updatedAt: timestamp, tags: [], folderId, rating: 0, notes: '', trashedAt: null, filename, thumbnail, ...sourceMetadata });
+                draft.assets.push({ id, name: path.basename(absolute, path.extname(absolute)), ext, mediaType: VIDEO.has(ext) ? 'video' : 'image', size: copyInfo.size, width: Number(dimensions.width) || 0, height: Number(dimensions.height) || 0, ...mediaMetadata(dimensions, VIDEO.has(ext)), hash: copyHash, createdAt: timestamp, updatedAt: timestamp, tags: [], folderId, rating: 0, notes: '', trashedAt: null, filename, thumbnail, ...sourceMetadata });
                 hashes.add(copyHash);
                 created.push({ path: copied });
                 if (thumbnail) created.push({ path: thumbnailPath });
@@ -499,32 +534,57 @@ class Library {
     return result;
   }
 
-  updateAssets(ids, patch) {
+  updateAssets(ids, patch, options = {}) {
     return this._mutate(async () => {
+      const record = this._recordHistory(options);
       const selected = this._ids(ids);
       if (!patch || typeof patch !== 'object' || Array.isArray(patch)) throw new Error('修改内容无效');
       const clean = {};
-      for (const key of Object.keys(patch)) if (!['name', 'tags', 'folderId', 'rating', 'notes', 'sourceUrl', 'pageUrl', 'colorLabel'].includes(key)) throw new Error(`不支持修改 ${key}`);
+      for (const key of Object.keys(patch)) if (!['name', 'tags', 'addTags', 'removeTags', 'folderId', 'rating', 'minRating', 'notes', 'sourceUrl', 'pageUrl', 'colorLabel'].includes(key)) throw new Error(`不支持修改 ${key}`);
+      const editTags = 'addTags' in patch || 'removeTags' in patch;
+      const editRating = 'minRating' in patch;
+      if ('tags' in patch && editTags) throw new Error('标签替换不能与添加或移除标签同时使用');
+      if ('rating' in patch && editRating) throw new Error('评分替换不能与最低评分同时使用');
+      if (editRating && (!Number.isInteger(patch.minRating) || patch.minRating < 1 || patch.minRating > 5)) throw new Error('最低评分必须是 1 至 5 的整数');
+      const checkedTags = values => {
+        if (!Array.isArray(values) || values.length > 100) throw new Error('标签格式无效或数量过多');
+        return [...new Set(values.map(tag => text(tag, '标签', 100)))];
+      };
+      const addTags = 'addTags' in patch ? checkedTags(patch.addTags) : [];
+      const removeTags = new Set('removeTags' in patch ? checkedTags(patch.removeTags) : []);
       if ('name' in patch) clean.name = text(patch.name, '名称', 240);
       if ('sourceUrl' in patch) clean.sourceUrl = webUrl(patch.sourceUrl, '素材链接');
       if ('pageUrl' in patch) clean.pageUrl = webUrl(patch.pageUrl, '来源网页');
-      if ('tags' in patch) {
-        if (!Array.isArray(patch.tags) || patch.tags.length > 100) throw new Error('标签格式无效或数量过多');
-        clean.tags = [...new Set(patch.tags.map(tag => text(tag, '标签', 100)))];
-      }
+      if ('tags' in patch) clean.tags = checkedTags(patch.tags);
       if ('folderId' in patch) { this._folder(patch.folderId); clean.folderId = patch.folderId; }
       if ('rating' in patch) { if (!Number.isInteger(patch.rating) || patch.rating < 0 || patch.rating > 5) throw new Error('评分必须是 0 至 5 的整数'); clean.rating = patch.rating; }
       if ('colorLabel' in patch) clean.colorLabel = ColorLabels.normalize(patch.colorLabel);
       if ('notes' in patch) { if (typeof patch.notes !== 'string' || patch.notes.length > 20000) throw new Error('备注格式无效或超过 20000 字符'); clean.notes = patch.notes; }
       const draft = clone(this.data);
-      for (const asset of draft.assets) if (selected.has(asset.id)) Object.assign(asset, clean, { updatedAt: now() });
+      const keys = [...Object.keys(clean), ...(editTags ? ['tags'] : []), ...(editRating ? ['rating'] : [])];
+      const changed = new Set();
+      for (const asset of draft.assets) {
+        if (!selected.has(asset.id)) continue;
+        // Keep each asset's other tags. Additions win if a tag appears in both lists.
+        const values = { ...clean,
+          ...(editTags ? { tags: [...new Set([...asset.tags.filter(tag => !removeTags.has(tag)), ...addTags])] } : {}),
+          ...(editRating ? { rating: Math.max(asset.rating, patch.minRating) } : {}) };
+        if (editTags && values.tags.length > 100) throw new Error('标签格式无效或数量过多');
+        if (keys.some(key => !sameField(asset, { ...asset, ...values }, key))) {
+          changed.add(asset.id); Object.assign(asset, values, { updatedAt: now() });
+        }
+      }
+      if (!changed.size) return this.snapshot();
+      const entry = record ? this._history.prepare(this.data, draft, 'assets', changed, keys, changed.size > 1 ? `修改 ${changed.size} 个素材` : '修改素材') : null;
       await this._persist(draft);
+      this._history.record(entry);
       return this.snapshot();
     });
   }
 
-  moveAssetsToFolder(ids, folderId) {
+  moveAssetsToFolder(ids, folderId, options = {}) {
     return this._mutate(async () => {
+      const record = this._recordHistory(options);
       if (!Array.isArray(ids) || !ids.length || ids.length > 10000 || ids.some(id => typeof id !== 'string' || !/^[a-zA-Z0-9-]{1,128}$/.test(id))) throw new Error('请选择有效素材');
       const selected = this._ids(ids);
       this._folder(folderId);
@@ -535,7 +595,9 @@ class Library {
       const draft = clone(this.data);
       const updatedAt = now();
       for (const asset of draft.assets) if (changed.has(asset.id)) Object.assign(asset, { folderId, updatedAt });
+      const entry = record ? this._history.prepare(this.data, draft, 'assets', changed, ['folderId'], changed.size > 1 ? `移动 ${changed.size} 个素材` : '移动素材') : null;
       await this._persist(draft);
+      this._history.record(entry);
       return this.snapshot();
     });
   }
@@ -684,34 +746,43 @@ class Library {
     });
   }
 
-  renameFolder(id, name) {
+  renameFolder(id, name, options = {}) {
     return this._mutate(async () => {
+      const record = this._recordHistory(options);
       this._folder(id);
       if (id === null) throw new Error('分类不存在');
       name = text(name, '文件夹名称', 100);
       const parentId = FolderTree.parentId(this.data.folders.find(folder => folder.id === id));
       if (this.data.folders.some(folder => folder.id !== id && FolderTree.parentId(folder) === parentId && folder.name === name)) throw new Error('同级文件夹中已存在此名称');
+      if (this.data.folders.find(folder => folder.id === id).name === name) return this.snapshot();
       const draft = clone(this.data);
       draft.folders.find(folder => folder.id === id).name = name;
+      const entry = record ? this._history.prepare(this.data, draft, 'folders', new Set([id]), ['name'], '重命名文件夹') : null;
       await this._persist(draft);
+      this._history.record(entry);
       return this.snapshot();
     });
   }
 
-  setFolderColor(id, colorLabel) {
+  setFolderColor(id, colorLabel, options = {}) {
     return this._mutate(async () => {
+      const record = this._recordHistory(options);
       this._folder(id);
       if (id === null) throw new Error('分类不存在');
       colorLabel = ColorLabels.normalize(colorLabel);
+      if (ColorLabels.normalize(this.data.folders.find(folder => folder.id === id).colorLabel) === colorLabel) return this.snapshot();
       const draft = clone(this.data);
       Object.assign(draft.folders.find(folder => folder.id === id), { colorLabel, updatedAt: now() });
+      const entry = record ? this._history.prepare(this.data, draft, 'folders', new Set([id]), ['colorLabel'], '修改文件夹颜色') : null;
       await this._persist(draft);
+      this._history.record(entry);
       return this.snapshot();
     });
   }
 
-  moveFolder(id, parentId = null) {
+  moveFolder(id, parentId = null, options = {}) {
     return this._mutate(async () => {
+      const record = this._recordHistory(options);
       this._folder(id); this._folder(parentId);
       if (id === null) throw new Error('分类不存在');
       if (id === parentId || FolderTree.descendantIds(this.data.folders, id).has(parentId)) throw new Error('文件夹不能移入自己或自己的子文件夹');
@@ -720,7 +791,9 @@ class Library {
       if (this.data.folders.some(item => item.id !== id && FolderTree.parentId(item) === parentId && item.name === folder.name)) throw new Error('同级文件夹中已存在此名称');
       const draft = clone(this.data);
       Object.assign(draft.folders.find(item => item.id === id), { parentId, updatedAt: now() });
+      const entry = record ? this._history.prepare(this.data, draft, 'folders', new Set([id]), ['parentId'], '移动文件夹') : null;
       await this._persist(draft);
+      this._history.record(entry);
       return this.snapshot();
     });
   }
@@ -829,7 +902,7 @@ class Library {
           const destination = path.join(this.root, relative);
           const metadata = await this.createThumbnail(path.join(this.root, asset.filename), destination, { signal });
           await fs.access(destination);
-          Object.assign(asset, mediaMetadata(metadata), { thumbnail: relative });
+          Object.assign(asset, mediaMetadata(metadata, true), { thumbnail: relative });
           updated++;
         } catch (error) {
           signal?.throwIfAborted();

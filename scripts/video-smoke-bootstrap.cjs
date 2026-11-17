@@ -8,7 +8,7 @@ module.exports = function configureVideoSmoke({ root, base }) {
   const fixture = JSON.parse(fs.readFileSync(path.join(base, 'video-smoke-fixture.json'), 'utf8'));
   const resultPath = path.join(base, 'result.json');
   const failures = [];
-  let engine, collectorInstance, engineShutdown = false, collectorClosed = false, uiResult;
+  let engine, collectorInstance, engineShutdown = false, collectorClosed = false, uiResult, diagnosticWindow, scenarioName;
   assert.equal(app.isPackaged, false, 'Video smoke keeps production updates disabled.');
   net.fetch = async () => { throw new Error('Video smoke refuses network requests.'); };
   dialog.showErrorBox = (title, content) => failures.push(`${title}: ${content}`);
@@ -19,26 +19,9 @@ module.exports = function configureVideoSmoke({ root, base }) {
   });
   let readGate, videoCacheDir;
   const previewStarts = [];
-  const originalReadStream = fs.createReadStream;
-  // Hold a real engine job inside its source hash, so even a one-frame DXV
-  // deterministically remains pending while the UI closes or switches clips.
-  fs.createReadStream = (...args) => {
-    const stream = originalReadStream(...args);
-    const gate = readGate;
-    if (gate && !gate.claimed && String(args[0]).toLowerCase().endsWith('.dxv')) {
-      gate.claimed = true;
-      const iterator = stream[Symbol.asyncIterator].bind(stream);
-      stream[Symbol.asyncIterator] = async function* () {
-        gate.enter();
-        await gate.released;
-        yield* iterator();
-      };
-    }
-    return stream;
-  };
-  let videoModule;
-  try { videoModule = require(path.join(root, 'src', 'video-engine.cjs')); }
-  finally { fs.createReadStream = originalReadStream; }
+  // Hold a full-preview engine request, independently of whether a previously
+  // verified source hash can now be reused. Quick playback remains available.
+  const videoModule = require(path.join(root, 'src', 'video-engine.cjs'));
   const createEngine = videoModule.createVideoEngine;
   videoModule.createVideoEngine = options => {
     videoCacheDir = options.cacheDir;
@@ -48,6 +31,11 @@ module.exports = function configureVideoSmoke({ root, base }) {
       // Make the AVI result deterministically arrive after a later MKV result.
       if (source.toLowerCase().endsWith('.avi')) await new Promise(resolve => setTimeout(resolve, 180));
       previewStarts.push(source);
+      const gate = readGate;
+      if (gate && !gate.claimed && source.toLowerCase().endsWith('.dxv')) {
+        gate.claimed = true; gate.enter(); await gate.released;
+      }
+      settings.signal?.throwIfAborted();
       return preview(source, settings);
     };
     const shutdown = engine.shutdown;
@@ -78,9 +66,11 @@ module.exports = function configureVideoSmoke({ root, base }) {
       throw error;
     })) await fs.promises.unlink(path.join(videoCacheDir, name));
   };
-  const fail = error => {
+  const fail = async error => {
     readGate?.release();
-    fs.writeFileSync(resultPath, JSON.stringify({ ok: false, error: error.stack || String(error), failures }, null, 2));
+    let diagnostic;
+    try { diagnostic = await diagnosticWindow?.webContents.executeJavaScript(`(()=>{const v=document.getElementById('previewVideo');return {id:state.previewId,phase:videoPreviewSession?.phase,error:videoPreviewSession?.error,quick:videoPreviewSession?.quickReady,pending:videoPreviewSession?.fullPending,video:{ready:v.readyState,controls:v.controls,src:v.currentSrc,currentTime:v.currentTime,duration:v.duration,paused:v.paused,seeking:v.seeking,networkState:v.networkState,frames:v.getVideoPlaybackQuality().totalVideoFrames,error:v.error?.message,buffered:Array.from({length:v.buffered.length},(_,i)=>[v.buffered.start(i),v.buffered.end(i)])},fallback:document.getElementById('previewFallback').textContent,status:document.getElementById('previewVideoStatusText').textContent}})()`); } catch {}
+    fs.writeFileSync(resultPath, JSON.stringify({ ok: false, error: error.stack || String(error), scenarioName, diagnostic, previewStarts, failures }, null, 2));
     Promise.resolve(engine?.shutdown()).finally(() => app.exit(1));
   };
   app.on('before-quit', () => {
@@ -91,6 +81,7 @@ module.exports = function configureVideoSmoke({ root, base }) {
     }, null, 2) + '\n');
   });
   app.on('browser-window-created', (_event, window) => {
+    diagnosticWindow = window;
     window.show = () => {};
     window.setSkipTaskbar(true);
     window.setOpacity(0);
@@ -144,14 +135,15 @@ module.exports = function configureVideoSmoke({ root, base }) {
           const { assets, waitFor, check } = window.__videoSmoke;
           const dxv = assets.find(asset => asset.fixtureKind === 'dxv');
           const video = document.getElementById('previewVideo');
-          return waitFor(() => state.previewId === dxv.id && video.readyState >= 2 && !video.classList.contains('hidden'), 'Cold DXV preview failed after reopen or switch')
+          return waitFor(() => state.previewId === dxv.id && video.readyState >= 2 && video.controls && !video.classList.contains('hidden'), 'Cold DXV preview failed after reopen or switch')
             .then(() => check(!document.getElementById('previewFallback').textContent.includes('已取消'), 'Current DXV preview displayed a cancellation error'));
         })()`;
         for (const scenario of ['reopen', 'switch-back']) {
+          scenarioName = scenario;
           await clearPreviewCache();
           const gate = armReadGate();
           await window.webContents.executeJavaScript(`openPreview(window.__videoSmoke.assets.find(asset => asset.fixtureKind === 'dxv').id)`);
-          await waitForMain(() => gate.entered, 'Cold DXV engine job did not enter its source hash');
+          await waitForMain(() => gate.entered, 'Cold DXV full-preview job did not enter the engine');
           if (scenario === 'reopen') {
             await window.webContents.executeJavaScript(`closePreview(); openPreview(window.__videoSmoke.assets.find(asset => asset.fixtureKind === 'dxv').id)`);
           } else {
@@ -208,7 +200,11 @@ module.exports = function configureVideoSmoke({ root, base }) {
           check(focused.paused && !focused.hasAttribute('src') && state.previewId === null, 'Closing preview did not stop video');
           openPreview(dxv.id);
           await waitFor(() => state.previewId === dxv.id && focused.readyState >= 2 && !focused.classList.contains('hidden'), 'DXV UI preview did not load');
-          check(focused.controls && focused.muted && focused.loop, 'Video controls, mute and loop were not preserved');
+          check(focused.controls && focused.muted, 'Video controls and mute were not preserved');
+          check(focused.duration <= 0.1 ? !focused.loop : focused.loop, 'Video looping does not match the single-frame boundary');
+          if (focused.duration <= 0.1) {
+            await waitFor(() => focused.readyState >= 2 && focused.getVideoPlaybackQuality().totalVideoFrames > 0 && !focused.error, 'Single-frame video did not remain visible');
+          }
           await Promise.race([
             new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))),
             new Promise(resolve => setTimeout(resolve, 250))

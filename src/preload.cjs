@@ -23,7 +23,20 @@ contextBridge.exposeInMainWorld('shitu', Object.freeze({
     return () => ipcRenderer.removeListener('shitu:plugin-event', listener);
   },
   getLibrary: () => call('get-library'),
-  prepareVideo: (id, expectedRoot, requestToken, profile = 'full') => call('prepare-video', id, expectedRoot, requestToken, profile),
+  historyState: () => call('get-history-state'),
+  undoHistory: (expectedRoot, expectedId) => call('undo-history', expectedRoot, expectedId),
+  redoHistory: (expectedRoot, expectedId) => call('redo-history', expectedRoot, expectedId),
+  onHistory: callback => {
+    const listener = (_event, state) => callback(state);
+    ipcRenderer.on('shitu:history', listener);
+    return () => ipcRenderer.removeListener('shitu:history', listener);
+  },
+  prepareVideo: (id, expectedRoot, requestToken, profile = 'full', requestSerial) => call('prepare-video', id, expectedRoot, requestToken, profile, requestSerial),
+  onVideoPreview: callback => {
+    const listener = (_event, state) => callback(state);
+    ipcRenderer.on('shitu:video-preview', listener);
+    return () => ipcRenderer.removeListener('shitu:video-preview', listener);
+  },
   startVideoTranscode: request => call('video-transcode-start', request),
   getTranscodeDevices: refresh => call('transcode-devices', refresh),
   getTranscodeSettings: () => call('transcode-settings'),

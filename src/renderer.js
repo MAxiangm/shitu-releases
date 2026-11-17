@@ -6,12 +6,15 @@ const SVG = 'http://www.w3.org/2000/svg';
 const folderTree = window.ShituFolders;
 const folderNavigation = window.ShituFolderNavigation.create({ limit: 80 });
 const colorLabels = window.ShituColorLabels;
+const historyControls = window.ShituHistoryUi;
 const state = { library: { assets: [], folders: [], tags: [], stats: {}, root: null, needsLibrary: true }, view: 'all', folder: null, tag: null, selected: new Set(), selectionMode: false, anchor: null, search: '', format: 'all', sort: 'newest', limit: 240, previewId: null, details: false, busy: false, libraryChanging: false };
 let modalResolve = null;
 let modalHasParent = false;
 let modalHasColor = false;
 let folderMenuAnchor = null;
 const collapsedFolders = new Set();
+let folderPanelMode = 'dropdown';
+const folderPanelStorageKey = 'shitu-folder-panel-mode';
 let metadataQueue = Promise.resolve(true);
 const pendingSaves = new Set();
 let closeReady = false;
@@ -29,6 +32,8 @@ let marqueeFrame = 0;
 let suppressMarqueeClick = false;
 let deletingAssets = false;
 let videoPreviewSerial = 0;
+let videoPreviewRequestSerial = 0;
+let videoPreviewSession = null;
 let projectPreviewView;
 let modelViewer;
 let modelViewerModule;
@@ -60,6 +65,7 @@ const updateUi = {
 };
 const transcodeUi = { snapshot: null, ids: [], root: null, pending: false, error: '', previousFocus: null, notified: new Set() };
 const transcodeSettingsUi = { settings: { mode: 'auto', cpuThreads: 1, gpuId: 'auto' }, draft: null, devices: null, loading: false, saving: false, error: '', previousFocus: null, returnToTranscode: false, revision: 0 };
+const historyUi = { snapshot: null, pending: false, revision: 0, seen: new Set(), warning: '' };
 
 function el(tag, className, text) {
   const node = document.createElement(tag);
@@ -411,7 +417,9 @@ function toast(message, error = false, duration = 4500, link) {
   const item = el('div', `toast${error ? ' error' : ''}`, message);
   item.setAttribute('role', error ? 'alert' : 'status');
   if (link) item.append(action(link.text, 'toast-action', () => run(link.run)));
-  $('toastStack').append(item);
+  const stack = $('toastStack');
+  stack.append(item);
+  while (stack.children.length > 3) stack.firstElementChild.remove();
   setTimeout(() => item.remove(), duration);
   return item;
 }
@@ -431,7 +439,8 @@ function saveMetadata(operation) {
   });
   metadataQueue = task;
   pendingSaves.add(task);
-  task.then(() => pendingSaves.delete(task));
+  renderHistory();
+  task.then(() => { pendingSaves.delete(task); renderHistory(); });
   return task;
 }
 function selectionKey() { return [...state.selected].sort().join('|'); }
@@ -490,6 +499,86 @@ async function waitForMetadata() {
     flushDetailDrafts();
   }
   return true;
+}
+function historyBlocked() {
+  return !hasLibrary() || state.libraryChanging || state.busy || draggingAssets || nativeAssetDrag || assetFolderDrag.pending || deletingAssets || closing ||
+    Boolean(state.previewId || modalResolve || window.shituPlugins?.isOpen() || document.querySelector('.modal-overlay:not(.hidden),.preview:not(.hidden),.sp-overlay:not([hidden]),#dropOverlay:not(.hidden)'));
+}
+function hasHistoryDrafts() {
+  return pendingSaves.size > 0 || [...$('detailsContent').querySelectorAll('input[data-saved-value],textarea[data-saved-value]')].some(input => !input.disabled && input.value !== input.dataset.savedValue);
+}
+function renderHistory() {
+  const snapshot = historyUi.snapshot;
+  const draft = hasHistoryDrafts();
+  for (const direction of ['undo', 'redo']) {
+    const button = $(direction === 'undo' ? 'undoHistoryButton' : 'redoHistoryButton');
+    const command = historyControls.command(snapshot, direction);
+    const label = direction === 'undo' ? '撤销' : '重做', shortcut = direction === 'undo' ? 'Ctrl＋Z' : 'Ctrl＋Shift＋Z';
+    button.disabled = historyUi.pending || historyBlocked() || (direction === 'undo' ? !command && !draft : !command || draft) || !api[direction === 'undo' ? 'undoHistory' : 'redoHistory'];
+    button.title = `${label}${direction === 'undo' && draft ? '：当前编辑' : command ? `：${command.label}` : `：暂无可${label}操作`}（${shortcut}）${snapshot?.warning ? `；${snapshot.warning}` : ''}`;
+    button.setAttribute('aria-label', command ? `${label}：${command.label}` : label);
+  }
+  for (const button of $('toastStack').querySelectorAll('[data-history-undo-id],[data-history-redo-id]')) {
+    const direction = button.hasAttribute('data-history-undo-id') ? 'undo' : 'redo';
+    button.disabled = historyUi.pending || historyBlocked() || button.dataset.historyRoot !== state.library.root || !historyControls.command(snapshot, direction, button.dataset[direction === 'undo' ? 'historyUndoId' : 'historyRedoId']);
+  }
+}
+function historyToast(message, direction, entry, root) {
+  for (const previous of $('toastStack').querySelectorAll('.history-toast')) previous.remove();
+  const item = toast(message, false, 6500);
+  item.classList.add('history-toast');
+  if (!entry?.id) return item;
+  const button = action(direction === 'undo' ? '撤销' : '重做', 'toast-action', () => { void performHistory(direction, entry.id, root); });
+  button.dataset[direction === 'undo' ? 'historyUndoId' : 'historyRedoId'] = entry.id;
+  button.dataset.historyRoot = root;
+  button.title = `${direction === 'undo' ? '撤销' : '重做'}：${entry.label}`;
+  item.append(button); renderHistory(); return item;
+}
+function receiveHistory(snapshot, notify = true) {
+  if (!snapshot || snapshot.root !== state.library.root) return;
+  const previous = historyUi.snapshot, changedRoot = previous?.root !== snapshot.root;
+  historyUi.revision++;
+  if (changedRoot) { historyUi.seen.clear(); historyUi.warning = ''; }
+  historyUi.snapshot = { ...snapshot };
+  const undo = historyControls.command(snapshot, 'undo');
+  const unseen = undo && !historyUi.seen.has(undo.id);
+  if (undo) historyUi.seen.add(undo.id);
+  if (historyUi.seen.size > 250) historyUi.seen.delete(historyUi.seen.values().next().value);
+  if (notify && !changedRoot && !historyUi.pending && unseen && Number(snapshot.undoCount) >= Number(previous?.undoCount || 0)) {
+    historyToast(`已完成：${undo.label}`, 'undo', undo, snapshot.root);
+  }
+  if (notify && snapshot.warning && snapshot.warning !== historyUi.warning) toast(snapshot.warning, false, 8000);
+  historyUi.warning = snapshot.warning || '';
+  renderHistory();
+}
+async function refreshHistory(notify = false) {
+  if (!api.historyState || !hasLibrary()) return;
+  const revision = historyUi.revision, root = state.library.root;
+  const snapshot = await api.historyState();
+  if (root === state.library.root && revision === historyUi.revision) receiveHistory(snapshot, notify);
+}
+async function performHistory(direction, expectedId, expectedRoot = state.library.root) {
+  if (historyUi.pending || historyBlocked()) return;
+  if (expectedRoot !== state.library.root) { toast('素材库已切换，这条操作无法撤销。', true); return; }
+  historyUi.pending = true; renderHistory(); videoHover.stop();
+  try {
+    if (!await waitForMetadata()) return;
+    if (expectedRoot !== state.library.root || historyBlocked()) throw new Error('当前素材库状态已变化，请稍后重试。');
+    await refreshHistory(false);
+    const command = historyControls.command(historyUi.snapshot, direction, expectedId);
+    if (!command) {
+      if (expectedId) throw new Error('这条操作已不是当前可撤销或重做的一步，请使用工具栏按钮。');
+      return;
+    }
+    const snapshot = await api[direction === 'undo' ? 'undoHistory' : 'redoHistory'](expectedRoot, command.id);
+    if (expectedRoot !== state.library.root) return;
+    applyLibrary(snapshot);
+    const opposite = direction === 'undo' ? 'redo' : 'undo';
+    historyToast(`已${direction === 'undo' ? '撤销' : '重做'}：${command.label}`, opposite, historyControls.command(historyUi.snapshot, opposite), expectedRoot);
+  } catch (error) {
+    toast(String(error?.message || error).replace(/^Error invoking remote method '[^']+':\s*(?:Error:\s*)?/, ''), true, 8000);
+    await refreshHistory(false).catch(() => {});
+  } finally { historyUi.pending = false; renderHistory(); }
 }
 
 function updateStatusText(snapshot) {
@@ -642,6 +731,8 @@ function applyLibrary(library, preserveSelection = true) {
     $('detailsContent').dataset.selectionKey = '';
   }
   state.library = library;
+  if (library.history) receiveHistory({ ...library.history, root: library.root });
+  else if (rootChanged) { historyUi.snapshot = null; historyUi.seen.clear(); historyUi.warning = ''; historyUi.revision++; }
   if (state.folder && !library.folders.some((f) => f.id === state.folder)) state.folder = null;
   if (!preserveSelection) state.selected.clear();
   else {
@@ -649,6 +740,7 @@ function applyLibrary(library, preserveSelection = true) {
     state.selected = new Set([...state.selected].filter((id) => visible.has(id)));
   }
   render();
+  if (!library.history && api.historyState) void refreshHistory(false).catch(() => {});
 }
 function filteredAssets() {
   const terms = state.search.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
@@ -704,6 +796,34 @@ function changeView(view, folder = null, tag = null) {
   render();
 }
 function folderLocation() { return { view: state.view, folder: state.folder, tag: state.tag }; }
+function setFolderPanelMode(mode, { persist = true, open = false, focus = false } = {}) {
+  if (!['dropdown', 'sidebar'].includes(mode) || draggingAssets || assetFolderDrag.active) return false;
+  const panel = $('folderPanel'), browser = $('folderBrowser'), sidebar = $('folderSidebar');
+  const scrollTop = (folderPanelMode === 'sidebar' ? $('folderNav') : panel).scrollTop, active = document.activeElement;
+  videoHover.stop(); closeFolderMenu();
+  folderPanelMode = mode;
+  browser.open = false;
+  if (mode === 'sidebar') sidebar.append(panel);
+  else browser.append(panel);
+  document.querySelector('.app-shell').classList.toggle('folder-panel-pinned', mode === 'sidebar');
+  sidebar.classList.toggle('hidden', mode !== 'sidebar' || !hasLibrary());
+  panel.dataset.mode = mode;
+  const pinned = mode === 'sidebar';
+  $('folderPanelPin').setAttribute('aria-pressed', String(pinned));
+  $('folderPanelPin').setAttribute('aria-label', pinned ? '取消固定，恢复文件夹下拉列表' : '将文件夹列表固定到左侧');
+  $('folderPanelPin').title = pinned ? '取消固定，恢复下拉列表' : '固定到左侧';
+  $('folderPanelPinLabel').textContent = pinned ? '取消固定' : '固定';
+  $('folderBrowserToggle').setAttribute('aria-expanded', String(pinned || open));
+  $('folderBrowserToggle').title = pinned ? '文件夹已固定在左侧，点击恢复下拉列表' : `${open ? '收起' : '展开'}文件夹列表`;
+  if (!pinned) browser.open = open;
+  if (persist) { try { localStorage.setItem(folderPanelStorageKey, mode); } catch {} }
+  requestAnimationFrame(() => {
+    if (folderPanelMode !== mode) return;
+    (mode === 'sidebar' ? $('folderNav') : panel).scrollTop = scrollTop;
+    if (focus) (panel.contains(active) && active.isConnected ? active : $('folderPanelPin')).focus({ preventScroll: true });
+  });
+  return true;
+}
 function directChildFolders() {
   if (!hasLibrary() || state.view !== 'all' || state.tag) return [];
   return state.library.folders.filter(folder => folderTree.parentId(folder) === currentFolder());
@@ -805,7 +925,10 @@ function renderNavigation() {
       toggle.setAttribute('aria-label', `${expanded ? '收起' : '展开'}「${folder.name}」的子文件夹`);
       row.append(toggle);
     } else row.append(el('span', 'folder-toggle-spacer'));
-    const item = action('', `nav-item${state.folder === folder.id ? ' active' : ''}`, () => changeView('all', folder.id), 'folder');
+    const item = action('', `nav-item${state.folder === folder.id ? ' active' : ''}`, () => {
+      changeView('all', folder.id);
+      if (folderPanelMode === 'sidebar') $('folderNav').querySelector(`.nav-item[data-folder-id="${CSS.escape(folder.id)}"]`)?.focus({ preventScroll: true });
+    }, 'folder');
     item.dataset.folderId = folder.id;
     const folderColor = colorLabels.get(folder.colorLabel);
     if (folderColor) {
@@ -855,6 +978,7 @@ function renderNavigation() {
 }
 function renderHeader(list) {
   renderFolderNavigation();
+  renderHistory();
   const name = viewName();
   const folderPath = state.folder ? folderTree.path(state.library.folders, state.folder) : name;
   $('breadcrumbCurrent').textContent = folderPath;
@@ -1081,7 +1205,7 @@ function positionPointerAssetDrag(event) {
 function assetDropTarget(event, payload) {
   const hit = document.elementFromPoint(event.clientX, event.clientY);
   const summary = hit?.closest('.folder-browser > summary');
-  if (summary && !summary.parentElement.open) { summary.parentElement.open = true; dragOpenedMenu = true; }
+  if (summary && folderPanelMode !== 'sidebar' && !summary.parentElement.open) { summary.parentElement.open = true; dragOpenedMenu = true; }
   const node = hit?.closest('.folder-card[data-folder-id],.folder-row[data-folder-id],.folder-breadcrumb[data-folder-id]');
   if (!node) return null;
   const folderId = node.dataset.folderId || null;
@@ -1103,8 +1227,12 @@ function highlightAssetDropTarget(destination, gesture) {
 function scrollAssetFolderDrag() {
   dragScrollFrame = 0;
   if (!assetFolderDrag.active || !dragPosition) return;
-  const scroller = $('galleryScroller'), rect = scroller.getBoundingClientRect(), edge = 34;
-  if (dragPosition.x >= rect.left && dragPosition.x <= rect.right) {
+  const surfaces = [$('galleryScroller')];
+  if (folderPanelMode === 'sidebar') surfaces.push($('folderNav'));
+  else if ($('folderBrowser').open) surfaces.push($('folderPanel'));
+  for (const scroller of surfaces) {
+    const rect = scroller.getBoundingClientRect(), edge = 34;
+    if (dragPosition.x < rect.left || dragPosition.x > rect.right) continue;
     const speed = dragPosition.y < rect.top + edge && dragPosition.y >= rect.top - edge ? -12 :
       dragPosition.y > rect.bottom - edge && dragPosition.y <= rect.bottom + edge ? 12 : 0;
     if (speed) {
@@ -1119,7 +1247,7 @@ function finishPointerAssetDrag(reason, gesture) {
   try { if (document.body.hasPointerCapture(gesture.pointerId)) document.body.releasePointerCapture(gesture.pointerId); } catch {}
   $('assetDragGhost').classList.add('hidden');
   highlightAssetDropTarget(null);
-  if (dragOpenedMenu) { document.querySelector('.folder-browser').open = false; dragOpenedMenu = false; }
+  if (dragOpenedMenu) { if (folderPanelMode !== 'sidebar') $('folderBrowser').open = false; dragOpenedMenu = false; }
   suppressAssetClickUntil = performance.now() + 350;
   if (reason !== 'external') { draggingAssets = false; document.body.classList.remove('dragging-assets'); }
 }
@@ -1189,9 +1317,7 @@ async function showAssetContextMenu(id) {
     case 'unfavorite':
       await saveMetadata(async () => {
         checkRoot();
-        let snapshot;
-        for (const asset of assets) snapshot = await api.updateAssets([asset.id], { rating: result.action === 'favorite' ? Math.max(4, asset.rating || 0) : 0 });
-        return snapshot;
+        return api.updateAssets(ids, result.action === 'favorite' ? { minRating: 4 } : { rating: 0 });
       }); break;
     case 'export': {
       const exported = await api.exportAssets(ids);
@@ -1418,14 +1544,7 @@ function renderDetails() {
   commonTags.forEach((tag) => {
     const chip = el('span', 'detail-tag');
     const remove = action('', '', () => {
-      saveMetadata(async () => {
-        let next;
-        for (const a of assets) {
-          const current = state.library.assets.find((item) => item.id === a.id) || a;
-          next = await api.updateAssets([a.id], { tags: current.tags.filter((item) => item !== tag) });
-        }
-        return next;
-      });
+      saveMetadata(() => api.updateAssets(assets.map(item => item.id), { removeTags: [tag] }));
     }, 'close');
     remove.setAttribute('aria-label', `移除标签 ${tag}`);
     chip.append(el('span', '', tag), remove);
@@ -1444,12 +1563,7 @@ function renderDetails() {
     committingTags = true;
     tagInput.disabled = true;
     const ok = await saveMetadata(async () => {
-      let next;
-      for (const a of assets) {
-        const current = state.library.assets.find((item) => item.id === a.id) || a;
-        next = await api.updateAssets([a.id], { tags: [...new Set([...(current.tags || []), ...added])] });
-      }
-      return next;
+      return api.updateAssets(assets.map(item => item.id), { addTags: added });
     });
     if (!ok) { tagInput.disabled = false; committingTags = false; }
   };
@@ -1520,10 +1634,13 @@ function render() {
   renderSelection();
   renderDetails();
   renderLibraryState();
+  renderHistory();
 }
 function renderLibraryState() {
   renderFolderNavigation();
   const ready = hasLibrary();
+  $('folderSidebar').classList.toggle('hidden', folderPanelMode !== 'sidebar' || !ready);
+  $('folderPanelPin').disabled = !ready || state.libraryChanging;
   $('libraryOnboarding').classList.toggle('hidden', ready);
   $('setupAppUpdate').classList.toggle('hidden', ready);
   document.querySelector('.app-shell').inert = !ready || state.libraryChanging;
@@ -1872,6 +1989,146 @@ function displayProjectPreview(asset) {
   select.addEventListener('change', () => request(Number(select.value)));
   request(undefined);
 }
+function videoSessionCurrent(session) {
+  return videoPreviewSession === session && session.serial === videoPreviewSerial && state.previewId === session.asset.id && state.library.root === session.root && !session.controller.signal.aborted;
+}
+function previewUrl(prepared, assetId) {
+  const url = new URL(prepared?.url);
+  if (url.protocol !== 'shitu:' || url.hostname !== 'asset' || decodeURIComponent(url.pathname.slice(1)) !== assetId || url.searchParams.get('kind') !== 'preview')
+    throw new Error('视频预览地址无效，请重新打开素材');
+  return url.href;
+}
+function renderVideoPreviewStatus(session = videoPreviewSession) {
+  const current = session && videoSessionCurrent(session), visible = current && session.phase !== 'full';
+  $('previewVideoStatus').classList.toggle('hidden', !visible);
+  if (!visible) return;
+  const progress = Number.isFinite(session.progress) ? Math.round(session.progress) : null;
+  const loading = session.fullPending || session.quickPending;
+  $('previewVideoStatusText').textContent = session.error
+    ? `${session.quickReady ? '完整预览准备失败，当前仍是前 2 秒快速预览。' : '视频预览准备失败。'}${session.error} 可重试，或使用右上角按钮在系统播放器中打开。`
+    : session.quickReady ? `前 2 秒快速预览，正在准备完整视频…${progress === null ? '' : ` ${progress}%`}`
+      : session.fullPending ? `正在准备完整视频…${progress === null ? '' : ` ${progress}%`}`
+        : `正在准备前 2 秒快速预览…${progress === null ? '' : ` ${progress}%`}`;
+  $('previewVideoStatus').classList.toggle('is-error', Boolean(session.error));
+  $('previewVideoProgress').classList.toggle('hidden', !loading || progress === null);
+  $('previewVideoProgress').value = progress || 0;
+  $('previewVideoRetry').classList.toggle('hidden', !session.error || loading);
+}
+function videoReady(video, session) {
+  const source = video.src, signal = session.controller.signal;
+  if (signal.aborted) return Promise.reject(new DOMException('视频预览已关闭', 'AbortError'));
+  if (video.readyState >= 2 && !video.error && video.currentSrc === source) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    let finished = false;
+    const finish = error => {
+      if (finished) return; finished = true;
+      clearTimeout(timer); video.removeEventListener('loadeddata', ready); video.removeEventListener('canplay', ready); video.removeEventListener('error', failed); signal.removeEventListener('abort', aborted);
+      error ? reject(error) : resolve();
+    };
+    const ready = () => { if (video.readyState >= 2 && !video.error && video.currentSrc === source) finish(); };
+    const failed = () => { if (video.error && (!video.currentSrc || video.currentSrc === source)) finish(new Error('此视频的编码暂无法在窗口中播放')); };
+    const aborted = () => finish(new DOMException('视频预览已关闭', 'AbortError'));
+    const timer = setTimeout(() => finish(new Error('视频载入超时，请重试')), 30000);
+    video.addEventListener('loadeddata', ready); video.addEventListener('canplay', ready); video.addEventListener('error', failed); signal.addEventListener('abort', aborted, { once: true });
+    if (signal.aborted) aborted(); else ready();
+  });
+}
+function videoPreviewMetadata(session, prepared) {
+  const asset = session.asset;
+  const duration = videoDuration(prepared.sourceDuration || prepared.duration);
+  const codec = typeof prepared.codec === 'string' && prepared.codec ? `视频编码 ${prepared.codec.toUpperCase()}` : '';
+  const dimensionsText = prepared.width && prepared.height ? `${prepared.width} × ${prepared.height}` : dimensions(asset);
+  $('previewMeta').textContent = [asset.ext.toUpperCase(), codec, dimensionsText, duration, size(asset.size)].filter(Boolean).join('  ·  ');
+}
+function freezeVideoFrame(video, session) {
+  if (!session.quickReady || !video.videoWidth || !video.videoHeight || !video.parentElement) return null;
+  try {
+    const cover = el('canvas', 'preview-video-cover');
+    cover.width = video.videoWidth; cover.height = video.videoHeight;
+    cover.getContext('2d').drawImage(video, 0, 0); video.parentElement.append(cover); session.cover = cover; return cover;
+  } catch { return null; }
+}
+async function showCompleteVideo(session, prepared) {
+  const video = $('previewVideo'), url = previewUrl(prepared, session.asset.id);
+  const staging = el('video'); session.staging = staging;
+  staging.preload = 'auto'; staging.muted = true; staging.playsInline = true; staging.src = url; staging.load();
+  try {
+    await videoReady(staging, session);
+    if (!videoSessionCurrent(session)) return;
+    const resume = !session.quickReady || !video.paused;
+    const time = session.quickReady ? video.currentTime : 0;
+    freezeVideoFrame(video, session);
+    video.dataset.previewSerial = String(session.serial); video.dataset.previewProfile = 'full'; video.dataset.previewOnly = 'false';
+    session.switchingSource = true;
+    video.controls = true; video.src = url; video.load(); video.classList.remove('hidden');
+    await videoReady(video, session);
+    if (!videoSessionCurrent(session)) return;
+    const targetTime = Number.isFinite(video.duration) ? Math.max(0, Math.min(time, video.duration - 0.05)) : 0;
+    if (targetTime > 0.05 && Math.abs(targetTime - video.currentTime) > 0.05) video.currentTime = targetTime;
+    // Chromium can remain seeking forever when looping a one-frame stream.
+    video.loop = !Number.isFinite(video.duration) || video.duration > 0.1;
+    session.phase = 'full'; session.error = ''; session.fullPending = false;
+    videoPreviewMetadata(session, prepared); $('previewFallback').classList.add('hidden'); renderVideoPreviewStatus(session);
+    if (resume) await video.play().catch(() => {});
+  } catch (error) {
+    if (videoSessionCurrent(session) && session.quickReady && session.quickPrepared) {
+      video.controls = false; video.loop = true; video.dataset.previewProfile = 'quick'; video.dataset.previewOnly = 'true';
+      video.src = previewUrl(session.quickPrepared, session.asset.id); video.load(); video.classList.remove('hidden');
+      $('previewFallback').classList.add('hidden'); void video.play().catch(() => {});
+    }
+    throw error;
+  } finally {
+    session.switchingSource = false;
+    staging.pause(); staging.removeAttribute('src'); staging.load();
+    if (session.staging === staging) session.staging = null;
+    session.cover?.remove(); session.cover = null;
+  }
+}
+async function requestCompleteVideo(session) {
+  if (!videoSessionCurrent(session) || session.fullPending) return;
+  session.fullPending = true; session.error = ''; session.progress = null;
+  session.requests.full = ++videoPreviewRequestSerial; renderVideoPreviewStatus(session);
+  try {
+    const prepared = await api.prepareVideo(session.asset.id, session.root, undefined, 'full', session.requests.full);
+    if (!videoSessionCurrent(session)) return;
+    await showCompleteVideo(session, prepared);
+  } catch (error) {
+    if (!videoSessionCurrent(session)) return;
+    session.error = transcodeMessage(error);
+    if (!session.quickReady) { $('previewVideo').classList.add('hidden'); $('previewFallback').textContent = '视频暂时无法预览，可使用右上角按钮在系统播放器中打开。'; $('previewFallback').classList.remove('hidden'); }
+  } finally { if (videoSessionCurrent(session)) { session.fullPending = false; renderVideoPreviewStatus(session); } }
+}
+async function startQuickVideoPreview(asset) {
+  const video = $('previewVideo');
+  const session = { asset, root: state.library.root, serial: videoPreviewSerial, controller: new AbortController(), requests: {}, phase: 'quick', quickReady: false, quickPending: true, fullPending: false, progress: null, error: '' };
+  videoPreviewSession = session;
+  video.setAttribute('aria-label', asset.name); video.controls = false; video.preload = 'auto'; video.playsInline = true; video.muted = true; video.loop = true;
+  video.poster = asset.thumbnail ? api.assetUrl(asset.id, 'thumbnail') : '';
+  $('previewFallback').textContent = '正在准备视频预览…'; $('previewFallback').classList.remove('hidden');
+  session.requests.quick = ++videoPreviewRequestSerial; renderVideoPreviewStatus(session);
+  try {
+    const prepared = await api.prepareVideo(asset.id, session.root, undefined, 'quick', session.requests.quick);
+    if (!videoSessionCurrent(session)) return;
+    video.dataset.previewSerial = String(session.serial); video.dataset.previewProfile = prepared.previewOnly ? 'quick' : 'full'; video.dataset.previewOnly = String(Boolean(prepared.previewOnly));
+    video.controls = !prepared.previewOnly; video.src = previewUrl(prepared, asset.id); video.load(); video.classList.remove('hidden');
+    await videoReady(video, session);
+    if (!videoSessionCurrent(session)) return;
+    videoPreviewMetadata(session, prepared); $('previewFallback').classList.add('hidden');
+    session.quickReady = Boolean(prepared.previewOnly); session.phase = prepared.previewOnly ? 'quick' : 'full';
+    if (!session.quickReady) video.loop = !Number.isFinite(video.duration) || video.duration > 0.1;
+    if (session.quickReady) session.quickPrepared = prepared;
+    await video.play().catch(() => {});
+  } catch (error) {
+    if (!videoSessionCurrent(session)) return;
+    // A failed fast proxy can still fall back to a complete preview.
+    session.quickReady = false;
+  } finally {
+    if (videoSessionCurrent(session)) {
+      session.quickPending = false; session.progress = null; renderVideoPreviewStatus(session);
+      if (session.phase !== 'full') void requestCompleteVideo(session);
+    }
+  }
+}
 function displayPreviewAsset(asset, index, total) {
   resetPreviewMedia();
   state.previewId = asset.id;
@@ -1916,37 +2173,7 @@ function displayPreviewAsset(asset, index, total) {
       $('previewModelStatus').classList.remove('hidden');
     });
   } else if (isVideo(asset)) {
-    const serial = videoPreviewSerial;
-    const expectedRoot = state.library.root;
-    const video = $('previewVideo');
-    video.setAttribute('aria-label', asset.name);
-    video.controls = true;
-    video.preload = 'auto';
-    video.playsInline = true;
-    video.muted = true;
-    video.loop = true;
-    video.poster = asset.thumbnail ? api.assetUrl(asset.id, 'thumbnail') : '';
-    $('previewFallback').textContent = '正在准备视频预览，首次打开可能需要一点时间…';
-    $('previewFallback').classList.remove('hidden');
-    const stillCurrent = () => serial === videoPreviewSerial && state.previewId === asset.id && state.library.root === expectedRoot;
-    Promise.resolve().then(() => stillCurrent() ? api.prepareVideo(asset.id, expectedRoot) : null).then(prepared => {
-      if (!stillCurrent()) return;
-      const url = new URL(prepared?.url);
-      if (url.protocol !== 'shitu:' || url.hostname !== 'asset' || decodeURIComponent(url.pathname.slice(1)) !== asset.id || url.searchParams.get('kind') !== 'preview')
-        throw new Error('视频预览地址无效，请重新打开素材');
-      video.dataset.previewSerial = String(serial);
-      video.src = url.href;
-      video.classList.remove('hidden');
-      const duration = videoDuration(prepared.duration);
-      const codec = typeof prepared.codec === 'string' && prepared.codec ? `视频编码 ${prepared.codec.toUpperCase()}` : '';
-      const dimensionsText = prepared.width && prepared.height ? `${prepared.width} × ${prepared.height}` : dimensions(asset);
-      $('previewMeta').textContent = [asset.ext.toUpperCase(), codec, dimensionsText, duration, size(asset.size)].filter(Boolean).join('  ·  ');
-    }).catch(error => {
-      if (!stillCurrent()) return;
-      video.classList.add('hidden');
-      $('previewFallback').textContent = `暂时无法预览此视频：${error?.message || '请稍后重试'}。可使用右上角按钮在系统播放器中打开，原文件仍完整保留。`;
-      $('previewFallback').classList.remove('hidden');
-    });
+    void startQuickVideoPreview(asset);
   } else {
     $('previewImage').src = api.assetUrl(asset.id, 'original');
     $('previewImage').alt = asset.name;
@@ -1963,8 +2190,13 @@ function openPreview(id) {
   $('previewClose').focus();
 }
 function resetPreviewMedia() {
-  const previousVideo = state.library.assets.find(asset => asset.id === $('preview').dataset.activeId && isVideo(asset));
-  if (previousVideo) Promise.resolve(api.releaseVideoViewer(previousVideo.id, state.library.root)).catch(() => {});
+  const session = videoPreviewSession;
+  if (session) {
+    session.controller.abort(); session.cover?.remove();
+    if (session.staging) { session.staging.pause(); session.staging.removeAttribute('src'); session.staging.load(); }
+    Promise.resolve(api.releaseVideoViewer(session.asset.id, session.root)).catch(() => {});
+  }
+  videoPreviewSession = null; $('previewVideoStatus').classList.add('hidden');
   videoPreviewSerial++;
   projectPreviewView = null;
   $('previewProject').replaceChildren();
@@ -1978,6 +2210,8 @@ function resetPreviewMedia() {
   $('previewVideo').removeAttribute('src');
   $('previewVideo').removeAttribute('poster');
   delete $('previewVideo').dataset.previewSerial;
+  delete $('previewVideo').dataset.previewProfile;
+  delete $('previewVideo').dataset.previewOnly;
   $('previewVideo').load();
   $('previewVideo').classList.add('hidden');
   $('previewImage').removeAttribute('src');
@@ -2065,6 +2299,9 @@ function closeCollector() { clearInterval(collectorRefreshTimer); $('collectorOv
 
 $('newFolder').addEventListener('click', () => createFolder());
 $('createFolderHere').addEventListener('click', () => { if (canNavigateFolders()) createFolder(currentFolder()); });
+$('undoHistoryButton').addEventListener('click', () => { void performHistory('undo'); });
+$('redoHistoryButton').addEventListener('click', () => { void performHistory('redo'); });
+$('detailsContent').addEventListener('input', renderHistory);
 $('folderBack').addEventListener('click', () => navigateFolderHistory('back'));
 $('folderForward').addEventListener('click', () => navigateFolderHistory('forward'));
 $('folderUp').addEventListener('click', navigateFolderUp);
@@ -2077,6 +2314,10 @@ document.addEventListener('pointerdown', event => {
 $('folderNav').addEventListener('keydown', event => {
   // Keep a focused folder control's Space/Enter/Delete away from gallery shortcuts.
   if ([' ', 'Enter', 'Delete', 'Backspace'].includes(event.key)) event.stopPropagation();
+});
+$('folderPanel').addEventListener('keydown', event => {
+  // Preserve native button activation without triggering gallery shortcuts.
+  if (event.target.closest('button') && [' ', 'Enter', 'Delete', 'Backspace'].includes(event.key)) event.stopPropagation();
 });
 $('folderContextMenu').addEventListener('keydown', event => {
   event.stopPropagation();
@@ -2092,6 +2333,15 @@ $('folderContextMenu').addEventListener('keydown', event => {
 window.addEventListener('resize', () => closeFolderMenu());
 // Collection menus use native disclosure controls and keep the workspace clear.
 const collectionMenus = [...document.querySelectorAll('.collection-menu')];
+$('folderPanelPin').addEventListener('click', event => {
+  event.preventDefault(); event.stopPropagation();
+  setFolderPanelMode(folderPanelMode === 'sidebar' ? 'dropdown' : 'sidebar', { open: folderPanelMode === 'sidebar', focus: true });
+});
+$('folderBrowserToggle').addEventListener('click', event => {
+  if (folderPanelMode !== 'sidebar') return;
+  event.preventDefault();
+  setFolderPanelMode('dropdown', { open: true, focus: true });
+});
 for (const menu of collectionMenus) {
   const summary = menu.querySelector('summary');
   summary.addEventListener('keydown', event => {
@@ -2099,6 +2349,12 @@ for (const menu of collectionMenus) {
     if ([' ', 'Enter', 'Delete', 'Backspace'].includes(event.key)) event.stopPropagation();
   });
   menu.addEventListener('toggle', () => {
+    if (menu.id === 'folderBrowser' && folderPanelMode === 'sidebar') {
+      if (menu.open) menu.open = false;
+      summary.setAttribute('aria-expanded', 'true');
+      summary.title = '文件夹已固定在左侧，点击恢复下拉列表';
+      return;
+    }
     summary.setAttribute('aria-expanded', String(menu.open));
     if (menu.classList.contains('folder-browser')) summary.title = `${menu.open ? '收起' : '展开'}文件夹列表`;
     if (menu.open) {
@@ -2286,6 +2542,7 @@ $('previewImage').addEventListener('error', () => {
   }
 });
 $('previewVideo').addEventListener('error', () => {
+  if (videoPreviewSession?.switchingSource) return;
   const asset = state.library.assets.find((item) => item.id === state.previewId);
   if (asset && isVideo(asset) && $('previewVideo').hasAttribute('src') && $('previewVideo').dataset.previewSerial === String(videoPreviewSerial)) {
     $('previewVideo').classList.add('hidden');
@@ -2301,6 +2558,7 @@ $('previewVideo').addEventListener('loadeddata', () => {
   const asset = state.library.assets.find((item) => item.id === state.previewId);
   if (asset && isVideo(asset) && $('previewVideo').dataset.previewSerial === String(videoPreviewSerial)) { $('previewVideo').classList.remove('hidden'); $('previewFallback').classList.add('hidden'); }
 });
+$('previewVideoRetry').addEventListener('click', () => { if (videoPreviewSession) void requestCompleteVideo(videoPreviewSession); });
 window.addEventListener('pagehide', resetPreviewMedia);
 $('galleryScroller').addEventListener('click', (e) => { if (performance.now() >= suppressAssetClickUntil && (e.target === $('galleryScroller') || e.target === $('gallery'))) { flushDetailDrafts(); state.selected.clear(); updateSelectionClasses(); renderSelection(); renderDetails(); } });
 
@@ -2344,6 +2602,11 @@ document.addEventListener('keydown', (e) => {
   if (!$('collectorOverlay').classList.contains('hidden')) { if (e.key === 'Escape') { e.preventDefault(); closeCollector(); } return; }
   if (modalResolve) { if (e.key === 'Escape') { e.preventDefault(); resolveModal(null); } return; }
   if (!hasLibrary() || state.libraryChanging) return;
+  const historyAction = historyControls.keyAction(e, { editing, blocked: historyUi.pending || historyBlocked() });
+  if (historyAction) {
+    if (historyControls.command(historyUi.snapshot, historyAction) || historyAction === 'undo' && hasHistoryDrafts()) { e.preventDefault(); void performHistory(historyAction); }
+    return;
+  }
   if (e.key === 'Delete') {
     if (editing) return;
     e.preventDefault();
@@ -2422,6 +2685,7 @@ api.onLibraryChanged?.(() => run(async () => {
   const snapshot = await api.getLibrary();
   if (serial === libraryRefreshSerial) applyLibrary(snapshot);
 }));
+api.onHistory?.(snapshot => receiveHistory(snapshot));
 api.onProjectPreview?.(detail => {
   if (detail?.id === projectPreviewView?.id && detail.root === projectPreviewView.root) projectPreviewView.updateProgress(detail);
 });
@@ -2451,6 +2715,8 @@ window.addEventListener('beforeunload', (event) => {
   };
   finishClosing();
 });
+try { if (localStorage.getItem(folderPanelStorageKey) === 'sidebar') folderPanelMode = 'sidebar'; } catch {}
+setFolderPanelMode(folderPanelMode, { persist: false });
 run(async () => { const library = await api.getLibrary(); applyLibrary(library); }).then((result) => {
   if (result === null) {
     state.library.libraryError = '暂时无法读取素材库设置，请重新打开拾图后再试。';
@@ -2472,6 +2738,7 @@ if (api.onUpdateState && api.updateState) {
 } else receiveUpdateState({ status: 'disabled', message: '当前版本暂未启用自动更新。' }, false);
 
 renderVideoTranscode();
+renderHistory();
 if (api.getTranscodeSettings) {
   api.getTranscodeSettings().then(settings => {
     if (!transcodeSettingsUi.draft && !transcodeSettingsUi.loading) { transcodeSettingsUi.settings = settings; renderVideoTranscode(); }
@@ -2483,3 +2750,11 @@ if (api.onVideoTranscode && api.videoTranscodeState) {
   const revision = transcodeRevision;
   api.videoTranscodeState().then(snapshot => { if (revision === transcodeRevision) receiveVideoTranscode(snapshot, false); }).catch(() => {});
 }
+if (api.onVideoPreview) api.onVideoPreview(event => {
+  const session = videoPreviewSession;
+  if (!session || !videoSessionCurrent(session) || event.id !== session.asset.id || event.root !== session.root ||
+      !['quick', 'full'].includes(event.profile) || event.requestSerial !== session.requests[event.profile] ||
+      (event.profile === 'full' ? !session.fullPending : !session.quickPending)) return;
+  if (Number.isFinite(event.progress)) session.progress = Math.max(0, Math.min(100, event.progress));
+  renderVideoPreviewStatus(session);
+});

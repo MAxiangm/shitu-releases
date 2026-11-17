@@ -6,7 +6,7 @@ module.exports = function configureHoverVideoSmoke({ root, base }) {
   const assert = require('node:assert/strict');
   const { app, dialog, session, shell, ipcMain } = require('electron');
   const fixture = require(path.join(base, 'hover-video-smoke-fixture.json'));
-  const resultPath = path.join(base, 'result.json'), failures = [], requests = [], previewStarts = [];
+  const resultPath = path.join(base, 'result.json'), failures = [], requests = [], previewStarts = [], viewerCalls = [];
   let completed = false, engine, responseGate, engineGate, lastWindow;
   app.commandLine.appendSwitch('disable-backgrounding-occluded-windows');
   app.commandLine.appendSwitch('disable-renderer-backgrounding');
@@ -17,9 +17,10 @@ module.exports = function configureHoverVideoSmoke({ root, base }) {
   shell.openExternal = async () => { throw new Error('Hover smoke must not open a browser'); };
   const handle = ipcMain.handle.bind(ipcMain);
   ipcMain.handle = (channel, listener) => handle(channel, async (...args) => {
+    if (channel === 'shitu:prepare-video') viewerCalls.push({ id: args[1], profile: args[4] || 'full' });
     const result = await listener(...args);
     const gate = responseGate;
-    if (channel === 'shitu:prepare-video' && gate && args[1] === gate.id) { gate.entered = true; await gate.promise; }
+    if (channel === 'shitu:prepare-video' && gate && args[1] === gate.id && (!gate.profile || args[4] === gate.profile)) { gate.entered = true; await gate.promise; }
     return result;
   });
   const videoModule = require(path.join(root, 'src', 'video-engine.cjs'));
@@ -32,6 +33,7 @@ module.exports = function configureHoverVideoSmoke({ root, base }) {
       if (gate && source.toLowerCase().endsWith(gate.extension) && (!gate.profile || gate.profile === profile)) {
         gate.entered = true; gate.signal ||= options.signal; gate.signals ||= []; gate.signals.push(options.signal);
         await gate.promise;
+        if (gate.error) throw new Error(gate.error);
       }
       return method.call(engine, source, options);
     };
@@ -146,7 +148,43 @@ module.exports = function configureHoverVideoSmoke({ root, base }) {
         assert.equal(engineGate.signals[0].aborted, true, 'Full viewer left the obsolete short hover running');
         assert.equal(engineGate.signals[1].aborted, false, 'Full viewer was cancelled by the outgoing hover');
         engineGate.release(); engineGate = null;
-        await js(`(async()=>{const {wait,check}=window.__hoverSmoke;const v=document.getElementById('previewVideo');await wait(()=>state.previewId==='${ids.converted}'&&v.readyState>=2&&!v.classList.contains('hidden'),'Full preview failed after hover transfer');check(v.controls,'Full preview controls missing');closePreview();})()`);
+        await js(`(async()=>{const {wait,check}=window.__hoverSmoke;const v=document.getElementById('previewVideo');await wait(()=>state.previewId==='${ids.converted}'&&v.readyState>=2&&v.controls&&!v.classList.contains('hidden'),'Full preview failed after hover transfer');check(v.dataset.previewOnly==='false','Full preview incorrectly marked as short');closePreview();})()`);
+        // A fast, clearly labelled short preview must play before a blocked full conversion.
+        engineGate = gateFor({ extension: '.mov', profile: 'full' });
+        await js(`openPreview('${ids.longDxv}')`);
+        await wait(() => engineGate.entered, 'Quick viewer did not start background full preparation');
+        const quickViewer = await js(`(async()=>{const {wait,check}=window.__hoverSmoke;const v=document.getElementById('previewVideo');await wait(()=>videoPreviewSession?.quickReady&&v.readyState>=2&&!v.paused,'Quick preview did not play while full conversion waited');check(!v.controls&&v.loop,'Quick preview must loop without full-video controls');check(v.duration<=2.2,'Quick viewer encoded beyond two seconds');check(document.getElementById('previewVideoStatusText').textContent.includes('前 2 秒快速预览'),'Quick preview was not labelled');v.currentTime=0.8;v.pause();return {duration:v.duration,requestSerial:videoPreviewSession.requests.full};})()`);
+        window.webContents.send('shitu:video-preview', { id: ids.longDxv, root: setup.root, profile: 'full', requestSerial: quickViewer.requestSerial, state: 'encoding', progress: 42 });
+        await js(`window.__hoverSmoke.wait(()=>document.getElementById('previewVideoStatusText').textContent.includes('42%'),'Current full progress missing')`);
+        window.webContents.send('shitu:video-preview', { id: ids.longDxv, root: setup.root, profile: 'full', requestSerial: quickViewer.requestSerial - 1, state: 'encoding', progress: 99 });
+        await new Promise(resolve => setTimeout(resolve, 40));
+        await js(`window.__hoverSmoke.check(!document.getElementById('previewVideoStatusText').textContent.includes('99%'),'Stale progress replaced current progress')`);
+        await fs.writeFile(path.join(base, 'quick-viewer.png'), (await window.webContents.capturePage()).toPNG());
+        engineGate.release(); engineGate = null;
+        const fullViewer = await js(`(async()=>{const {wait,check}=window.__hoverSmoke;const v=document.getElementById('previewVideo');await wait(()=>videoPreviewSession?.phase==='full'&&v.readyState>=2,'Quick viewer did not switch to full');check(v.controls&&v.dataset.previewOnly==='false','Full viewer controls did not return');check(v.duration>20,'Short preview was presented as a complete video');check(v.currentTime>=0.65&&v.currentTime<=1,'Playback position was not preserved');check(v.paused,'Switching resumed a user-paused video');check(document.getElementById('previewVideoStatus').classList.contains('hidden'),'Quick label remained after full playback');return {duration:v.duration,currentTime:v.currentTime};})()`);
+        await js('closePreview()');
+        const fullCallsBeforeWarm = viewerCalls.filter(call => call.id === ids.longDxv && call.profile === 'full').length;
+        await js(`openPreview('${ids.longDxv}');`);
+        await js(`(async()=>{const {wait,check}=window.__hoverSmoke;await wait(()=>videoPreviewSession?.phase==='full'&&document.getElementById('previewVideo').readyState>=2,'Warm full preview did not open directly');check(document.getElementById('previewVideo').dataset.previewOnly==='false','Warm full cache was labelled quick');closePreview();})()`);
+        assert.equal(viewerCalls.filter(call => call.id === ids.longDxv && call.profile === 'full').length, fullCallsBeforeWarm, 'Warm full cache triggered duplicate conversion');
+        // Failure leaves the playable short clip available, and retry can finish.
+        engineGate = gateFor({ extension: '.mov', profile: 'full', error: 'Fixture full conversion failure' });
+        await js(`openPreview('${ids.failureDxv}')`);
+        await wait(() => engineGate.entered, 'Full failure fixture did not reach gate');
+        engineGate.release(); engineGate = null;
+        await js(`(async()=>{const {wait,check}=window.__hoverSmoke;await wait(()=>videoPreviewSession?.error,'Full conversion failure missing');const v=document.getElementById('previewVideo');check(v.readyState>=2&&!v.classList.contains('hidden')&&!v.controls,'Full failure discarded the short preview');check(!document.getElementById('previewVideoRetry').classList.contains('hidden'),'Retry was not offered');document.getElementById('previewVideoRetry').click();await wait(()=>videoPreviewSession?.phase==='full','Full retry failed');closePreview();})()`);
+        // Delay a complete result past closing and opening another video.
+        responseGate = gateFor({ id: ids.staleDxv, profile: 'full' });
+        await js(`openPreview('${ids.staleDxv}')`);
+        await wait(() => responseGate.entered, 'Stale full response did not reach gate');
+        const staleSerial = await js('videoPreviewSession.requests.full');
+        await js(`closePreview();openPreview('${ids.staleDxv}')`);
+        await js(`window.__hoverSmoke.wait(()=>videoPreviewSession?.phase==='full'&&document.getElementById('previewVideo').readyState>=2,'Same video did not reopen from completed cache')`);
+        const newSerial = await js('videoPreviewSession.serial');
+        responseGate.release(); responseGate = null;
+        window.webContents.send('shitu:video-preview', { id: ids.staleDxv, root: setup.root, profile: 'full', requestSerial: staleSerial, state: 'encoding', progress: 99 });
+        await new Promise(resolve => setTimeout(resolve, 120));
+        await js(`window.__hoverSmoke.check(state.previewId==='${ids.staleDxv}'&&videoPreviewSession.serial===${newSerial}&&document.getElementById('previewVideoStatus').classList.contains('hidden'),'Late full response or progress replaced a reopened viewer');closePreview()`);
         // Real click selection remains available through the video overlay.
         const point = await hover(ids.native); await playing(ids.native);
         await new Promise(resolve => setTimeout(resolve, 120));
@@ -160,8 +198,8 @@ module.exports = function configureHoverVideoSmoke({ root, base }) {
         assert.equal(previewStarts.length, selectionStarts, 'Selection mode started hover playback');
         await js('setSelectionMode(false)');
         // Closing a pending foreground video must allow another hover to start.
-        engineGate = gateFor({ extension: '.avi' });
-        await js(`openPreview('${ids.converted}')`);
+        engineGate = gateFor({ extension: '.mov', profile: 'full' });
+        await js(`openPreview('${ids.cancelDxv}')`);
         await wait(() => engineGate.entered, 'Pending foreground preview did not reach gate');
         await js('closePreview()');
         await hover(ids.native); await playing(ids.native);
@@ -190,7 +228,7 @@ module.exports = function configureHoverVideoSmoke({ root, base }) {
         for (const file of setup.originals) assert.equal(crypto.createHash('sha256').update(await fs.readFile(path.join(setup.root, file.filename))).digest('hex'), file.hash, 'Managed original changed');
         assert.deepEqual(failures, []); assert.deepEqual(requests, []);
         completed = true;
-        await fs.writeFile(resultPath, JSON.stringify({ ok: true, electron: process.versions.electron, nativeMouseEvents: true, decoded, longWarm, shortHoverProxy: true, separateFullPlayback: true, lazyPlayers: true, briefHoverSkipped: true, onePlayerOnly: true, staleReplyIgnored: true, leaveCancelsPreparation: true, fullPreviewTransfer: true, closedViewerAllowsHover: true, clickSelection: true, selectionModeSuppressed: true, blurStops: true, scrollStops: true, rerenderStops: true, modalStops: true, imagesUnaffected: true, librarySwitchStops: true, screenshotCaptured: true, managedOriginalsUnchanged: true, networkAccessed: false, ...result }, null, 2) + '\n');
+        await fs.writeFile(resultPath, JSON.stringify({ ok: true, electron: process.versions.electron, nativeMouseEvents: true, decoded, longWarm, shortHoverProxy: true, separateFullPlayback: true, lazyPlayers: true, briefHoverSkipped: true, onePlayerOnly: true, staleReplyIgnored: true, leaveCancelsPreparation: true, fullPreviewTransfer: true, quickBeforeFull: true, quickViewer, fullViewer, warmFullCacheDirect: true, fullFailureKeepsQuick: true, fullRetry: true, staleFullIgnored: true, staleProgressIgnored: true, sameVideoReopenIsolated: true, closedViewerAllowsHover: true, clickSelection: true, selectionModeSuppressed: true, blurStops: true, scrollStops: true, rerenderStops: true, modalStops: true, imagesUnaffected: true, librarySwitchStops: true, screenshotCaptured: true, managedOriginalsUnchanged: true, networkAccessed: false, ...result }, null, 2) + '\n');
         await engine.shutdown(); window.destroy(); app.quit();
       } catch (error) { await fail(error); }
     });

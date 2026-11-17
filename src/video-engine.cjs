@@ -10,8 +10,8 @@ const { readDXVAlpha } = require('./dxv-format.cjs');
 
 const PREVIEW_VERSION = 1;
 const PREVIEW_MIME = 'video/webm';
-const HOVER_VERSION = 1;
-const HOVER_SECONDS = 6;
+const HOVER_VERSION = 2;
+const HOVER_SECONDS = 2;
 const MAX_PROBE_OUTPUT = 2 * 1024 * 1024;
 const STDERR_LIMIT = 16 * 1024;
 // Reject playlist/concat demuxers: a media file must not instruct FFmpeg to open
@@ -44,7 +44,9 @@ function displayMetadata(data) {
 }
 async function sha256(filename, signal) {
   const hash = crypto.createHash('sha256');
-  for await (const chunk of createReadStream(filename)) { checkSignal(signal); hash.update(chunk); }
+  // Larger sequential reads reduce event-loop and filesystem overhead for
+  // high-bitrate originals while retaining bounded memory and cancellation.
+  for await (const chunk of createReadStream(filename, { highWaterMark: 1024 * 1024 })) { checkSignal(signal); hash.update(chunk); }
   checkSignal(signal);
   return hash.digest('hex');
 }
@@ -61,10 +63,18 @@ function createVideoEngine({ runtimeDir = path.join(__dirname, '..', 'video-runt
   const previews = new Map();
   const hoverJobs = new Map();
   const hoverMemory = new Map();
+  const probeMemory = new Map();
+  const hashMemory = new Map();
+  const fullMemory = new Map();
+  const validationMemory = new Map();
   let hoverEncoding = Promise.resolve();
   let closed = false;
 
   function notify(event) { try { onProgress(event); } catch {} }
+  function remember(memory, identity, value) {
+    memory.delete(identity); memory.set(identity, value);
+    while (memory.size > 64) memory.delete(memory.keys().next().value);
+  }
   function track(promise) { tasks.add(promise); promise.then(() => tasks.delete(promise), () => tasks.delete(promise)); return promise; }
   function operation(signal, work) {
     if (closed) return Promise.reject(new Error('视频处理引擎已关闭'));
@@ -86,6 +96,15 @@ function createVideoEngine({ runtimeDir = path.join(__dirname, '..', 'video-runt
     const stat = await fs.stat(filename);
     if (!stat.isFile() || stat.size === 0) throw new Error('视频文件不存在或为空');
     return { filename, stat };
+  }
+  const fileStamp = stat => `${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}:${stat.ino}`;
+  async function stableHash(info, signal) {
+    const stamp = fileStamp(info.stat), cached = hashMemory.get(info.filename);
+    if (cached?.stamp === stamp) { checkSignal(signal); return cached.hash; }
+    const hash = await sha256(info.filename, signal);
+    if (fileStamp((await sourceFile(info.filename)).stat) !== stamp) throw new Error('视频文件在读取期间发生变化，请重试');
+    remember(hashMemory, info.filename, { stamp, hash });
+    return hash;
   }
   function run(executable, args, { signal, timeoutMs, outputLimit = MAX_PROBE_OUTPUT, onOutput } = {}) {
     checkSignal(signal);
@@ -126,7 +145,9 @@ function createVideoEngine({ runtimeDir = path.join(__dirname, '..', 'video-runt
     });
   }
   async function probeSource(source, signal) {
-    const { filename } = await sourceFile(source);
+    const { filename, stat } = await sourceFile(source);
+    const stamp = fileStamp(stat), cached = probeMemory.get(filename);
+    if (cached?.stamp === stamp) { checkSignal(signal); return { ...cached.metadata }; }
     const output = await run(ffprobe, ['-v', 'error', '-protocol_whitelist', 'file,pipe', '-format_whitelist', INPUT_FORMATS, '-show_streams', '-show_format', '-of', 'json', '-i', filename], {
       signal, timeoutMs: timeouts.probeMs || 30000
     });
@@ -147,15 +168,21 @@ function createVideoEngine({ runtimeDir = path.join(__dirname, '..', 'video-runt
         if (alpha !== null) metadata.hasAlpha = alpha;
       } catch { checkSignal(signal); }
     }
+    if (fileStamp((await sourceFile(filename)).stat) !== stamp) throw new Error('视频文件在读取期间发生变化，请重试');
+    remember(probeMemory, filename, { stamp, metadata: { ...metadata } });
     return metadata;
   }
   function probe(source, { signal } = {}) { return operation(signal, internal => probeSource(source, internal)); }
 
-  const fileStamp = stat => `${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}:${stat.ino}`;
   function rememberHover(identity, value) {
-    hoverMemory.delete(identity);
-    hoverMemory.set(identity, value);
-    while (hoverMemory.size > 64) hoverMemory.delete(hoverMemory.keys().next().value);
+    remember(hoverMemory, identity, value);
+  }
+  function completeMetadata(metadata) {
+    return metadata && Number.isFinite(metadata.width) && metadata.width > 0 && Number.isFinite(metadata.height) && metadata.height > 0 && Number.isFinite(metadata.duration) && metadata.duration >= 0 &&
+      /^[a-zA-Z0-9_.-]{1,80}$/.test(metadata.pixelFormat || '') && /^[a-zA-Z0-9_.-]{1,80}$/.test(metadata.codec || '') &&
+      typeof metadata.hasAlpha === 'boolean' && typeof metadata.hasAudio === 'boolean' &&
+      (metadata.hasAudio === false || typeof metadata.audioCodec === 'string') &&
+      Number.isInteger(metadata.streamIndex) && metadata.streamIndex >= 0 && metadata.streamIndex <= 2147483647;
   }
   function nativeVideo(filename, metadata) {
     const suffix = path.extname(filename).toLowerCase();
@@ -198,10 +225,7 @@ function createVideoEngine({ runtimeDir = path.join(__dirname, '..', 'video-runt
     const cached = await readHoverCache(output, metadataFile, identity, sourceStamp, signal);
     if (cached) { notify({ profile: 'hover', key, state: 'ready', cached: true }); return cached; }
     checkSignal(signal);
-    const completeMetadata = suppliedMetadata && suppliedMetadata.width > 0 && suppliedMetadata.height > 0 &&
-      typeof suppliedMetadata.pixelFormat === 'string' && typeof suppliedMetadata.codec === 'string' &&
-      (suppliedMetadata.hasAudio === false || typeof suppliedMetadata.audioCodec === 'string');
-    const metadata = completeMetadata ? { ...suppliedMetadata } : await probeSource(filename, signal);
+    const metadata = completeMetadata(suppliedMetadata) ? { ...suppliedMetadata } : await probeSource(filename, signal);
     const directMime = nativeVideo(filename, metadata);
     if (directMime) {
       const result = { ...metadata, path: filename, mimeType: directMime, direct: true, cached: false, profile: 'hover', sourceDuration: metadata.duration };
@@ -216,9 +240,9 @@ function createVideoEngine({ runtimeDir = path.join(__dirname, '..', 'video-runt
       const color = metadata.colorSpace === 'ycgco' ? 'zscale=matrixin=ycgco:matrix=709,' : '';
       const filter = `${color}scale=w='min(640,iw)':h='min(360,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1,fps=24:round=up`;
       const args = ['-hide_banner', '-loglevel', 'error', '-nostdin', '-protocol_whitelist', 'file,pipe', '-format_whitelist', INPUT_FORMATS,
-        '-threads', '2', '-t', String(HOVER_SECONDS), '-i', filename, '-map', `0:${metadata.streamIndex || 0}`, '-an', '-sn', '-dn',
+        '-threads', '4', '-filter_threads', '2', '-t', String(HOVER_SECONDS), '-i', filename, '-map', `0:${metadata.streamIndex || 0}`, '-an', '-sn', '-dn',
         '-vf', filter, '-frames:v', String(HOVER_SECONDS * 24), '-c:v', 'libvpx-vp9', '-deadline', 'realtime', '-cpu-used', '8',
-        '-row-mt', '1', '-threads', '2', '-crf', '38', '-b:v', '0', '-pix_fmt', metadata.hasAlpha ? 'yuva420p' : 'yuv420p',
+        '-row-mt', '1', '-threads', '4', '-crf', '38', '-b:v', '0', '-pix_fmt', metadata.hasAlpha ? 'yuva420p' : 'yuv420p',
         '-auto-alt-ref', '0', '-f', 'webm', '-y', temporary];
       notify({ profile: 'hover', key, state: 'converting', progress: 0 });
       try {
@@ -295,33 +319,73 @@ function createVideoEngine({ runtimeDir = path.join(__dirname, '..', 'video-runt
 
   async function cachedPreview(output, metadataFile, hash, signal) {
     try {
-      const [file, raw] = await Promise.all([fs.stat(output), fs.readFile(metadataFile, 'utf8')]);
+      const [file, metadataStat] = await Promise.all([fs.stat(output), fs.stat(metadataFile)]);
+      const identity = `${output}\0${hash}`, outputStamp = fileStamp(file), metadataStamp = fileStamp(metadataStat);
+      const verified = validationMemory.get(identity);
+      if (verified?.outputStamp === outputStamp && verified.metadataStamp === metadataStamp) { checkSignal(signal); return { ...verified.result, cached: true }; }
+      const raw = await fs.readFile(metadataFile, 'utf8');
       const metadata = JSON.parse(raw);
       if (!file.isFile() || file.size === 0 || metadata.version !== PREVIEW_VERSION || metadata.sourceHash !== hash || file.size !== metadata.bytes ||
           !(metadata.width > 0) || !(metadata.height > 0) || !/^[a-f0-9]{64}$/.test(metadata.outputHash)) return null;
-      if (await sha256(output, signal) !== metadata.outputHash) return null;
-      return { path: output, mimeType: PREVIEW_MIME, ...metadata.media, width: metadata.width, height: metadata.height, cached: true };
+      if (await stableHash({ filename: output, stat: file }, signal) !== metadata.outputHash) return null;
+      if (fileStamp(await fs.stat(metadataFile)) !== metadataStamp) return null;
+      const result = { path: output, mimeType: PREVIEW_MIME, ...metadata.media, width: metadata.width, height: metadata.height, cached: true };
+      remember(validationMemory, identity, { outputStamp, metadataStamp, result });
+      return result;
     } catch (error) { checkSignal(signal); return null; }
   }
-  async function createPreview(source, key, signal) {
-    const { filename } = await sourceFile(source);
-    const hash = await sha256(filename, signal);
+  async function rememberFull(info, hash, result) {
+    if (fileStamp((await sourceFile(info.filename)).stat) !== fileStamp(info.stat)) throw new Error('视频文件在预览准备期间发生变化，请重试');
+    const outputStamp = fileStamp(await fs.stat(result.path));
+    const metadataStamp = result.direct ? null : fileStamp(await fs.stat(`${result.path}.json`));
+    remember(fullMemory, `${info.filename}\0${hash}`, { sourceStamp: fileStamp(info.stat), outputStamp, metadataStamp, result: { ...result } });
+  }
+  async function readyPreview(info, key, signal) {
+    const stamp = fileStamp(info.stat), known = hashMemory.get(info.filename);
+    // This path never establishes trust by itself. Only a prior full read can
+    // populate hashMemory, and every relevant file must still have that stamp.
+    if (!known || known.stamp !== stamp || (key && key !== known.hash)) return null;
+    const identity = `${info.filename}\0${known.hash}`, cached = fullMemory.get(identity);
+    if (!cached || cached.sourceStamp !== stamp) return null;
+    try {
+      if (fileStamp(await fs.stat(cached.result.path)) !== cached.outputStamp ||
+          (cached.metadataStamp && fileStamp(await fs.stat(`${cached.result.path}.json`)) !== cached.metadataStamp)) {
+        fullMemory.delete(identity); return null;
+      }
+      checkSignal(signal);
+      return { ...cached.result, cached: true };
+    } catch { checkSignal(signal); fullMemory.delete(identity); return null; }
+  }
+  async function getReadyPreview(source, { key, signal } = {}) {
+    if (closed) throw new Error('视频处理引擎已关闭');
+    checkSignal(signal);
+    if (key != null && (typeof key !== 'string' || !/^[a-fA-F0-9]{64}$/.test(key))) throw new Error('视频缓存标识无效');
+    return readyPreview(await sourceFile(source), key?.toLowerCase(), signal);
+  }
+  async function createPreview(source, key, signal, suppliedMetadata, onOperationProgress) {
+    const report = event => { notify(event); try { onOperationProgress?.(event); } catch {} };
+    const info = await sourceFile(source), { filename } = info;
+    const hash = await stableHash(info, signal);
     if (key && key !== hash) throw new Error('视频文件内容已变化，请重新导入后预览');
-    const metadata = await probeSource(filename, signal);
+    const ready = await readyPreview(info, hash, signal);
+    if (ready) { report({ key: hash, state: 'ready', progress: 100, cached: true }); return ready; }
+    const metadata = completeMetadata(suppliedMetadata) ? { ...suppliedMetadata } : await probeSource(filename, signal);
     const extension = path.extname(filename).toLowerCase();
     const nativeMp4 = ['.mp4', '.m4v'].includes(extension) && metadata.codec === 'h264' &&
       ['yuv420p', 'yuvj420p'].includes(metadata.pixelFormat) && (!metadata.hasAudio || metadata.audioCodec === 'aac');
     const nativeWebm = extension === '.webm' && ['vp8', 'vp9', 'av1'].includes(metadata.codec) &&
       (!metadata.hasAudio || ['opus', 'vorbis'].includes(metadata.audioCodec));
     if (nativeMp4 || nativeWebm) {
-      notify({ key: hash, state: 'ready', progress: 100, direct: true });
-      return { path: filename, mimeType: nativeMp4 ? 'video/mp4' : PREVIEW_MIME, ...metadata, cached: false, direct: true };
+      const result = { path: filename, mimeType: nativeMp4 ? 'video/mp4' : PREVIEW_MIME, ...metadata, cached: false, direct: true };
+      await rememberFull(info, hash, result);
+      report({ key: hash, state: 'ready', progress: 100, direct: true });
+      return result;
     }
     await fs.mkdir(cacheDir, { recursive: true });
     const output = path.join(cacheDir, `video-v${PREVIEW_VERSION}-${hash}.webm`);
     const metadataFile = `${output}.json`;
     const cached = await cachedPreview(output, metadataFile, hash, signal);
-    if (cached) { notify({ key: hash, state: 'ready', progress: 100, cached: true }); return cached; }
+    if (cached) { await rememberFull(info, hash, cached); report({ key: hash, state: 'ready', progress: 100, cached: true }); return cached; }
     const temporary = path.join(cacheDir, `.video-preview-${crypto.randomUUID()}.webm`);
     const temporaryMetadata = `${temporary}.json`;
     let pending = '', lastProgress = -1;
@@ -334,10 +398,10 @@ function createVideoEngine({ runtimeDir = path.join(__dirname, '..', 'video-runt
         if (!match) continue;
         const seconds = Number(match[1]) / 1000000;
         const percent = metadata.duration > 0 ? Math.min(99, Math.floor(seconds / metadata.duration * 100)) : 0;
-        if (percent !== lastProgress) { lastProgress = percent; notify({ key: hash, state: 'converting', progress: percent, seconds, duration: metadata.duration }); }
+        if (percent !== lastProgress) { lastProgress = percent; report({ key: hash, state: 'converting', progress: percent, seconds, duration: metadata.duration }); }
       }
     };
-    notify({ key: hash, state: 'converting', progress: 0, duration: metadata.duration });
+    report({ key: hash, state: 'converting', progress: 0, duration: metadata.duration });
     const color = metadata.colorSpace === 'ycgco' ? 'zscale=matrixin=ycgco:matrix=709,' : '';
     const videoFilter = `${color}scale=w='min(1920,iw)':h='min(1080,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1`;
     const args = ['-hide_banner', '-loglevel', 'error', '-nostdin', '-protocol_whitelist', 'file,pipe', '-format_whitelist', INPUT_FORMATS, '-threads', '2', '-i', filename,
@@ -348,6 +412,7 @@ function createVideoEngine({ runtimeDir = path.join(__dirname, '..', 'video-runt
     try {
       await run(ffmpeg, args, { signal, timeoutMs: timeouts.previewMs || 30 * 60000, onOutput: progress });
       checkSignal(signal);
+      if (fileStamp((await sourceFile(filename)).stat) !== fileStamp(info.stat)) throw new Error('视频文件在预览准备期间发生变化，请重试');
       const previewMetadata = await probeSource(temporary, signal);
       const outputHash = await sha256(temporary, signal);
       const size = (await fs.stat(temporary)).size;
@@ -358,10 +423,12 @@ function createVideoEngine({ runtimeDir = path.join(__dirname, '..', 'video-runt
       checkSignal(signal);
       await fs.rename(temporary, output);
       await fs.rename(temporaryMetadata, metadataFile);
-      notify({ key: hash, state: 'ready', progress: 100, cached: false });
-      return { path: output, mimeType: PREVIEW_MIME, ...media, cached: false };
+      const result = { path: output, mimeType: PREVIEW_MIME, ...media, cached: false };
+      await rememberFull(info, hash, result);
+      report({ key: hash, state: 'ready', progress: 100, cached: false });
+      return result;
     } catch (error) {
-      notify({ key: hash, state: error.name === 'AbortError' ? 'cancelled' : 'error', error: error.message });
+      report({ key: hash, state: error.name === 'AbortError' ? 'cancelled' : 'error', error: error.message });
       throw error;
     } finally {
       await fs.unlink(temporary).catch(() => {});
@@ -387,7 +454,7 @@ function createVideoEngine({ runtimeDir = path.join(__dirname, '..', 'video-runt
       job.promise.then(value => finish(resolve, value), error => finish(reject, error));
     });
   }
-  async function preview(source, { key, signal } = {}) {
+  async function preview(source, { key, signal, metadata, onProgress } = {}) {
     if (closed) throw new Error('视频处理引擎已关闭');
     checkSignal(signal);
     source = absolute(source, '视频文件');
@@ -403,7 +470,7 @@ function createVideoEngine({ runtimeDir = path.join(__dirname, '..', 'video-runt
       controllers.add(controller);
       job = { controller, consumers: new Set(), settled: false, promise: null };
       previews.set(identity, job);
-      job.promise = track(Promise.resolve().then(() => createPreview(source, key, controller.signal)).finally(() => {
+      job.promise = track(Promise.resolve().then(() => createPreview(source, key, controller.signal, metadata, onProgress)).finally(() => {
         job.settled = true; controllers.delete(controller);
         if (previews.get(identity) === job) previews.delete(identity);
       }));
@@ -415,7 +482,7 @@ function createVideoEngine({ runtimeDir = path.join(__dirname, '..', 'video-runt
     for (const controller of controllers) controller.abort();
     await Promise.allSettled([...tasks]);
   }
-  return { probe, thumbnail, preview, hoverPreview, busy: () => tasks.size > 0, shutdown };
+  return { probe, thumbnail, preview, getReadyPreview, hoverPreview, busy: () => tasks.size > 0, shutdown };
 }
 
 module.exports = { createVideoEngine, VIDEO_EXTENSIONS, PREVIEW_VERSION, HOVER_VERSION, HOVER_SECONDS, displayMetadata };

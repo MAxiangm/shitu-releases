@@ -62,6 +62,42 @@ test('full video preparation replaces a short hover profile without reusing its 
   await hoverRejected;
 });
 
+test('quick foreground preview takes priority over hover and never becomes the complete video', async () => {
+  const requests = createVideoPreviewRequests(), quick = controlled(), full = controlled();
+  const first = requests.prepare(identity('clip', { profile: 'quick' }), undefined, quick.run);
+  await tick();
+  await aborted(requests.prepare(identity('another', { profile: 'hover' }), 'hover-elsewhere', () => assert.fail('quick viewer takes priority')));
+  quick.resolve('two-second-clip');
+  assert.equal(await first, 'two-second-clip');
+  const complete = requests.prepare(identity('clip', { profile: 'full' }), undefined, full.run);
+  await tick();
+  assert.equal(full.calls, 1);
+  assert.equal(full.signal.aborted, false);
+  full.resolve('complete-video');
+  assert.equal(await complete, 'complete-video');
+});
+
+test('reopening through quick preserves a running full conversion and rebinds progress', async () => {
+  const requests = createVideoPreviewRequests(), full = controlled();
+  const oldEvents = [], newEvents = [];
+  let report;
+  const first = requests.prepare(identity('clip', { profile: 'full' }), undefined,
+    (signal, progress) => { report = progress; return full.run(signal); }, event => oldEvents.push(event));
+  await tick();
+  assert.equal(requests.releaseViewer('clip', library.root), true);
+  const quick = requests.prepare(identity('clip', { profile: 'quick' }), undefined, async () => 'short-clip');
+  assert.equal(await quick, 'short-clip');
+  assert.equal(full.signal.aborted, false);
+  const resumed = requests.prepare(identity('clip', { profile: 'full' }), undefined,
+    () => assert.fail('a new full conversion must not start'), event => newEvents.push(event));
+  assert.equal(resumed, first);
+  report({ progress: 60 });
+  assert.deepEqual(newEvents, [{ progress: 60 }]);
+  assert.deepEqual(oldEvents, newEvents);
+  full.resolve('complete-video');
+  assert.equal(await resumed, 'complete-video');
+});
+
 test('each hover lease cancels only itself, and the last lease aborts conversion', async () => {
   const requests = createVideoPreviewRequests(), work = controlled();
   const pending = requests.prepare(identity(), 'hover-a', work.run);
