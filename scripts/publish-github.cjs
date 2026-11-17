@@ -66,28 +66,53 @@ function validateUploadedAssets(release, expected, { tag, draft } = {}) {
     }
   }
 }
-async function publishWithGh({ repository, tag, title, notes, files, publish, cli, target, run = command,
+function uniqueRelease(releases, tag) {
+  if (!Array.isArray(releases)) throw new Error('GitHub release listing is invalid.');
+  const matches = releases.filter(release => release?.tag_name === tag);
+  if (matches.length > 1) throw new Error(`Multiple releases match ${tag}; resolve the ambiguous drafts manually before publishing.`);
+  if (matches[0] && (!Number.isSafeInteger(matches[0].id) || matches[0].id < 1)) throw new Error('GitHub release ID is invalid.');
+  return matches[0] || null;
+}
+function validateDraft(release, expected, { tag, target }) {
+  validateUploadedAssets(release, expected, { tag, draft: true });
+  if (release.target_commitish !== target) throw new Error('The draft target commit differs from --target; the draft will not be retargeted or published.');
+  if (release.assets.length !== expected.length) throw new Error('The draft contains unexpected attachments; no assets will be replaced or uploaded.');
+}
+async function publishWithGh({ repository, tag, title, notes, files, publish, cli, target, resumeDraft = false, run = command,
   noteDirectory = path.join(root, '.recovery', 'release') }) {
   target = targetSHA(target);
   const repo = JSON.parse(run(cli, ['api', `repos/${repository}`]));
   if (repo.private) throw new Error('Automatic updates require a public release repository; this repository is private.');
-  const existing = run(cli, ['api', `repos/${repository}/releases/tags/${encodeURIComponent(tag)}`], { allowMissing: true });
-  if (existing !== null) throw new Error(`Release ${tag} already exists. Published assets will not be replaced; use --verify-only to check an existing publication.`);
+  function findRelease() {
+    // A newly created draft may not have a Git tag yet. /releases/tags/:tag
+    // returns 404 in that state, while the authenticated list includes it.
+    const pages = JSON.parse(run(cli, ['api', `repos/${repository}/releases?per_page=100`, '--paginate', '--slurp']));
+    if (!Array.isArray(pages) || pages.some(page => !Array.isArray(page))) throw new Error('GitHub release listing is invalid.');
+    return uniqueRelease(pages.flat(), tag);
+  }
+  const existing = findRelease();
+  if (existing && (!resumeDraft || !existing.draft)) throw new Error(`Release ${tag} already exists. Use --resume-draft for a matching complete draft, or --verify-only for a published release. Assets will not be replaced.`);
+  if (resumeDraft && !existing) throw new Error(`No draft for ${tag} exists; --resume-draft will not create or upload anything.`);
   if (JSON.parse(run(cli, ['api', `repos/${repository}/commits/${target}`])).sha !== target) throw new Error('The target commit is not present in the remote repository. Push the source commit first.');
   const priorRef = run(cli, ['api', `repos/${repository}/git/ref/tags/${encodeURIComponent(tag)}`], { allowMissing: true });
   if (priorRef !== null && JSON.parse(run(cli, ['api', `repos/${repository}/commits/${encodeURIComponent(tag)}`])).sha !== target) throw new Error('The existing Git tag points to a different source commit. Use a new version.');
-  await fs.mkdir(noteDirectory, { recursive: true });
-  const noteFile = path.join(noteDirectory, `${tag}-notes.md`);
-  await fs.writeFile(noteFile, notes);
   const expected = await localAssets(files);
-  const created = run(cli, ['release', 'create', tag, ...files, '--repo', repository, '--target', target, '--title', title, '--notes-file', noteFile, '--draft']);
-  const draft = JSON.parse(run(cli, ['api', `repos/${repository}/releases/tags/${encodeURIComponent(tag)}`]));
-  validateUploadedAssets(draft, expected, { tag, draft: true });
-  if (publish) run(cli, ['release', 'edit', tag, '--repo', repository, '--draft=false', '--latest']);
-  return publish ? `https://github.com/${repository}/releases/tag/${tag}` : created;
+  let selected = existing, created;
+  if (!selected) {
+    await fs.mkdir(noteDirectory, { recursive: true });
+    const noteFile = path.join(noteDirectory, `${tag}-notes.md`);
+    await fs.writeFile(noteFile, notes);
+    created = run(cli, ['release', 'create', tag, ...files, '--repo', repository, '--target', target, '--title', title, '--notes-file', noteFile, '--draft']);
+    selected = findRelease();
+    if (!selected) throw new Error('The uploaded draft could not be located by release ID; inspect GitHub before trying --resume-draft.');
+  }
+  const draft = JSON.parse(run(cli, ['api', `repos/${repository}/releases/${selected.id}`]));
+  validateDraft(draft, expected, { tag, target });
+  if (publish) run(cli, ['api', `repos/${repository}/releases/${selected.id}`, '--method', 'PATCH', '-F', 'draft=false', '-f', 'make_latest=true']);
+  return publish ? `https://github.com/${repository}/releases/tag/${tag}` : created || draft.html_url;
 }
 
-async function publishWithToken({ repository, tag, title, notes, files, publish, token, target, fetchImpl = globalThis.fetch }) {
+async function publishWithToken({ repository, tag, title, notes, files, publish, token, target, resumeDraft = false, fetchImpl = globalThis.fetch }) {
   target = targetSHA(target);
   const headers = { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json',
     'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'Shitu-Release-Publisher' };
@@ -102,16 +127,23 @@ async function publishWithToken({ repository, tag, title, notes, files, publish,
   }
   const repo = await api('');
   if (repo.private) throw new Error('Automatic updates require a public release repository; this repository is private.');
-  if (await api(`/releases/tags/${encodeURIComponent(tag)}`, 'GET', undefined, true)) {
-    throw new Error(`Release ${tag} already exists. Use a new project version; published assets will not be replaced.`);
+  const releases = [];
+  for (let page = 1; ; page++) {
+    const items = await api(`/releases?per_page=100&page=${page}`);
+    if (!Array.isArray(items)) throw new Error('GitHub release listing is invalid.');
+    releases.push(...items);
+    if (items.length < 100) break;
   }
+  const existing = uniqueRelease(releases, tag);
+  if (existing && (!resumeDraft || !existing.draft)) throw new Error(`Release ${tag} already exists. Use --resume-draft for a matching complete draft, or --verify-only for a published release. Assets will not be replaced.`);
+  if (resumeDraft && !existing) throw new Error(`No draft for ${tag} exists; --resume-draft will not create or upload anything.`);
   if ((await api(`/commits/${target}`)).sha !== target) throw new Error('The target commit is not present in the remote repository. Push the source commit first.');
   const priorRef = await api(`/git/ref/tags/${encodeURIComponent(tag)}`, 'GET', undefined, true);
   if (priorRef && (await api(`/commits/${encodeURIComponent(tag)}`)).sha !== target) throw new Error('The existing Git tag points to a different source commit. Use a new version.');
   // Always upload into a draft first so clients cannot observe a half-uploaded release.
   const expected = await localAssets(files);
-  const release = await api('/releases', 'POST', { tag_name: tag, target_commitish: target, name: title, body: notes, draft: true, prerelease: false });
-  for (const file of files) {
+  const release = existing || await api('/releases', 'POST', { tag_name: tag, target_commitish: target, name: title, body: notes, draft: true, prerelease: false });
+  for (const file of existing ? [] : files) {
     const stat = await fs.stat(file);
     const response = await fetchImpl(`https://uploads.github.com/repos/${repository}/releases/${release.id}/assets?name=${encodeURIComponent(path.basename(file))}`, {
       method: 'POST', headers: { ...headers, 'Content-Type': file.endsWith('.json') ? 'application/json' : 'application/octet-stream',
@@ -125,7 +157,7 @@ async function publishWithToken({ repository, tag, title, notes, files, publish,
       throw new Error('Uploaded asset SHA-256 mismatch; the release remains a draft.');
     }
   }
-  validateUploadedAssets(await api(`/releases/${release.id}`), expected, { tag, draft: true });
+  validateDraft(await api(`/releases/${release.id}`), expected, { tag, target });
   if (publish) await api(`/releases/${release.id}`, 'PATCH', { draft: false, make_latest: 'true' });
   return release.html_url;
 }
@@ -186,19 +218,21 @@ async function verifyPublishedRelease({ repository, tag, files, fetchImpl = glob
 async function main(args = process.argv.slice(2)) {
   let publish = false;
   let noteFile;
-  let target, verifyOnly = false;
+  let target, verifyOnly = false, resumeDraft = false;
   for (let index = 0; index < args.length; index++) {
     if (args[index] === '--publish') publish = true;
     else if (args[index] === '--notes-file' && args[index + 1]) noteFile = path.resolve(args[++index]);
     else if (args[index] === '--target' && args[index + 1]) target = targetSHA(args[++index]);
     else if (args[index] === '--verify-only') verifyOnly = true;
-    else throw new Error('Usage: node scripts/publish-github.cjs [--publish | --verify-only] [--target full-commit-SHA] [--notes-file release-notes.md]');
+    else if (args[index] === '--resume-draft') resumeDraft = true;
+    else throw new Error('Usage: node scripts/publish-github.cjs [--publish | --verify-only] [--resume-draft] [--target full-commit-SHA] [--notes-file release-notes.md]');
   }
   const project = await readProject();
   const config = JSON.parse(await fs.readFile(path.join(root, 'update-config.json'), 'utf8'));
   const repository = validateRepository(config.repository);
   const release = await validateReleaseFiles(project.version, path.join(root, 'dist'));
   if (publish && verifyOnly) throw new Error('Choose --publish or --verify-only.');
+  if (resumeDraft && verifyOnly) throw new Error('Choose --resume-draft or --verify-only.');
   if (!target) {
     const revision = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8', windowsHide: true });
     if (revision.error || revision.status !== 0) throw new Error('Cannot determine the source commit; pass --target with a full pushed commit SHA.');
@@ -206,7 +240,7 @@ async function main(args = process.argv.slice(2)) {
   }
   const options = { repository, tag: `v${project.version}`, title: `${project.productName} v${project.version}`,
     notes: noteFile ? await fs.readFile(noteFile, 'utf8') : `拾图 ${project.version}\n\nWindows x64 安装包。已有自动更新版用户可在应用内更新。`,
-    files: [release.installer, release.manifestPath], publish, target };
+    files: [release.installer, release.manifestPath], publish, target, resumeDraft };
   if (verifyOnly) { console.log(`Public release verified: ${(await verifyPublishedRelease(options)).url}`); return; }
   const cli = findGitHubCli();
   let url;

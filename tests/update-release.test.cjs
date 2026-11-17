@@ -78,7 +78,7 @@ async function publication(t) {
       state: 'uploaded', browser_download_url: `https://github.com/${repository}/releases/download/${tag}/${name}` });
   }
   return { directory, version, tag, repository, files, assets, local, target: 'd'.repeat(40),
-    info: { tag_name: tag, draft: false, prerelease: false, assets } };
+    info: { id: 19, tag_name: tag, target_commitish: 'd'.repeat(40), draft: false, prerelease: false, assets } };
 }
 
 test('publication requires a full source SHA and complete uploaded bytes', async t => {
@@ -93,7 +93,7 @@ test('publication requires a full source SHA and complete uploaded bytes', async
   }
 });
 
-test('gh publication pins the pushed source commit and never publishes corrupt draft assets', async t => {
+test('gh publication discovers an untagged uploaded draft by list and ID before publishing it', async t => {
   const data = await publication(t);
   for (const corrupt of [false, true]) {
     const calls = []; let created = false;
@@ -104,8 +104,9 @@ test('gh publication pins the pushed source commit and never publishes corrupt d
         if (endpoint === `repos/${data.repository}`) return JSON.stringify({ private: false });
         if (endpoint.endsWith(`/commits/${data.target}`)) return JSON.stringify({ sha: data.target });
         if (endpoint.endsWith(`/git/ref/tags/${data.tag}`)) return null;
-        if (endpoint.endsWith(`/releases/tags/${data.tag}`)) {
-          if (!created) return null;
+        if (endpoint.endsWith('/releases?per_page=100')) return JSON.stringify([created ? [{ ...data.info, draft: true }] : []]);
+        if (endpoint.endsWith('/releases/19')) {
+          if (args.includes('PATCH')) return '{}';
           const draft = structuredClone({ ...data.info, draft: true }); if (corrupt) draft.assets[0].digest = 'sha256:' + '0'.repeat(64);
           return JSON.stringify(draft);
         }
@@ -113,13 +114,58 @@ test('gh publication pins the pushed source commit and never publishes corrupt d
       if (args[0] === 'release' && args[1] === 'create') {
         assert.equal(args[args.indexOf('--target') + 1], data.target); assert.ok(args.includes('--draft')); created = true; return 'draft';
       }
-      if (args[0] === 'release' && args[1] === 'edit') return '';
       throw new Error('Unexpected gh request');
     };
     const task = publishWithGh({ ...data, title: 'fixture', notes: 'fixture', publish: true, cli: 'fixture-gh', run, noteDirectory: data.directory });
     if (corrupt) await assert.rejects(task, /different size\/SHA-256/); else assert.equal(await task, `https://github.com/${data.repository}/releases/tag/${data.tag}`);
-    assert.equal(calls.filter(args => args[0] === 'release' && args[1] === 'edit').length, corrupt ? 0 : 1);
+    assert.equal(calls.filter(args => args.includes('PATCH')).length, corrupt ? 0 : 1);
+    assert.ok(calls.every(args => !String(args[1]).includes('/releases/tags/')), 'Unpublished drafts cannot be discovered through tag lookup');
   }
+});
+
+test('explicit gh draft resume validates the original target and bytes without creating or uploading', async t => {
+  const data = await publication(t);
+  for (const failure of [null, 'target', 'digest', 'ambiguous']) {
+    const calls = [], draft = structuredClone({ ...data.info, draft: true });
+    if (failure === 'target') draft.target_commitish = 'e'.repeat(40);
+    if (failure === 'digest') draft.assets[0].digest = 'sha256:' + '0'.repeat(64);
+    const run = (_cli, args) => {
+      calls.push(args); assert.equal(args[0], 'api', 'Resume must not create or upload a release');
+      const endpoint = args[1];
+      if (endpoint === `repos/${data.repository}`) return JSON.stringify({ private: false });
+      if (endpoint.endsWith('/releases?per_page=100')) {
+        assert.ok(args.includes('--paginate') && args.includes('--slurp'));
+        return JSON.stringify([[{ ...data.info, tag_name: 'v0.10.9' }], failure === 'ambiguous' ? [draft, { ...draft, id: 20 }] : [draft]]);
+      }
+      if (endpoint.endsWith(`/commits/${data.target}`)) return JSON.stringify({ sha: data.target });
+      if (endpoint.endsWith(`/git/ref/tags/${data.tag}`)) return null;
+      if (endpoint.endsWith('/releases/19')) return args.includes('PATCH') ? '{}' : JSON.stringify(draft);
+      if (endpoint.includes('/releases/tags/')) throw new Error('HTTP 404: draft has no Git tag');
+      throw new Error('Unexpected gh call');
+    };
+    const task = publishWithGh({ ...data, title: 'fixture', notes: '', publish: true, resumeDraft: true, cli: 'fixture-gh', run, noteDirectory: data.directory });
+    if (failure) await assert.rejects(task, /draft target commit|different size\/SHA-256|Multiple releases/);
+    else assert.equal(await task, `https://github.com/${data.repository}/releases/tag/${data.tag}`);
+    assert.equal(calls.filter(args => args.includes('PATCH')).length, failure ? 0 : 1);
+  }
+});
+
+test('token draft resume publishes by numeric release ID with no second upload', async t => {
+  const data = await publication(t), calls = [], draft = { ...data.info, draft: true };
+  const fetchImpl = async (urlValue, options) => {
+    const url = new URL(urlValue); calls.push({ url, options });
+    assert.equal(url.hostname, 'api.github.com', 'Resume must not make an upload request');
+    const json = value => new Response(JSON.stringify(value));
+    if (url.pathname === `/repos/${data.repository}`) return json({ private: false });
+    if (url.pathname.endsWith('/releases')) return json([draft]);
+    if (url.pathname.endsWith(`/commits/${data.target}`)) return json({ sha: data.target });
+    if (url.pathname.endsWith(`/git/ref/tags/${data.tag}`)) return new Response(null, { status: 404 });
+    if (url.pathname.endsWith('/releases/19')) return json(options.method === 'PATCH' ? {} : draft);
+    throw new Error('Unexpected API call');
+  };
+  await publishWithToken({ ...data, title: '', notes: '', publish: true, resumeDraft: true, token: 'synthetic-unit-test-token', fetchImpl });
+  assert.equal(calls.filter(call => call.options.method === 'PATCH').length, 1);
+  assert.equal(calls.filter(call => call.options.method === 'POST').length, 0);
 });
 
 test('an existing tag pointing at another commit cannot be published as new source', async t => {
@@ -127,7 +173,7 @@ test('an existing tag pointing at another commit cannot be published as new sour
   const run = (_cli, args) => {
     if (args[0] !== 'api') { mutations++; throw new Error('Unexpected mutation'); }
     if (args[1] === `repos/${data.repository}`) return JSON.stringify({ private: false });
-    if (args[1].endsWith(`/releases/tags/${data.tag}`)) return null;
+    if (args[1].endsWith('/releases?per_page=100')) return '[[]]';
     if (args[1].endsWith(`/git/ref/tags/${data.tag}`)) return JSON.stringify({ ref: `refs/tags/${data.tag}` });
     if (args[1].endsWith(`/commits/${data.target}`)) return JSON.stringify({ sha: data.target });
     return JSON.stringify({ sha: 'b'.repeat(40) });
@@ -147,6 +193,7 @@ test('token publication pins the source and verifies every draft attachment befo
       assert.equal(Buffer.concat(bytes).length, asset.size); return json(asset);
     }
     if (url.pathname === `/repos/${data.repository}`) return json({ private: false });
+    if (url.pathname === `/repos/${data.repository}/releases` && options.method === 'GET') return json([]);
     if (url.pathname.endsWith(`/commits/${data.target}`)) return json({ sha: data.target });
     if (url.pathname.endsWith(`/git/ref/tags/${data.tag}`) || url.pathname.endsWith(`/releases/tags/${data.tag}`)) return new Response(null, { status: 404 });
     if (options.method === 'POST') {
