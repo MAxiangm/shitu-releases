@@ -7,8 +7,10 @@ const root = path.resolve(__dirname, '..');
 const smoke = process.env.SHITU_RECOVERY_SMOKE === '1';
 const updateSmoke = process.env.SHITU_UPDATE_SMOKE === '1';
 const videoSmoke = process.env.SHITU_VIDEO_SMOKE === '1';
-if ([smoke, updateSmoke, videoSmoke].filter(Boolean).length > 1) throw new Error('Choose one smoke test mode at a time.');
-const testing = smoke || updateSmoke || videoSmoke;
+const modelSmoke = process.env.SHITU_MODEL_SMOKE === '1';
+const aeSmoke = process.env.SHITU_AE_SMOKE === '1';
+if ([smoke, updateSmoke, videoSmoke, modelSmoke, aeSmoke].filter(Boolean).length > 1) throw new Error('Choose one smoke test mode at a time.');
+const testing = smoke || updateSmoke || videoSmoke || modelSmoke || aeSmoke;
 const base = testing
   ? path.resolve(process.env.SHITU_SMOKE_DIRECTORY)
   : path.join(root, '.recovery', 'development');
@@ -27,6 +29,18 @@ if (videoSmoke) {
   const marker = JSON.parse(fs.readFileSync(path.join(base, 'video-smoke-fixture.json'), 'utf8'));
   if (!process.env.SHITU_VIDEO_SMOKE_TOKEN || marker.token !== process.env.SHITU_VIDEO_SMOKE_TOKEN)
     throw new Error('Video smoke test marker does not match.');
+}
+if (modelSmoke) {
+  const relative = path.relative(path.join(root, '.recovery', 'tests'), base);
+  if (!relative || relative.startsWith('..') || path.isAbsolute(relative) || fs.lstatSync(base).isSymbolicLink()) throw new Error('Model smoke directory must stay inside .recovery/tests.');
+  const marker = JSON.parse(fs.readFileSync(path.join(base, 'model-smoke-fixture.json'), 'utf8'));
+  if (!process.env.SHITU_MODEL_SMOKE_TOKEN || marker.token !== process.env.SHITU_MODEL_SMOKE_TOKEN) throw new Error('Model smoke marker does not match.');
+}
+if (aeSmoke) {
+  const relative = path.relative(path.join(root, '.recovery', 'tests'), base);
+  if (!relative || relative.startsWith('..') || path.isAbsolute(relative) || fs.lstatSync(base).isSymbolicLink()) throw new Error('AE smoke directory must stay inside .recovery/tests.');
+  const marker = JSON.parse(fs.readFileSync(path.join(base, 'ae-smoke-fixture.json'), 'utf8'));
+  if (!process.env.SHITU_AE_SMOKE_TOKEN || marker.token !== process.env.SHITU_AE_SMOKE_TOKEN) throw new Error('AE smoke marker does not match.');
 }
 for (const name of ['profile', 'sessions', 'crashes', 'plugins']) {
   fs.mkdirSync(path.join(base, name), { recursive: true });
@@ -90,10 +104,26 @@ if (smoke) {
           await new Promise(resolve => setTimeout(resolve, 350));
           if (!document.querySelector('#pageTitle') || !document.body.textContent.includes('拾图'))
             throw new Error('Main interface did not render');
-          return { initialTotal: initial.stats.total, imported: imported.report.imported,
+          return { initialTotal: initial.stats.total, imported: imported.report.imported, capturedId: id,
             active: restored.stats.active, protocol: true, thumbnail: true,
             pluginsAvailable: Boolean(plugins), userInterface: true };
         })()`);
+        await window.webContents.executeJavaScript(`state.search = 'no-match-for-capture'; state.format = 'model'; state.folder = 'filtered-folder'; render();`);
+        window.webContents.send('shitu:web-capture', { ok: true, imported: 1, assetIds: [result.capturedId], libraryRoot: process.env.SHITU_LIBRARY });
+        result.captureNoticeRevealsHiddenAsset = await window.webContents.executeJavaScript(`(async () => {
+          const deadline = Date.now() + 5000;
+          while (!document.querySelector('[data-web-capture] button')) {
+            if (Date.now() > deadline) throw new Error('Capture success notice did not appear');
+            await new Promise(resolve => setTimeout(resolve, 20));
+          }
+          document.querySelector('[data-web-capture] button').click();
+          while (state.search || state.format !== 'all' || state.folder || state.selected.size !== 1 || !document.querySelector('.asset-card')) {
+            if (Date.now() > deadline) throw new Error('Capture View action did not clear filters and locate the asset');
+            await new Promise(resolve => setTimeout(resolve, 20));
+          }
+          return true;
+        })()`);
+        delete result.capturedId;
         if (failures.length) throw new Error(failures.join('\n'));
         let screenshotCaptured = false;
         try {
@@ -125,6 +155,8 @@ if (smoke) {
 
 if (updateSmoke) configureUpdateSmoke();
 if (videoSmoke) require('./video-smoke-bootstrap.cjs')({ root, base });
+if (modelSmoke) require('./model-smoke-bootstrap.cjs')({ root, base });
+if (aeSmoke) require('./ae-smoke-bootstrap.cjs')({ root, base });
 
 function configureUpdateSmoke() {
   // This branch only runs inside an explicitly marked, isolated smoke process.
@@ -166,10 +198,18 @@ function configureUpdateSmoke() {
     const address = String(url);
     assert.equal(options.redirect, 'manual');
     networkRequests.push(address);
-    if (address === `https://api.github.com/repos/${repository}/releases/latest`)
-      return new Response(JSON.stringify(release), { headers: { 'content-type': 'application/json' } });
-    if (address === manifestURL)
-      return new Response(manifestBody, { headers: { 'content-type': 'application/json' } });
+    const metadataAddress = new URL(address);
+    const nonce = metadataAddress.searchParams.getAll('_shitu_check');
+    metadataAddress.searchParams.delete('_shitu_check');
+    if (metadataAddress.href === `https://api.github.com/repos/${repository}/releases/latest` || metadataAddress.href === manifestURL) {
+      assert.equal(nonce.length, 1, 'Each metadata request must carry exactly one freshness nonce');
+      assert.match(nonce[0], /^[a-f0-9-]{36}$/);
+      assert.equal(options.cache, 'no-store');
+      assert.equal(options.headers['Cache-Control'], 'no-cache, no-store, max-age=0');
+      assert.equal(options.headers.Pragma, 'no-cache');
+      return new Response(metadataAddress.href === manifestURL ? manifestBody : JSON.stringify(release),
+        { headers: { 'content-type': 'application/json' } });
+    }
     if (address === installerURL) {
       let offset = 0;
       return new Response(new ReadableStream({
@@ -232,7 +272,7 @@ function configureUpdateSmoke() {
       assert.deepEqual(failures, []);
       fs.writeFileSync(resultPath, JSON.stringify({
         ok: true, electron: process.versions.electron, currentVersion: fixture.currentVersion,
-        latestVersion: fixture.nextVersion, sha256, networkRequests, networkMocked: true,
+        latestVersion: fixture.nextVersion, sha256, networkRequests, networkMocked: true, metadataFreshnessVerified: true,
         installerExecuted: false, installRequest, libraryFlushCalls: flushCount,
         collectorClosed, collectorBlockedDuringInstall, quitObserved: true, userData: app.getPath('userData'), ...uiResult
       }, null, 2) + '\n');

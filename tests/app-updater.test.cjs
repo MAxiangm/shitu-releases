@@ -14,6 +14,11 @@ const tag = `v${version}`;
 const prefix = `https://github.com/${repository}/releases/download/${tag}/`;
 const payload = Buffer.from('MZ-shitu-test-installer-only');
 const sha256 = crypto.createHash('sha256').update(payload).digest('hex');
+function endpoint(value) {
+  const url = new URL(value);
+  url.searchParams.delete('_shitu_check');
+  return url.href;
+}
 function releaseFixture() {
   const manifest = { schemaVersion: 1, version, platform: 'win32', arch: 'x64',
     installer: { name: `shitu-${version}-setup.exe`, size: payload.length, sha256 } };
@@ -34,8 +39,8 @@ async function fixture(t, options = {}) {
   const fetchImpl = async (url, init) => {
     calls.push({ url, init });
     if (options.fetch) return options.fetch(url, init, data);
-    if (url === apiURL) return new Response(JSON.stringify(data.release));
-    if (url === prefix + 'shitu-update.json') return new Response(JSON.stringify(data.manifest));
+    if (endpoint(url) === apiURL) return new Response(JSON.stringify(data.release));
+    if (endpoint(url) === prefix + 'shitu-update.json') return new Response(JSON.stringify(data.manifest));
     if (url === prefix + data.manifest.installer.name) return new Response(payload, { headers: { 'Content-Length': String(payload.length) } });
     throw new Error(`Unexpected test URL: ${url}`);
   };
@@ -75,6 +80,57 @@ test('finds a stable update only after validating manifest and exact release ass
   assert.equal(updater.state().status, 'available');
 });
 
+test('a newly published release is detected on the next check even behind a URL-keyed metadata cache', async t => {
+  let published = false;
+  const cachedResponses = new Map();
+  const item = await fixture(t, { fetch: async (url, _init, data) => {
+    if (!cachedResponses.has(url)) {
+      const body = endpoint(url) === apiURL
+        ? { ...data.release, tag_name: published ? tag : 'v0.10.7' }
+        : data.manifest;
+      cachedResponses.set(url, JSON.stringify(body));
+    }
+    return new Response(cachedResponses.get(url));
+  } });
+  assert.equal((await item.updater.check()).status, 'idle');
+  published = true;
+  assert.equal((await item.updater.check()).latestVersion, version);
+  const checks = item.calls.filter(call => endpoint(call.url) === apiURL);
+  assert.equal(checks.length, 2);
+  assert.notEqual(checks[0].url, checks[1].url);
+  for (const call of item.calls) {
+    assert.equal(call.init.cache, 'no-store');
+    assert.equal(call.init.headers['Cache-Control'], 'no-cache, no-store, max-age=0');
+    assert.equal(call.init.headers.Pragma, 'no-cache');
+    assert.match(new URL(call.url).searchParams.get('_shitu_check'), /^[a-f0-9-]{36}$/);
+  }
+});
+
+test('each metadata check gets a fresh URL while installer downloads keep their exact verified URL', async t => {
+  const item = await fixture(t);
+  await item.updater.check();
+  await item.updater.check();
+  await item.updater.download();
+  const metadata = item.calls.filter(call => !call.url.endsWith('.exe'));
+  assert.equal(metadata.length, 4);
+  assert.equal(new Set(metadata.map(call => new URL(call.url).searchParams.get('_shitu_check'))).size, 4);
+  const manifests = metadata.filter(call => endpoint(call.url) === prefix + 'shitu-update.json');
+  assert.equal(manifests.length, 2);
+  assert.notEqual(manifests[0].url, manifests[1].url);
+  const downloads = item.calls.filter(call => call.url.endsWith('.exe'));
+  assert.equal(downloads.length, 1);
+  assert.equal(downloads[0].url, prefix + item.manifest.installer.name);
+  assert.equal(new URL(downloads[0].url).search, '');
+  assert.equal(item.updater.state().status, 'downloaded');
+});
+
+test('an unexpected cache-only metadata response is a visible failure instead of claiming there is no update', async t => {
+  const item = await fixture(t, { fetch: async () => new Response(null, { status: 304 }) });
+  await assert.rejects(item.updater.check(), /HTTP 304/);
+  assert.equal(item.updater.state().status, 'error');
+  assert.equal(item.updater.state().latestVersion, null);
+});
+
 test('ignores draft, prerelease, equal and older releases without downloading metadata', async t => {
   for (const patch of [{ draft: true }, { prerelease: true }, { tag_name: 'v0.10.8-beta.1' },
     { tag_name: 'v0.10.7' }, { tag_name: 'v0.9.99' }]) {
@@ -100,7 +156,9 @@ test('rejects installer or manifest URLs outside the exact repository release', 
     'https://evil.example/shitu-update.json',
     'https://github.com/another/repo/releases/download/v0.10.8/shitu-update.json',
     'https://user:password@github.com/example/shitu-releases/releases/download/v0.10.8/shitu-update.json',
-    prefix + 'shitu-update.json?redirect=evil']) {
+    prefix + 'shitu-update.json?redirect=evil',
+    prefix + 'shitu-update.json?_shitu_check=advertised-untrusted-query',
+    prefix + 'shitu-update.json#unexpected-fragment']) {
     const item = await fixture(t);
     item.release.assets[0].browser_download_url = url;
     await assert.rejects(item.updater.check(), /地址|附件/);
@@ -135,8 +193,8 @@ test('rejects mismatched GitHub asset size and optional server digest', async t 
 test('follows permitted GitHub asset redirects and rejects an external redirect', async t => {
   let redirected = false;
   const item = await fixture(t, { fetch: async (url, _init, data) => {
-    if (url === apiURL) return new Response(JSON.stringify(data.release));
-    if (url === prefix + 'shitu-update.json') return new Response(null, { status: 302,
+    if (endpoint(url) === apiURL) return new Response(JSON.stringify(data.release));
+    if (endpoint(url) === prefix + 'shitu-update.json') return new Response(null, { status: 302,
       headers: { location: 'https://release-assets.githubusercontent.com/assets/manifest?token=example' } });
     if (url.startsWith('https://release-assets.githubusercontent.com/')) {
       redirected = true;
@@ -145,6 +203,8 @@ test('follows permitted GitHub asset redirects and rejects an external redirect'
   } });
   assert.equal((await item.updater.check()).status, 'available');
   assert.equal(redirected, true);
+  assert.ok(item.calls.every(call => call.init.cache === 'no-store' && call.init.headers.Pragma === 'no-cache'));
+  assert.equal(item.calls.at(-1).url, 'https://release-assets.githubusercontent.com/assets/manifest?token=example');
   const malicious = await fixture(t, { fetch: async () => new Response(null, { status: 302, headers: { location: 'https://evil.example/metadata' } }) });
   await assert.rejects(malicious.updater.check(), /受信任/);
   assert.equal(malicious.calls.length, 1);
@@ -182,8 +242,8 @@ test('rejects corrupt or truncated downloads, removes partial files and allows r
   for (const bytes of [Buffer.from('x'.repeat(payload.length)), payload.subarray(0, 4), Buffer.concat([payload, payload])]) {
     let bad = true;
     const item = await fixture(t, { fetch: async (url, _init, data) => {
-      if (url === apiURL) return new Response(JSON.stringify(data.release));
-      if (url.endsWith('/shitu-update.json')) return new Response(JSON.stringify(data.manifest));
+      if (endpoint(url) === apiURL) return new Response(JSON.stringify(data.release));
+      if (endpoint(url).endsWith('/shitu-update.json')) return new Response(JSON.stringify(data.manifest));
       return new Response(bad ? bytes : payload);
     } });
     await item.updater.check();
@@ -198,8 +258,8 @@ test('rejects corrupt or truncated downloads, removes partial files and allows r
 
 test('rejects response content-length mismatch before writing an installer', async t => {
   const item = await fixture(t, { fetch: async (url, _init, data) => {
-    if (url === apiURL) return new Response(JSON.stringify(data.release));
-    if (url.endsWith('/shitu-update.json')) return new Response(JSON.stringify(data.manifest));
+    if (endpoint(url) === apiURL) return new Response(JSON.stringify(data.release));
+    if (endpoint(url).endsWith('/shitu-update.json')) return new Response(JSON.stringify(data.manifest));
     return new Response(payload, { headers: { 'Content-Length': String(payload.length + 1) } });
   } });
   await item.updater.check();
@@ -224,8 +284,8 @@ test('deduplicates concurrent checks and downloads', async t => {
   let fileResolve;
   const fileWait = new Promise(resolve => { fileResolve = resolve; });
   const item = await fixture(t, { fetch: async (url, _init, data) => {
-    if (url === apiURL) { await releaseWait; return new Response(JSON.stringify(data.release)); }
-    if (url.endsWith('/shitu-update.json')) return new Response(JSON.stringify(data.manifest));
+    if (endpoint(url) === apiURL) { await releaseWait; return new Response(JSON.stringify(data.release)); }
+    if (endpoint(url).endsWith('/shitu-update.json')) return new Response(JSON.stringify(data.manifest));
     await fileWait;
     return new Response(payload);
   } });
@@ -238,7 +298,7 @@ test('deduplicates concurrent checks and downloads', async t => {
   await assert.rejects(item.updater.install(), /正在进行/);
   fileResolve();
   await Promise.all([a, b]);
-  assert.equal(item.calls.filter(call => call.url === apiURL).length, 1);
+  assert.equal(item.calls.filter(call => endpoint(call.url) === apiURL).length, 1);
   assert.equal(item.calls.filter(call => call.url.endsWith('.exe')).length, 1);
 });
 
@@ -247,8 +307,8 @@ test('network failure preserves a downloaded update and a failed installer can r
   const installations = [];
   const item = await fixture(t, { fetch: async (url, _init, data) => {
     if (networkFails) throw new Error('secret signed CDN URL should never reach the UI');
-    if (url === apiURL) return new Response(JSON.stringify(data.release));
-    if (url.endsWith('/shitu-update.json')) return new Response(JSON.stringify(data.manifest));
+    if (endpoint(url) === apiURL) return new Response(JSON.stringify(data.release));
+    if (endpoint(url).endsWith('/shitu-update.json')) return new Response(JSON.stringify(data.manifest));
     return new Response(payload);
   }, updater: { install: async args => {
     if (installFails) throw new Error('a private local filesystem path');

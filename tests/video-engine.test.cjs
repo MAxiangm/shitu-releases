@@ -128,6 +128,35 @@ test('one cancelled subscriber does not cancel another preview subscriber', requ
   assert.equal((await remaining).codec, 'vp9');
 });
 
+test('an immediate retry after the last subscriber cancels starts fresh and remains shared', requireRuntime, async t => {
+  const directory = await fixture(t);
+  const source = await sample(directory, 'avi', 'mpeg4');
+  const key = digest(await fs.readFile(source));
+  const events = [];
+  let lateSubscriber;
+  const instance = engine(t, directory, event => {
+    events.push(event);
+    // By the time the replacement begins conversion, the abandoned request has
+    // finished cleaning up. It must not have removed the replacement's job.
+    if (event.state === 'converting' && event.progress === 0 && !lateSubscriber) {
+      lateSubscriber = instance.preview(source, { key });
+      lateSubscriber.catch(() => {});
+    }
+  });
+  const controller = new AbortController();
+  const cancelled = instance.preview(source, { key, signal: controller.signal });
+  const rejected = assert.rejects(cancelled, { name: 'AbortError' });
+  controller.abort();
+  const replacement = instance.preview(source, { key });
+  await rejected;
+  const result = await replacement;
+  assert.equal(result.codec, 'vp9');
+  assert.ok(lateSubscriber, 'the replacement must reach conversion');
+  assert.equal((await lateSubscriber).path, result.path);
+  assert.equal(events.filter(event => event.state === 'converting' && event.progress === 0).length, 1);
+  assert.equal((await instance.preview(source, { key })).cached, true);
+});
+
 test('shutdown cancels work, rejects new work, and unsafe identities never become output paths', requireRuntime, async t => {
   const directory = await fixture(t);
   const source = await sample(directory, 'mkv', 'ffv1');

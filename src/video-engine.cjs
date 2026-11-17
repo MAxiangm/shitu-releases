@@ -257,13 +257,16 @@ function createVideoEngine({ runtimeDir = path.join(__dirname, '..', 'video-runt
     // The source path is included only in the in-flight map, never in a cache filename.
     const identity = `${key || ''}\0${source}`;
     let job = previews.get(identity);
-    if (!job) {
+    // Cancelling the last subscriber aborts immediately, while its process and
+    // temporary files can still be cleaning up. A retry must not join that job.
+    if (!job || job.controller.signal.aborted || job.settled) {
       const controller = new AbortController();
       controllers.add(controller);
       job = { controller, consumers: new Set(), settled: false, promise: null };
       previews.set(identity, job);
       job.promise = track(Promise.resolve().then(() => createPreview(source, key, controller.signal)).finally(() => {
-        job.settled = true; controllers.delete(controller); previews.delete(identity);
+        job.settled = true; controllers.delete(controller);
+        if (previews.get(identity) === job) previews.delete(identity);
       }));
     }
     return subscribe(job, signal);

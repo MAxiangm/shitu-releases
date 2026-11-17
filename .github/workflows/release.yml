@@ -14,9 +14,55 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.release.outputs.build }}
+    steps:
+      - name: Skip a version already published with complete verified assets
+        id: release
+        uses: actions/github-script@v7
+        with:
+          script: |
+            core.setOutput('build', 'true');
+            if (context.eventName === 'workflow_dispatch') return;
+            const tag = context.ref.replace(/^refs\/tags\//, '');
+            if (!/^v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/.test(tag)) return;
+            let release;
+            try { release = (await github.rest.repos.getReleaseByTag({ ...context.repo, tag })).data; }
+            catch (error) { if (error.status === 404) return; throw error; }
+            if (release.draft || release.prerelease || release.tag_name !== tag) return;
+            const manifests = release.assets.filter(asset => asset.name === 'shitu-update.json');
+            if (manifests.length !== 1) return;
+            const asset = manifests[0], version = tag.slice(1);
+            const prefix = `https://github.com/${context.repo.owner}/${context.repo.repo}/releases/download/${encodeURIComponent(tag)}/`;
+            if (asset.state !== 'uploaded' || asset.size < 1 || asset.size > 65536 || asset.browser_download_url !== prefix + 'shitu-update.json') return;
+            const response = await fetch(asset.browser_download_url + '?shitu_preflight=' + Date.now(), {
+              cache: 'no-store', headers: { 'Cache-Control': 'no-cache' }, signal: AbortSignal.timeout(30000)
+            });
+            if (!response.ok || !response.body) throw new Error(`Existing release manifest is not publicly readable: HTTP ${response.status}`);
+            const chunks = []; let bytes = 0;
+            for await (const chunk of response.body) {
+              bytes += chunk.length;
+              if (bytes > 65536) throw new Error('Existing release manifest exceeds the allowed size');
+              chunks.push(Buffer.from(chunk));
+            }
+            const buffer = Buffer.concat(chunks);
+            const digest = require('node:crypto').createHash('sha256').update(buffer).digest('hex');
+            if (asset.size !== buffer.length || asset.digest !== `sha256:${digest}`) throw new Error('Existing release manifest digest mismatch');
+            const manifest = JSON.parse(buffer.toString('utf8'));
+            const installer = manifest.installer;
+            if (manifest.schemaVersion !== 1 || manifest.version !== version || manifest.platform !== 'win32' || manifest.arch !== 'x64' ||
+                installer?.name !== `shitu-${version}-setup.exe` || !Number.isSafeInteger(installer.size) || installer.size < 2 || installer.size > 2147483648 || !/^[a-f0-9]{64}$/.test(installer.sha256 || '')) return;
+            const files = release.assets.filter(item => item.name === installer.name);
+            if (files.length !== 1 || files[0].state !== 'uploaded' || files[0].size !== installer.size ||
+                files[0].digest !== `sha256:${installer.sha256}` || files[0].browser_download_url !== prefix + installer.name) return;
+            core.setOutput('build', 'false');
+            core.notice(`${tag} is already public with complete matching update assets; preserving the existing release.`);
   windows:
+    needs: preflight
     # The first installer is built and published locally to bootstrap later CI.
-    if: github.event_name == 'workflow_dispatch' || github.ref_name != 'v0.10.8'
+    if: needs.preflight.outputs.build == 'true' && (github.event_name == 'workflow_dispatch' || github.ref_name != 'v0.10.8')
     runs-on: windows-latest
     timeout-minutes: 45
     steps:
@@ -51,16 +97,26 @@ jobs:
         run: |
           node scripts/prepare-video-runtime.cjs
           node scripts/prepare-video-test-fixtures.cjs
+      - name: Prepare verified model test samples
+        run: node scripts/prepare-model-test-fixtures.cjs
       - name: Check source
         run: node scripts/check.cjs
       - name: Run unit tests
         run: npm test
       - name: Smoke test application
         run: node scripts/smoke.cjs
+      - name: Smoke test browser capture and saved receipts
+        run: node scripts/smoke-collector.cjs
+      - name: Smoke test AE package storage and folder export
+        run: node scripts/smoke-ae.cjs
       - name: Smoke test update without executing an installer
         run: node scripts/smoke-update.cjs
       - name: Smoke test real video decoding and preview
         run: node scripts/smoke-video.cjs
+      - name: Smoke test model packaging and interactive preview
+        run: |
+          node scripts/smoke-model.cjs
+          node scripts/smoke-model-viewer.cjs
       - name: Ensure NSIS compiler
         shell: pwsh
         run: |

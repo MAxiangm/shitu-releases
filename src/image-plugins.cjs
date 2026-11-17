@@ -344,7 +344,7 @@ function createImagePlugins({ rootDir, getLibrary, onEvent = () => {}, aiEngine 
     if (typeof request.libraryRoot !== 'string') throw new Error('素材库信息已失效，请重新选择素材');
     const library = getLibrary();
     const { assets, files } = resolveAssetFiles(library, request.assetIds, request.libraryRoot);
-    if (assets.some(asset => asset.mediaType === 'video')) throw new Error('这些工具仅支持静态图片，请移除视频');
+    if (assets.some(asset => asset.mediaType !== 'image')) throw new Error('这些工具仅支持静态图片，请移除视频、模型和工程');
     const options = sanitizeOptions(plugin.id, request.options);
     const job = { id: crypto.randomUUID(), pluginId: plugin.id, libraryRoot: library.root, assetIds: assets.map(asset => asset.id), assets, files, library, options, controller: new AbortController(), state: 'queued', progress: 0, message: '等待处理', createdAt: new Date().toISOString() };
     jobs.set(job.id, job);

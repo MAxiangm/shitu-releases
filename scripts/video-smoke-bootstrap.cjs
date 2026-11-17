@@ -17,21 +17,69 @@ module.exports = function configureVideoSmoke({ root, base }) {
     start: async () => ({}), info: () => ({ enabled: false, baseUrl: null, code: null }),
     activeCount: () => 0, close: async () => { collectorClosed = true; }
   });
-  const videoModule = require(path.join(root, 'src', 'video-engine.cjs'));
+  let readGate, videoCacheDir;
+  const previewStarts = [];
+  const originalReadStream = fs.createReadStream;
+  // Hold a real engine job inside its source hash, so even a one-frame DXV
+  // deterministically remains pending while the UI closes or switches clips.
+  fs.createReadStream = (...args) => {
+    const stream = originalReadStream(...args);
+    const gate = readGate;
+    if (gate && !gate.claimed && String(args[0]).toLowerCase().endsWith('.dxv')) {
+      gate.claimed = true;
+      const iterator = stream[Symbol.asyncIterator].bind(stream);
+      stream[Symbol.asyncIterator] = async function* () {
+        gate.enter();
+        await gate.released;
+        yield* iterator();
+      };
+    }
+    return stream;
+  };
+  let videoModule;
+  try { videoModule = require(path.join(root, 'src', 'video-engine.cjs')); }
+  finally { fs.createReadStream = originalReadStream; }
   const createEngine = videoModule.createVideoEngine;
   videoModule.createVideoEngine = options => {
+    videoCacheDir = options.cacheDir;
     engine = createEngine(options);
     const preview = engine.preview;
     engine.preview = async (source, settings) => {
       // Make the AVI result deterministically arrive after a later MKV result.
       if (source.toLowerCase().endsWith('.avi')) await new Promise(resolve => setTimeout(resolve, 180));
+      previewStarts.push(source);
       return preview(source, settings);
     };
     const shutdown = engine.shutdown;
     engine.shutdown = async () => { await shutdown(); engineShutdown = true; };
     return engine;
   };
+  const waitForMain = async (condition, message) => {
+    const started = Date.now();
+    while (!condition()) {
+      if (Date.now() - started > 10000) throw new Error(message);
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+  };
+  const armReadGate = () => {
+    let release;
+    const released = new Promise(resolve => { release = resolve; });
+    const gate = { released, claimed: false, entered: false,
+      enter() { this.entered = true; },
+      release() { clearTimeout(timer); release(); }
+    };
+    const timer = setTimeout(() => { gate.expired = true; release(); }, 10000); timer.unref();
+    return (readGate = gate);
+  };
+  const clearPreviewCache = async () => {
+    assert.equal(path.resolve(videoCacheDir), path.join(base, 'profile', 'video-previews'));
+    for (const name of await fs.promises.readdir(videoCacheDir).catch(error => {
+      if (error.code === 'ENOENT') return [];
+      throw error;
+    })) await fs.promises.unlink(path.join(videoCacheDir, name));
+  };
   const fail = error => {
+    readGate?.release();
     fs.writeFileSync(resultPath, JSON.stringify({ ok: false, error: error.stack || String(error), failures }, null, 2));
     Promise.resolve(engine?.shutdown()).finally(() => app.exit(1));
   };
@@ -54,7 +102,7 @@ module.exports = function configureVideoSmoke({ root, base }) {
     window.webContents.on('render-process-gone', (_event, details) => failures.push(JSON.stringify(details)));
     window.webContents.once('did-finish-load', async () => {
       try {
-        uiResult = await window.webContents.executeJavaScript(`(async () => {
+        await window.webContents.executeJavaScript(`(async () => {
           const check = (condition, message) => { if (!condition) throw new Error(message); };
           const waitFor = async (condition, message, timeout = 20000) => {
             const started = Date.now();
@@ -80,6 +128,47 @@ module.exports = function configureVideoSmoke({ root, base }) {
             return { ...asset, fixtureKind: file.kind };
           });
           for (const asset of assets) await loadImage(api.assetUrl(asset.id, 'thumbnail'));
+          applyLibrary(snapshot, false);
+          window.__videoSmoke = { check, waitFor, api, snapshot, assets, files, imported };
+        })()`);
+        // Concurrent IPC requests for the same cold video must share their work.
+        const concurrentStarts = previewStarts.length;
+        await window.webContents.executeJavaScript(`(async () => {
+          const { api, snapshot, assets, check } = window.__videoSmoke;
+          const dxv = assets.find(asset => asset.fixtureKind === 'dxv');
+          const results = await Promise.all([api.prepareVideo(dxv.id, snapshot.root), api.prepareVideo(dxv.id, snapshot.root)]);
+          check(results[0].url === results[1].url, 'Concurrent DXV requests did not share their prepared result');
+        })()`);
+        assert.equal(previewStarts.length - concurrentStarts, 1, 'Concurrent DXV IPC requests must share one engine call');
+        const waitForDxvUi = `(() => {
+          const { assets, waitFor, check } = window.__videoSmoke;
+          const dxv = assets.find(asset => asset.fixtureKind === 'dxv');
+          const video = document.getElementById('previewVideo');
+          return waitFor(() => state.previewId === dxv.id && video.readyState >= 2 && !video.classList.contains('hidden'), 'Cold DXV preview failed after reopen or switch')
+            .then(() => check(!document.getElementById('previewFallback').textContent.includes('已取消'), 'Current DXV preview displayed a cancellation error'));
+        })()`;
+        for (const scenario of ['reopen', 'switch-back']) {
+          await clearPreviewCache();
+          const gate = armReadGate();
+          await window.webContents.executeJavaScript(`openPreview(window.__videoSmoke.assets.find(asset => asset.fixtureKind === 'dxv').id)`);
+          await waitForMain(() => gate.entered, 'Cold DXV engine job did not enter its source hash');
+          if (scenario === 'reopen') {
+            await window.webContents.executeJavaScript(`closePreview(); openPreview(window.__videoSmoke.assets.find(asset => asset.fixtureKind === 'dxv').id)`);
+          } else {
+            const beforeMkv = previewStarts.filter(source => source.toLowerCase().endsWith('.mkv')).length;
+            await window.webContents.executeJavaScript(`displayPreviewAsset(window.__videoSmoke.assets.find(asset => asset.fixtureKind === 'mkv'), 1, window.__videoSmoke.assets.length)`);
+            await waitForMain(() => previewStarts.filter(source => source.toLowerCase().endsWith('.mkv')).length > beforeMkv, 'MKV switch did not reach the engine');
+            const beforeDxv = previewStarts.filter(source => source.toLowerCase().endsWith('.dxv')).length;
+            await window.webContents.executeJavaScript(`displayPreviewAsset(window.__videoSmoke.assets.find(asset => asset.fixtureKind === 'dxv'), 2, window.__videoSmoke.assets.length)`);
+            await waitForMain(() => previewStarts.filter(source => source.toLowerCase().endsWith('.dxv')).length > beforeDxv, 'DXV return did not reach the engine');
+          }
+          assert.equal(gate.expired, undefined, 'Cold DXV test gate expired before its switch completed');
+          gate.release(); readGate = null;
+          await window.webContents.executeJavaScript(waitForDxvUi);
+          await window.webContents.executeJavaScript('closePreview()');
+        }
+        uiResult = await window.webContents.executeJavaScript(`(async () => {
+          const { check, waitFor, api, snapshot, assets, files, imported } = window.__videoSmoke;
           const decoded = [];
           for (const asset of assets) {
             const prepared = await api.prepareVideo(asset.id, snapshot.root);
@@ -126,6 +215,7 @@ module.exports = function configureVideoSmoke({ root, base }) {
           ]);
           return { imported: imported.report.imported, thumbnailsLoaded: assets.length, decoded, galleryUsesThumbnails: true,
             stalePreviewIgnored: true, closeStopsPlayback: true, dxvUserInterface: true, controls: focused.controls,
+            concurrentDxvRequests: true, coldDxvReopen: true, coldDxvSwitchBack: true,
             library: snapshot.root, managedOriginals: assets.map(asset => ({ path: asset.filename, sha256: asset.hash })) };
         })()`);
         assert.deepEqual(failures, []);

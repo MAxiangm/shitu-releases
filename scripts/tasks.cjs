@@ -7,7 +7,7 @@ const task = process.argv[2] || 'start';
 const entries = { start: 'start.cjs', check: 'check.cjs', smoke: 'smoke.cjs',
   package: 'package.cjs', installer: 'build-installer.cjs', sync: 'sync-installer.cjs',
   publish: 'publish-github.cjs', 'prepare-resources': 'prepare-build-resources.cjs', 'smoke-update': 'smoke-update.cjs',
-  'smoke-video': 'smoke-video.cjs', 'video-fixtures': 'prepare-video-test-fixtures.cjs' };
+  'smoke-video': 'smoke-video.cjs', 'video-fixtures': 'prepare-video-test-fixtures.cjs', 'smoke-model': 'smoke-model.cjs', 'smoke-collector': 'smoke-collector.cjs', 'smoke-ae': 'smoke-ae.cjs' };
 let args;
 if (task === 'test') {
   args = ['--test', ...fs.readdirSync(path.join(root, 'tests'))

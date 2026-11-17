@@ -15,7 +15,7 @@ async function ensureWorkerVersion() {
   const manifest = await fetch(chrome.runtime.getURL('manifest.json'), { cache: 'no-store' }).then(response => response.json());
   const info = await send({ type: 'shitu:extension-info' });
   const stored = await chrome.storage.local.get(RELOAD_KEY);
-  if (info?.ok && info.protocol === 1 && info.version === manifest.version) {
+  if (info?.ok && info.protocol === 1 && info.version === manifest.version && info.build === manifest.version) {
     workerVerified = true;
     upgraded = Boolean(stored[RELOAD_KEY]);
     if (upgraded) await chrome.storage.local.remove(RELOAD_KEY);
@@ -37,13 +37,24 @@ async function ensureWorkerVersion() {
 
 async function showRecent(connected = false) {
   const { shituLastCapture: recent } = await chrome.storage.local.get('shituLastCapture');
-  if (connected && recent && !recent.ok && /^(?:连接已失效|本机连接|未知请求|尚未找到本机拾图|扩展已更新)/.test(recent.error || '')) {
-    await chrome.storage.local.remove('shituLastCapture');
-    $('recent').hidden = true;
-    return;
-  }
   $('recent').hidden = !recent;
-  if (recent) $('recentText').textContent = recent.ok ? `${recent.duplicates ? '已跳过重复素材' : '已保存'} · ${recent.name}` : `未保存 · ${recent.error}`;
+  if (!recent) return;
+  let message;
+  const pending = recent.pending || recent.status === 'working';
+  const stale = pending && Date.now() - Number(recent.at || 0) > 300000;
+  if (pending) message = stale ? '上次采集未收到最终确认，请在桌面“最近导入”或“浏览器采集”状态中核对。'
+    : recent.message || '正在采集，尚未收到素材库保存确认。';
+  else if (recent.ok && recent.imported > 0) message = '已保存到素材库，可在“全部素材”或“最近导入”查看。';
+  else if (recent.ok && recent.duplicates > 0) message = recent.existingAssets?.some(asset => asset.trashedAt)
+    ? '这份素材已在回收站，请到桌面拾图恢复后查看。' : '素材库中已有这份文件，可清除搜索和格式筛选后查看。';
+  else message = recent.error ? `未收到保存确认 · ${recent.error}` : '上次采集未收到保存确认，请到桌面拾图核对。';
+  $('recentLabel').textContent = pending && !stale ? '正在采集 · 尚未保存' : '上次采集结果';
+  const confirmed = recent.ok && ((Number.isSafeInteger(recent.imported) && recent.imported > 0) || (Number.isSafeInteger(recent.duplicates) && recent.duplicates > 0));
+  $('recent').setAttribute('data-state', pending ? stale ? 'unconfirmed' : 'working' : confirmed ? 'success' : recent.error ? 'error' : 'unconfirmed');
+  const lines = [recent.name, message];
+  if (pending && recent.lastNotice?.error) lines.push(`操作提示：${recent.lastNotice.error}`);
+  if (recent.libraryRoot) lines.push(`目标素材库：${recent.libraryRoot}`);
+  $('recentText').textContent = lines.filter(Boolean).join('\n');
 }
 
 async function checkConnection(force = false) {
@@ -55,7 +66,7 @@ async function checkConnection(force = false) {
     if (!await ensureWorkerVersion()) return false;
     const result = await send({ type: force ? 'shitu:reconnect' : 'shitu:ping' });
     if (result?.ok) {
-      status(result.ready ? '已自动连接桌面拾图' : '已连接 · 请先选择素材库', result.ready ? 'online' : '');
+      status(result.ready ? `已连接拾图 ${result.version}` : '已连接 · 请先选择素材库', result.ready ? 'online' : '');
       $('feedback').textContent = result.ready
         ? upgraded ? '采集助手已更新。请刷新已打开的素材网页，再按住 Alt 并右键采集。' : '已准备好。回到网页，按住 Alt 并右键点击素材即可保存。'
         : '请先在桌面拾图中选择或新建素材库，之后自动开始接收素材。';
@@ -70,6 +81,10 @@ async function checkConnection(force = false) {
   finally { checking = false; $('check').disabled = reloading; }
 }
 $('check').addEventListener('click', () => checkConnection(true));
+$('recentClear').addEventListener('click', async () => {
+  await chrome.storage.local.remove('shituLastCapture');
+  $('recent').hidden = true;
+});
 checkConnection();
 const refresh = setInterval(() => checkConnection(), 3000);
 window.addEventListener('unload', () => clearInterval(refresh));

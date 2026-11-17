@@ -1,0 +1,12 @@
+.shitu-model-viewer { position:relative; width:100%; height:100%; min-height:240px; overflow:hidden; background:#191b20; border-radius:12px; color:#e9eaf0; font:12px "Segoe UI","Microsoft YaHei UI",sans-serif; isolation:isolate; }
+.shitu-model-canvas { display:block; width:100%; height:100%; touch-action:none; outline:none; }
+.shitu-model-toolbar { position:absolute; top:12px; right:12px; display:flex; gap:6px; z-index:2; }
+.shitu-model-toolbar button { padding:7px 10px; background:#24262de8; color:#eceef4; border:1px solid #ffffff24; border-radius:7px; font:inherit; cursor:pointer; }
+.shitu-model-toolbar button:hover,.shitu-model-toolbar button[aria-pressed="true"] { background:#454b5b; }
+.shitu-model-toolbar button:focus-visible { outline:2px solid #e8eaf0; outline-offset:2px; }
+.shitu-model-toolbar button[hidden] { display:none; }
+.shitu-model-notice { position:absolute; left:12px; right:12px; bottom:11px; max-height:48px; overflow:hidden; color:#c2c6d1; text-align:center; font-size:11px; line-height:1.5; pointer-events:none; text-shadow:0 1px 4px #000; }
+body.shitu-model-thumbnail { margin:0; width:100vw; height:100vh; overflow:hidden; background:#191b20; }
+.shitu-model-thumbnail #modelThumbnailRoot { width:100vw; height:100vh; }
+.shitu-model-thumbnail .shitu-model-toolbar,.shitu-model-thumbnail .shitu-model-notice { display:none; }
+.shitu-model-thumbnail .shitu-model-viewer { border-radius:0; }

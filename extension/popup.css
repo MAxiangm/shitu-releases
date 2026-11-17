@@ -36,4 +36,8 @@ button:disabled { opacity: .4; cursor: wait; }
 .recent { margin-top: 19px; padding: 12px; border: 1px solid #242424; border-radius: 10px; background: #111; }
 .recent > span { color: #7f7f7f; font-size: 10px; }
 .recent p { margin: 4px 0 0; color: #c2c2c2; font-size: 11px; overflow-wrap: anywhere; }
+.recent p { white-space: pre-line; }
+.recent[data-state="error"],.recent[data-state="unconfirmed"] { border-color:#777; }
+#recentClear { float:right; padding:0; border:0; background:none; color:#aaa; font-size:10px; }
+#recentClear:hover { color:#fff; }
 footer { margin-top: 22px; padding-top: 16px; border-top: 1px solid var(--line); color: #717171; font-size: 10px; line-height: 1.9; }

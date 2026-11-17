@@ -68,7 +68,7 @@
   async function open({ assets = [], selectedIds = [], pluginId, libraryRoot } = {}) {
     build(); state.previousFocus = document.activeElement;
     const videos = /^(mp4|webm|m4v|mov|ogv|avi|mkv)$/i;
-    state.assets = assets.filter(a => a && a.id && !a.trashedAt && a.mediaType !== 'video' && !videos.test(String(a.ext || a.extension || '').replace(/^\./, '')));
+    state.assets = assets.filter(a => a && a.id && !a.trashedAt && a.mediaType === 'image' && !videos.test(String(a.ext || a.extension || '').replace(/^\./, '')));
     state.selected = new Set(selectedIds.filter(id => state.assets.some(a => a.id === id)));
     state.libraryRoot = libraryRoot || null;
     state.open = true; root.hidden = false; document.body.classList.add('is-plugin-center-open');

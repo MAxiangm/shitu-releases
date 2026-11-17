@@ -92,13 +92,18 @@ function createAppUpdater({ currentVersion, repository, cacheDir, enabled = true
     if (error?.name === 'AbortError' || error?.name === 'TimeoutError') return publicError('更新操作已取消或超时，请重试');
     return publicError(fallback);
   }
-  async function request(urlValue, signal, accept = 'application/json', timeoutMs = 30000) {
+  async function request(urlValue, signal, { accept = 'application/json', timeoutMs = 30000, fresh = false } = {}) {
     let url = trustedURL(urlValue);
+    // Metadata is mutable even when a proxy still considers its URL cacheable.
+    // Add our nonce only after validating the advertised release asset URL.
+    if (fresh) url.searchParams.set('_shitu_check', crypto.randomUUID());
     const combined = AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]);
     for (let count = 0; count <= 5; count++) {
       combined.throwIfAborted();
       const response = await fetchImpl(url.href, { signal: combined, redirect: 'manual',
-        headers: { Accept: accept, 'User-Agent': `Shitu/${currentVersion}` } });
+        ...(fresh ? { cache: 'no-store' } : {}),
+        headers: { Accept: accept, 'User-Agent': `Shitu/${currentVersion}`,
+          ...(fresh ? { 'Cache-Control': 'no-cache, no-store, max-age=0', Pragma: 'no-cache' } : {}) } });
       if (response.url) trustedURL(response.url);
       if ([301, 302, 303, 307, 308].includes(response.status)) {
         const location = response.headers.get('location');
@@ -123,7 +128,7 @@ function createAppUpdater({ currentVersion, repository, cacheDir, enabled = true
     catch { throw publicError('GitHub 更新信息格式无效'); }
   }
   async function readRelease(signal) {
-    const response = await request(`https://api.github.com/repos/${repository}/releases/latest`, signal);
+    const response = await request(`https://api.github.com/repos/${repository}/releases/latest`, signal, { fresh: true });
     if (response.status === 404) return null;
     const info = await json(response, 1024 * 1024);
     if (info.draft || info.prerelease) return null;
@@ -137,7 +142,7 @@ function createAppUpdater({ currentVersion, repository, cacheDir, enabled = true
     if (!Number.isSafeInteger(manifestAsset.size) || manifestAsset.size <= 0 || manifestAsset.size > 64 * 1024) {
       throw publicError('更新清单大小无效');
     }
-    const manifest = await json(await request(assetURL(manifestAsset, repository, tag), signal), 64 * 1024);
+    const manifest = await json(await request(assetURL(manifestAsset, repository, tag), signal, { fresh: true }), 64 * 1024);
     const installer = manifest?.installer;
     if (manifest?.schemaVersion !== 1 || manifest.version !== version || manifest.platform !== 'win32' || manifest.arch !== 'x64' ||
         !installer || installer.name !== `shitu-${version}-setup.exe` ||
@@ -201,7 +206,7 @@ function createAppUpdater({ currentVersion, repository, cacheDir, enabled = true
         await fs.mkdir(cacheDir, { recursive: true });
         const filePath = path.join(cacheDir, `${selected.version}-${selected.sha256}.exe`);
         if (!await validFile(filePath, selected, signal)) {
-          const response = await request(selected.downloadURL, signal, 'application/octet-stream', 30 * 60 * 1000);
+          const response = await request(selected.downloadURL, signal, { accept: 'application/octet-stream', timeoutMs: 30 * 60 * 1000 });
           if (!response.ok || !response.body) throw publicError(`安装包下载失败（HTTP ${response.status}）`);
           const contentLength = response.headers.get('content-length');
           if (contentLength && (!/^\d+$/.test(contentLength) || Number(contentLength) !== selected.size)) {

@@ -1,5 +1,6 @@
 const fs = require('node:fs');
 const path = require('node:path');
+const { MODEL, PROJECT } = require('./media-formats.cjs');
 
 const MAX_DRAG_ASSETS = 256;
 
@@ -28,15 +29,39 @@ function resolveAssetFiles(library, ids, expectedRoot) {
     const asset = index.get(id);
     if (!asset) throw new Error('所选素材不存在，请重新选择');
     if (asset.trashedAt) throw new Error('请先从回收站恢复素材');
-    const filename = library.getAssetPath(id, 'original');
+    const bundled = MODEL.has(asset.ext) || PROJECT.has(asset.ext);
+    const manifest = PROJECT.has(asset.ext) ? asset.projectBundle : asset.modelBundle;
+    const filename = PROJECT.has(asset.ext) ? library.getProjectBundleDirectory(id) : bundled ? library.getModelBundleDirectory(id) : library.getAssetPath(id, 'original');
     if (typeof filename !== 'string' || !path.isAbsolute(filename)) throw new Error('素材原件路径无效');
     let resolved;
     try {
       const info = fs.lstatSync(filename);
-      if (!info.isFile()) throw new Error('不是普通文件');
+      if (info.isSymbolicLink() || (bundled ? !info.isDirectory() : !info.isFile())) throw new Error('不是有效的素材文件或资源包');
       resolved = fs.realpathSync(filename);
       if (!isWithin(originalsRoot, resolved)) throw new Error('路径不在当前素材库原件目录内');
       fs.accessSync(resolved, fs.constants.R_OK);
+      if (bundled) {
+        const knownFiles = new Map(manifest.files.map(file => [file.path, file]));
+        const visit = (directory, relative = '') => {
+          for (const name of fs.readdirSync(directory)) {
+            const child = relative ? `${relative}/${name}` : name;
+            const childPath = path.join(directory, name);
+            const childInfo = fs.lstatSync(childPath);
+            if (childInfo.isSymbolicLink()) throw new Error('模型包包含符号链接');
+            if (childInfo.isDirectory()) {
+              if (![...knownFiles.keys()].some(filename => filename.startsWith(`${child}/`))) throw new Error('模型包包含未知目录');
+              visit(childPath, child);
+            } else if (!childInfo.isFile() || !knownFiles.has(child)) throw new Error('模型包包含未知文件');
+          }
+        };
+        visit(resolved);
+        for (const file of knownFiles.values()) {
+          const companion = path.join(resolved, file.path);
+          const companionInfo = fs.lstatSync(companion);
+          if (!companionInfo.isFile() || companionInfo.isSymbolicLink() || !isWithin(resolved, fs.realpathSync(companion))) throw new Error('模型依赖路径无效');
+          fs.accessSync(companion, fs.constants.R_OK);
+        }
+      }
     } catch (error) { throw new Error(`无法读取素材“${asset.name}”：${error.code === 'ENOENT' ? '原文件不存在' : error.message}`); }
     assets.push(asset);
     files.push(resolved);

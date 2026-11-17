@@ -6,5 +6,6 @@ dist/
 release-backup.json
 library/
 *.log
+HAP-log.txt
 恢复说明.md
 docs/原版使用说明.md

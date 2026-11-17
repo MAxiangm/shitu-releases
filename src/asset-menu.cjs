@@ -13,10 +13,10 @@ function assetMenuTemplate(assets, folders, choose) {
     item('reveal', '在资源管理器中显示', one),
     item('source', '打开来源网页', one && Boolean(first.pageUrl || first.sourceUrl)),
     { type: 'separator' },
-    item('copy-image', '复制图片', one && !anyTrashed && first.mediaType !== 'video'),
+    item('copy-image', '复制图片', one && !anyTrashed && first.mediaType === 'image'),
     item('copy-paths', one ? '复制文件路径' : '复制所选文件路径', !anyTrashed),
     {
-      id: 'image-plugins', label: '插件', enabled: !anyTrashed && assets.every(asset => asset.mediaType !== 'video'),
+      id: 'image-plugins', label: '插件', enabled: !anyTrashed && assets.every(asset => asset.mediaType === 'image'),
       submenu: [
         { id: 'plugin-ai-upscale', label: one ? 'AI 放大图片' : '批量 AI 放大图片', click: () => choose('plugin', { pluginId: 'ai-upscale' }) },
         { id: 'plugin-ai-cutout', label: one ? 'AI 自动抠图' : '批量 AI 自动抠图', click: () => choose('plugin', { pluginId: 'ai-cutout' }) },
@@ -39,7 +39,7 @@ function assetMenuTemplate(assets, folders, choose) {
     },
     item(allFavorite ? 'unfavorite' : 'favorite', allFavorite ? '取消收藏（清除评分）' : '加入收藏', !anyTrashed),
     { type: 'separator' },
-    item('export', one ? '导出原文件…' : `导出 ${assets.length} 个原文件…`),
+    item('export', one ? ['project', 'model'].includes(first.mediaType) ? '导出完整资源文件夹…' : '导出原文件…' : `导出 ${assets.length} 个素材…`),
     item(allTrashed ? 'restore' : 'trash', allTrashed ? '恢复素材' : '移入回收站'),
     ...(allTrashed ? [item('delete-permanently', one ? '永久删除…' : `永久删除 ${assets.length} 个素材…`)] : [])
   ];

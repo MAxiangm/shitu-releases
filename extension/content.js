@@ -6,6 +6,7 @@
   let toastHost;
   let toastTimer;
   let recentGesture = null;
+  let captureSerial = 0;
 
   function toast(message, status = 'working') {
     if (!document.documentElement) return;
@@ -18,20 +19,29 @@
       const shadow = toastHost.attachShadow({ mode: 'closed' });
       const box = document.createElement('div');
       box.setAttribute('role', 'status');
-      Object.assign(box.style, { font: '13px/1.65 system-ui,"Microsoft YaHei",sans-serif', color: '#d4d4d4', background: '#0d0d0d', border: '1px solid #444444', borderRadius: '10px', padding: '12px 17px', boxShadow: '0 8px 24px #0008', maxWidth: '370px', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' });
+      Object.assign(box.style, { font: '13px/1.65 system-ui,"Microsoft YaHei",sans-serif', color: '#d4d4d4', background: '#0d0d0d', border: '1px solid #444444', borderRadius: '10px', padding: '12px 17px', boxShadow: '0 8px 24px #0008', maxWidth: '370px', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', pointerEvents: 'auto' });
+      const close = document.createElement('button');
+      close.type = 'button'; close.textContent = '×'; close.setAttribute('aria-label', '关闭采集提示');
+      Object.assign(close.style, { all: 'initial', float: 'right', marginLeft: '12px', padding: '0 2px', font: '18px/1.2 system-ui,sans-serif', color: '#aaaaaa', cursor: 'pointer', pointerEvents: 'auto' });
+      close.addEventListener('click', event => { event.stopPropagation(); clearTimeout(toastTimer); toastHost.style.display = 'none'; });
+      const label = document.createElement('span');
+      box.append(close, label);
       shadow.append(box);
       toastHost.__shituBox = box;
+      toastHost.__shituLabel = label;
       document.documentElement.append(toastHost);
     }
     const box = toastHost.__shituBox;
-    box.textContent = `拾图 · ${message}`;
+    toastHost.__shituLabel.textContent = `拾图 · ${message}`;
     toastHost.setAttribute('aria-label', `拾图 · ${message}`);
     toastHost.setAttribute('data-status', status);
     box.style.borderColor = status === 'error' ? '#d8d8d8' : '#444444';
     box.style.color = status === 'error' ? '#ffffff' : '#d4d4d4';
     toastHost.style.display = 'block';
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => { if (toastHost) toastHost.style.display = 'none'; }, status === 'working' ? 95000 : status === 'error' ? 9000 : 4000);
+    // Keep failures and unconfirmed work visible until the user dismisses them
+    // or starts another capture. A start notice is never a save receipt.
+    if (status === 'success') toastTimer = setTimeout(() => { if (toastHost) toastHost.style.display = 'none'; }, 8000);
   }
 
   function absolute(value, base = document.baseURI) {
@@ -90,13 +100,42 @@
   async function resolveMedia(media) {
     const result = { ...media, pageUrl: location.href, title: document.title };
     if (media.kind === 'video' && /\.(m3u8|mpd)(?:$|[?#])/i.test(media.url)) throw new Error('这是分段流媒体，暂不能保存为视频文件。请使用网站提供的下载功能。');
-    if (!/^(blob|data):/i.test(media.url)) return result;
+    const temporary = /^(blob|data):/i.test(media.url);
+    const browserImage = !temporary && media.kind === 'image' && /^https?:/i.test(media.url);
+    if (!temporary && !browserImage) return result;
     if (media.url.length > 29 * 1024 * 1024) throw new Error('临时素材超过 20 MB，暂不支持快捷采集。');
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 15000);
     try {
-      const response = await fetch(media.url, { signal: controller.signal, credentials: 'omit' });
-      const blob = await response.blob();
+      // Same-origin images can use the browser's current login session. The
+      // same-origin policy omits credentials for a cross-origin image request.
+      const response = await fetch(media.url, { signal: controller.signal, credentials: browserImage ? 'same-origin' : 'omit' });
+      const contentType = String(response.headers?.get('content-type') || '').split(';')[0].trim().toLowerCase();
+      const allowedImage = /^image\/(?:png|jpeg|webp|gif|bmp|svg\+xml|avif|tiff)$/i;
+      if (browserImage && (!response.ok || !allowedImage.test(contentType))) {
+        await response.body?.cancel().catch(() => {});
+        return result;
+      }
+      if (Number(response.headers?.get('content-length')) > MAX_INLINE_BYTES) {
+        await response.body?.cancel().catch(() => {});
+        if (browserImage) return result;
+        throw new Error('临时素材超过 20 MB，暂不支持快捷采集。');
+      }
+      let blob;
+      if (response.body?.getReader) {
+        const reader = response.body.getReader();
+        const chunks = []; let bytes = 0;
+        try {
+          while (true) {
+            const chunk = await reader.read();
+            if (chunk.done) break;
+            bytes += chunk.value.byteLength;
+            if (bytes > MAX_INLINE_BYTES) throw new Error('素材超过浏览器读取的 20 MB 上限。');
+            chunks.push(chunk.value);
+          }
+          blob = new Blob(chunks, { type: contentType });
+        } finally { await reader.cancel().catch(() => {}); }
+      } else blob = await response.blob();
       if (blob.size > MAX_INLINE_BYTES) throw new Error('临时素材超过 20 MB，暂不支持快捷采集。');
       const expected = media.kind === 'video' ? /^video\//i : /^image\//i;
       if (!expected.test(blob.type)) throw new Error(`临时地址不是${media.kind === 'video' ? '视频' : '图片'}文件。`);
@@ -106,21 +145,33 @@
       result.mimeType = blob.type.split(';')[0].toLowerCase();
       return result;
     } catch (error) {
+      // CORS, read timeouts and oversized HTTP images fall back to the desktop's
+      // existing direct-download path; Blob/data URLs cannot be read there.
+      if (browserImage) return result;
       if (media.kind === 'video' && media.url.startsWith('blob:') && (error instanceof TypeError || error.name === 'AbortError')) throw new Error('视频来源是分段流或不允许读取，暂不能保存为视频文件。');
       throw error;
     } finally { clearTimeout(timer); }
   }
   async function capture(media) {
-    toast('正在采集到素材库…');
+    const serial = ++captureSerial;
+    let submitted = false;
+    toast('正在读取素材，尚未保存…');
     try {
       const prepared = await resolveMedia(media);
+      submitted = true;
       const response = await chrome.runtime.sendMessage({ type: 'shitu:capture', media: prepared });
       if (!response?.ok) throw new Error(response?.error || '采集失败，请打开桌面软件重试。');
-      toast(response.imported ? '已保存到素材库' : '素材库中已有这份文件', 'success');
+      if (!(Number.isSafeInteger(response.imported) && response.imported > 0) && !(Number.isSafeInteger(response.duplicates) && response.duplicates > 0)) throw new Error('桌面未确认素材入库，请在拾图中检查后重试。');
+      if (serial !== captureSerial) return;
+      const inTrash = !response.imported && response.existingAssets?.some(asset => asset.trashedAt);
+      toast(response.message || (response.imported ? '已保存到素材库，可在“最近导入”查看。' : inTrash ? '这份素材已在回收站，请到拾图恢复后查看。' : '素材库中已有这份文件，可清除筛选后查看。'), response.status || (inTrash ? 'warning' : 'success'));
     } catch (error) {
       const message = /Extension context invalidated|Receiving end does not exist/i.test(error.message || '')
         ? '采集助手已更新，请刷新当前网页后再采集。' : error.message || '采集失败。';
-      toast(message, 'error');
+      // Also persist errors that happened while reading Blob/data resources,
+      // before a capture request reached the background worker.
+      if (!submitted) chrome.runtime.sendMessage({ type: 'shitu:capture-failed', name: media?.name, error: message }).catch(() => {});
+      if (serial === captureSerial) toast(message, 'error');
     }
   }
   window.addEventListener('pointerdown', event => {

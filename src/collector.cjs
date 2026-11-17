@@ -11,6 +11,13 @@ const { pipeline } = require('node:stream/promises');
 const { Transform } = require('node:stream');
 
 const DEFAULT_ORIGIN = 'chrome-extension://mdleapcbplpefdgchdklofdnpjgokdhh';
+const INLINE_LIMIT = 20 * 1024 * 1024;
+const INLINE_BASE64_LIMIT = Math.ceil(INLINE_LIMIT / 3) * 4;
+const INLINE_MIME = {
+  png: 'image/png', jpg: 'image/jpeg', webp: 'image/webp', gif: 'image/gif', bmp: 'image/bmp',
+  svg: 'image/svg+xml', avif: 'image/avif', tiff: 'image/tiff', mp4: 'video/mp4',
+  mov: 'video/quicktime', webm: 'video/webm', ogv: 'video/ogg'
+};
 function publicAddress(address) {
   if (net.isIPv4(address)) {
     const [a,b] = address.split('.').map(Number);
@@ -21,7 +28,7 @@ function publicAddress(address) {
   return net.isIPv6(address) && /^[23][0-9a-f]{3}:/.test(value) && !value.startsWith('2001:db8:');
 }
 function webUrl(value, label = '地址') {
-  if (typeof value !== 'string' || value.length > 8192) throw new Error(`${label}无效`);
+  if (typeof value !== 'string' || value.length > 8192 || /[\x00-\x20\x7f]/.test(value)) throw new Error(`${label}无效`);
   let url; try { url = new URL(value); } catch { throw new Error(`${label}无效`); }
   if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw new Error(`${label}只支持 HTTP 或 HTTPS`);
   return url;
@@ -57,19 +64,25 @@ async function readJSON(request, limit) {
   try { return JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { throw new Error('采集请求格式无效'); }
 }
 
-function createCollector({ library, configPath, onImported = () => {}, isReady=()=>true, allowedOrigin = DEFAULT_ORIGIN, port = 38475, allowPrivate = false, maxDownloadBytes = 512 * 1024 * 1024, timeout = 90000 } = {}) {
-  let server, token, listeningPort, active = 0, disabledError;
+function createCollector({ library, configPath, onImported = () => {}, isReady=()=>true, allowedOrigin = DEFAULT_ORIGIN, port = 38475, allowPrivate = false, maxDownloadBytes = 512 * 1024 * 1024, timeout = 90000,
+  appVersion = require('../package.json').version } = {}) {
+  let server, token, listeningPort, active = 0, disabledError, lastCapture;
   const sockets = new Set();
+  const progress = (job, status, extra = {}) => {
+    Object.assign(job, { status, at: Date.now() }, extra);
+  };
+  const rejectedCapture = error => { lastCapture = { status: 'error', at: Date.now(), error: error.message || String(error) }; };
   async function download(url, destination, pageUrl, signal, redirects = 0) {
     if (redirects > 5) throw new Error('下载重定向次数过多');
     const hostname = url.hostname.replace(/^\[|\]$/g, '');
     const addresses = net.isIP(hostname) ? [{address:hostname,family:net.isIP(hostname)}] : await dns.lookup(hostname, {all:true});
     if (!addresses.length || (!allowPrivate && addresses.some(a => !publicAddress(a.address)))) throw new Error('不支持从本机或内网地址采集');
-    const address = addresses[0];
+    signal.throwIfAborted();
     const response = await new Promise((resolve,reject) => {
       const request = (url.protocol === 'https:' ? https : http).get(url, {
         signal,
-        lookup: (_host, options, callback) => options?.all ? callback(null, [address]) : callback(null,address.address,address.family),
+        autoSelectFamily: true, autoSelectFamilyAttemptTimeout: 250,
+        lookup: (_host, options, callback) => options?.all ? callback(null, addresses) : callback(null,addresses[0].address,addresses[0].family),
         headers: { 'User-Agent': 'Mozilla/5.0 ShituCollector/0.4', 'Accept': 'image/*,video/*;q=0.9,*/*;q=0.5', ...(pageUrl ? {Referer:pageUrl} : {}) }
       }, resolve);
       request.on('error',reject);
@@ -88,35 +101,79 @@ function createCollector({ library, configPath, onImported = () => {}, isReady=(
     await pipeline(response, limiter, createWriteStream(destination, {flags:'wx'}), {signal});
   }
   async function capture(body) {
-    if (!body || !['image','video'].includes(body.kind)) throw new Error('只支持图片和视频素材');
-    const source = body.dataBase64 ? null : webUrl(body.url, '素材地址');
-    const pageUrl = body.pageUrl ? webUrl(body.pageUrl,'来源页面').href : undefined;
-    if (source && /\.(m3u8|mpd)(?:$|[?#])/i.test(source.href)) throw new Error('暂不支持直播、分段流或受保护视频，请使用可直接下载的视频文件');
-    if (body.dataBase64 && (typeof body.dataBase64 !== 'string' || body.dataBase64.length > 28 * 1024 * 1024 || !/^[A-Za-z0-9+/]*={0,2}$/.test(body.dataBase64))) throw new Error('临时素材数据无效或超过 20 MB');
-    const temporary = await fs.mkdtemp(path.join(os.tmpdir(),'shitu-capture-'));
-    const original = path.join(temporary,'download');
+    const job = { status: 'receiving', at: Date.now(), name: typeof body?.name === 'string' ? body.name.slice(0, 240) : '',
+      kind: ['image', 'video'].includes(body?.kind) ? body.kind : undefined };
+    lastCapture = job;
+    let temporary;
     try {
-      if (body.dataBase64) {
-        const data = Buffer.from(body.dataBase64,'base64');
-        if (data.length > 20*1024*1024) throw new Error('临时素材超过 20 MB');
-        await fs.writeFile(original,data,{flag:'wx'});
-      } else await download(source,original,pageUrl,AbortSignal.timeout(timeout));
+      if (!body || !['image','video'].includes(body.kind)) throw new Error('只支持图片和视频素材');
+      const inline = Object.prototype.hasOwnProperty.call(body, 'dataBase64');
+      let source;
+      if (typeof body.url !== 'string' || body.url.length > 8192 || /[\x00-\x20\x7f]/.test(body.url)) throw new Error('素材地址无效');
+      if (/^https?:/i.test(body.url)) source = webUrl(body.url, '素材地址');
+      else {
+        let parsed;
+        try { parsed = new URL(body.url); } catch { throw new Error('素材地址无效'); }
+        if (!inline || !['data:', 'blob:'].includes(parsed.protocol) ||
+            (parsed.protocol === 'data:' && !body.url.toLowerCase().startsWith(`data:${body.kind}/`))) throw new Error('素材地址只支持 HTTP、HTTPS 或浏览器提供的临时素材');
+      }
+      const pageUrl = body.pageUrl ? webUrl(body.pageUrl,'来源页面').href : undefined;
+      if (source && /\.(m3u8|mpd)(?:$|[?#])/i.test(source.href)) throw new Error('暂不支持直播、分段流或受保护视频，请使用可直接下载的视频文件');
+      let inlineBytes;
+      if (inline) {
+        const allowedMime = body.kind === 'image' ? /^image\/(?:png|jpeg|webp|gif|bmp|svg\+xml|avif|tiff)$/i : /^video\/(?:mp4|webm|ogg|quicktime)$/i;
+        if (typeof body.mimeType !== 'string' || !allowedMime.test(body.mimeType)) throw new Error('临时素材 MIME 类型无效');
+        if (typeof body.dataBase64 !== 'string' || !body.dataBase64.length || body.dataBase64.length > INLINE_BASE64_LIMIT ||
+            body.dataBase64.length % 4 || !/^[A-Za-z0-9+/]+={0,2}$/.test(body.dataBase64)) throw new Error('临时素材数据无效或超过 20 MB');
+        inlineBytes = Buffer.from(body.dataBase64,'base64');
+        if (inlineBytes.length > INLINE_LIMIT || inlineBytes.toString('base64') !== body.dataBase64) throw new Error('临时素材数据无效或超过 20 MB');
+      }
+      temporary = await fs.mkdtemp(path.join(os.tmpdir(),'shitu-capture-'));
+      const original = path.join(temporary,'download');
+      if (inline) await fs.writeFile(original,inlineBytes,{flag:'wx'});
+      else {
+        progress(job, 'downloading');
+        await download(source,original,pageUrl,AbortSignal.timeout(timeout));
+      }
       const handle = await fs.open(original,'r');
       const head = Buffer.alloc(4096); let bytesRead;
       try { ({bytesRead} = await handle.read(head,0,4096,0)); } finally { await handle.close(); }
       const format = identify(head.subarray(0,bytesRead));
       if (!format || format.kind !== body.kind) throw new Error('下载结果不是支持的图片或视频文件；网站可能返回了登录页面或分段流');
+      if (inline && INLINE_MIME[format.ext] !== body.mimeType.toLowerCase()) throw new Error('临时素材 MIME 类型与文件内容不符');
       let name = typeof body.name === 'string' ? body.name : '';
       if (!name && source) { try { name = decodeURIComponent(path.posix.basename(source.pathname)); } catch {} }
       if (!name) name = typeof body.title === 'string' ? body.title : '网页素材';
       name = name.replace(/[<>:"/\\|?*\x00-\x1f]/g,'_').replace(/\.[a-z0-9]{2,5}$/i,'').trim().slice(0,200) || '网页素材';
       const typed = path.join(temporary,`media.${format.ext}`);
       await fs.rename(original,typed);
+      progress(job, 'importing', { name });
       const report = await library.importPaths([typed], { metadata:{name,...(source ? {sourceUrl:source.href} : {}),...(pageUrl ? {pageUrl} : {})} });
-      if (report.errors.length) throw new Error(report.errors[0].message);
-      await onImported(report);
-      return {ok:true,imported:report.imported,duplicates:report.duplicates,assetIds:report.assetIds};
-    } finally { await fs.rm(temporary,{recursive:true,force:true}); }
+      if (report?.errors?.length) throw new Error(report.errors[0].message || '素材写入素材库失败');
+      if (!Number.isSafeInteger(report?.imported) || report.imported < 0 || !Number.isSafeInteger(report?.duplicates) || report.duplicates < 0 || !report.imported && !report.duplicates)
+        throw new Error(report?.unsupported?.length ? '素材库不支持此文件格式，未保存素材' : '素材库未保存这份素材，请重试或检查素材库位置');
+      let snapshot;
+      try { snapshot = typeof library.snapshot === 'function' ? await library.snapshot() : null; } catch {}
+      let existingAssets = [];
+      if (report.duplicates && Array.isArray(snapshot?.assets)) {
+        const hash = crypto.createHash('sha256');
+        for await (const chunk of createReadStream(typed)) hash.update(chunk);
+        const digest = hash.digest('hex');
+        existingAssets = snapshot.assets.filter(asset => asset.hash === digest).map(asset => ({
+          id: asset.id, name: asset.name, trashedAt: asset.trashedAt || null, folderId: asset.folderId || null
+        }));
+      }
+      const result = {ok:true,imported:report.imported,duplicates:report.duplicates,assetIds:report.assetIds || [],existingAssets,
+        libraryRoot: typeof snapshot?.root === 'string' ? snapshot.root : typeof library.root === 'string' ? library.root : null};
+      progress(job, 'complete', result);
+      // Saving is already committed. A closed renderer must not turn a saved
+      // capture into a failure and prompt the user to download the same file.
+      try { await onImported(result); } catch {}
+      return result;
+    } catch (error) {
+      progress(job, 'error', { error: error.name === 'TimeoutError' || error.name === 'AbortError' ? '素材下载超时，请检查网络后重试' : error.message });
+      throw new Error(job.error);
+    } finally { if (temporary) await fs.rm(temporary,{recursive:true,force:true}).catch(() => {}); }
   }
   async function handler(request,response) {
     const origin = request.headers.origin;
@@ -135,25 +192,37 @@ function createCollector({ library, configPath, onImported = () => {}, isReady=(
       if(!String(request.headers['content-type']).startsWith('application/json')) return json(415,{ok:false,error:'只支持 JSON 请求'});
       try {
         await readJSON(request,4096);
-        return json(200,{ok:true,app:'拾图',version:'0.10.7',ready:Boolean(isReady()),connection:{port:listeningPort,token}});
+        return json(200,{ok:true,app:'拾图',version:appVersion,ready:Boolean(isReady()),connection:{port:listeningPort,token}});
       } catch(error) {return json(400,{ok:false,error:error.message});}
     }
     const supplied = request.headers['x-shitu-token'];
     if (typeof supplied !== 'string' || !/^[a-f0-9]{64}$/.test(supplied) || !crypto.timingSafeEqual(Buffer.from(supplied),Buffer.from(token))) return json(401,{ok:false,error:'连接已失效，采集助手需要自动重新连接'});
     if (request.method !== 'POST' || !['/v1/ping','/v1/capture'].includes(request.url)) return json(404,{ok:false,error:'接口不存在'});
-    if (!String(request.headers['content-type']).startsWith('application/json')) return json(415,{ok:false,error:'只支持 JSON 请求'});
+    if (!String(request.headers['content-type']).startsWith('application/json')) {
+      if (request.url === '/v1/capture') rejectedCapture(new Error('只支持 JSON 请求'));
+      return json(415,{ok:false,error:'只支持 JSON 请求'});
+    }
     try {
       const body = await readJSON(request,28*1024*1024+32768);
-      if (request.url === '/v1/ping') return json(200,{ok:true,app:'拾图',version:'0.10.7',ready:Boolean(isReady())});
-      if(!isReady())return json(409,{ok:false,error:'请先在拾图中选择素材库位置，或等待切换完成'});
-      if (active >= 3) return json(429,{ok:false,error:'当前有多个素材正在采集，请稍候再试'});
+      if (request.url === '/v1/ping') return json(200,{ok:true,app:'拾图',version:appVersion,ready:Boolean(isReady())});
+      if(!isReady()) {
+        rejectedCapture(new Error('请先在拾图中选择素材库位置，或等待切换完成'));
+        return json(409,{ok:false,error:lastCapture.error});
+      }
+      if (active >= 3) {
+        rejectedCapture(new Error('当前有多个素材正在采集，请稍候再试'));
+        return json(429,{ok:false,error:lastCapture.error});
+      }
       active++;
       response.writeHead(200,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store',...cors}); response.write('\n');
       const heartbeat = setInterval(()=>{if (!response.destroyed) response.write(' ');},10000); heartbeat.unref();
       try { const result = await capture(body); if (!response.destroyed) response.end(JSON.stringify(result)); }
       catch(error) { if (!response.destroyed) response.end(JSON.stringify({ok:false,error:error.message})); }
       finally { clearInterval(heartbeat); active--; }
-    } catch(error) { if (!response.headersSent) json(400,{ok:false,error:error.message}); }
+    } catch(error) {
+      if (request.url === '/v1/capture') rejectedCapture(error);
+      if (!response.headersSent) json(400,{ok:false,error:error.message});
+    }
   }
   return {
     async start() {
@@ -168,7 +237,7 @@ function createCollector({ library, configPath, onImported = () => {}, isReady=(
       }
       throw new Error(disabledError);
     },
-    info() { return {enabled:Boolean(listeningPort),baseUrl:listeningPort?`http://127.0.0.1:${listeningPort}`:null,code:listeningPort?`SHITU1.${listeningPort}.${token}`:null,error:disabledError}; },
+    info() { return {enabled:Boolean(listeningPort),baseUrl:listeningPort?`http://127.0.0.1:${listeningPort}`:null,code:listeningPort?`SHITU1.${listeningPort}.${token}`:null,error:disabledError,lastCapture:lastCapture ? structuredClone(lastCapture) : null}; },
     activeCount: () => active,
     async close() { for(const socket of sockets)socket.destroy();if(server?.listening)await new Promise(resolve=>server.close(resolve));listeningPort=null; }
   };

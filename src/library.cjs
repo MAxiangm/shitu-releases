@@ -3,7 +3,51 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { createReadStream } = require('node:fs');
 
-const { VIDEO, SUPPORTED } = require('./media-formats.cjs');
+const { VIDEO, MODEL, MODEL_NATIVE, PROJECT, SUPPORTED } = require('./media-formats.cjs');
+const { collectModelBundle, copyModelBundle, validateModelBundle, isSafeBundlePath } = require('./model-bundle.cjs');
+const { validateProjectBundle, copyProjectBundle } = require('./project-bundle.cjs');
+const mediaType = ext => PROJECT.has(ext) ? 'project' : MODEL.has(ext) ? 'model' : VIDEO.has(ext) ? 'video' : 'image';
+const bundleRelative = (id, ext) => `originals/${id}.${PROJECT.has(ext) ? 'project' : 'model'}`;
+const isBundle = ext => MODEL.has(ext) || PROJECT.has(ext);
+const assetBundle = asset => PROJECT.has(asset.ext) ? asset.projectBundle : asset.modelBundle;
+const deletionBundle = file => file.projectBundle || file.modelBundle;
+const importPathKey = filename => process.platform === 'win32' ? path.resolve(filename).toLowerCase() : path.resolve(filename);
+
+async function checkBundleTree(directory, paths) {
+  const allowed = new Set(paths);
+  const folders = new Set(['']);
+  for (const relative of paths) {
+    if (!isSafeBundlePath(relative)) throw new Error('模型包文件路径无效');
+    let folder = path.posix.dirname(relative);
+    while (folder !== '.') { folders.add(folder); folder = path.posix.dirname(folder); }
+  }
+  const visit = async (current, relative = '') => {
+    const info = await fileInfo(current);
+    if (!info) return;
+    if (!info.isDirectory() || info.isSymbolicLink()) throw new Error('模型包目录无效或包含符号链接');
+    for (const name of await fs.readdir(current)) {
+      const child = relative ? `${relative}/${name}` : name;
+      const childPath = path.join(current, name);
+      const childInfo = await fs.lstat(childPath);
+      if (childInfo.isSymbolicLink()) throw new Error('模型包包含符号链接，已保留');
+      if (childInfo.isDirectory()) {
+        if (!folders.has(child)) throw new Error('模型包包含未知目录，已保留');
+        await visit(childPath, child);
+      } else if (!childInfo.isFile() || !allowed.has(child)) throw new Error('模型包包含未知文件，已保留');
+    }
+  };
+  await visit(directory);
+  const depth = value => value ? value.split('/').length : 0;
+  return [...folders].sort((left, right) => depth(right) - depth(left));
+}
+
+async function removeBundleFiles(directory, paths) {
+  // The caller supplies a validated UUID package directory or deletion staging
+  // directory. Enumerate known contents before removing anything in that tree.
+  const folders = await checkBundleTree(directory, paths);
+  for (const relative of paths) await fs.unlink(path.join(directory, relative)).catch(error => { if (error.code !== 'ENOENT') throw error; });
+  for (const relative of folders) await fs.rmdir(path.join(directory, relative)).catch(error => { if (error.code !== 'ENOENT') throw error; });
+}
 function mediaMetadata(value = {}) {
   const result = {};
   for (const key of ['width', 'height', 'duration']) {
@@ -64,7 +108,15 @@ function deletionFiles(manifest) {
   return manifest.assets.flatMap(asset => {
     if (!asset || typeof asset.id !== 'string' || !/^[a-zA-Z0-9-]+$/.test(asset.id) || ids.has(asset.id) || !SUPPORTED.has(asset.ext) || typeof asset.hasThumbnail !== 'boolean') throw new Error('永久删除清单路径无效');
     ids.add(asset.id);
-    const files = [{ id: asset.id, relative: `originals/${asset.id}.${asset.ext}`, staged: `${asset.id}.${asset.ext}` }];
+    let original;
+    if (PROJECT.has(asset.ext)) {
+      validateProjectBundle(asset.projectBundle);
+      original = { id: asset.id, relative: bundleRelative(asset.id, asset.ext), staged: `${asset.id}.project`, projectBundle: asset.projectBundle };
+    } else if (MODEL.has(asset.ext)) {
+      validateModelBundle(asset.modelBundle);
+      original = { id: asset.id, relative: bundleRelative(asset.id), staged: `${asset.id}.model`, modelBundle: asset.modelBundle };
+    } else original = { id: asset.id, relative: `originals/${asset.id}.${asset.ext}`, staged: `${asset.id}.${asset.ext}` };
+    const files = [original];
     if (asset.hasThumbnail) files.push({ id: asset.id, relative: `thumbnails/${asset.id}.jpg`, staged: `${asset.id}.thumbnail.jpg` });
     return files;
   });
@@ -75,12 +127,29 @@ async function fileInfo(filename) {
   catch (error) { if (error.code === 'ENOENT') return null; throw error; }
 }
 
+function projectPreviewMetadata(value, hash) {
+  const composition = value?.composition;
+  if (!value || value.version !== 1 || value.sourceHash !== hash || !composition ||
+      !Number.isSafeInteger(composition.id) || composition.id < 1 || !Number.isSafeInteger(composition.index) || composition.index < 1 ||
+      typeof composition.name !== 'string' || composition.name.length > 4096 ||
+      !Number.isFinite(value.width) || value.width <= 0 || !Number.isFinite(value.height) || value.height <= 0 ||
+      !Number.isFinite(value.duration) || value.duration <= 0 ||
+      !Number.isFinite(value.frameRate) || value.frameRate <= 0 || typeof value.generatedAt !== 'string' || !Number.isFinite(Date.parse(value.generatedAt)))
+    throw new Error('AE 预览信息无效');
+  // Only public metadata enters the library index. Cache paths and renderer
+  // authorizations belong to the preview service, not to the source package.
+  return { version: 1, sourceHash: hash, composition: { id: composition.id, index: composition.index, name: composition.name },
+    width: value.width, height: value.height, duration: value.duration,
+    frameRate: value.frameRate, generatedAt: value.generatedAt };
+}
+
 class Library {
-  constructor({ root, createThumbnail } = {}) {
+  constructor({ root, createThumbnail, prepareProjectBundle } = {}) {
     if (!root) throw new Error('素材库路径不能为空');
     this.root = path.resolve(root);
     this.indexPath = path.join(this.root, 'index.json');
     this.createThumbnail = createThumbnail;
+    this.prepareProjectBundle = prepareProjectBundle;
     this.data = null;
     this._queue = Promise.resolve();
   }
@@ -117,9 +186,20 @@ class Library {
     const assetIds = new Set();
     for (const asset of data.assets) {
       if (!asset || typeof asset.id !== 'string' || !/^[a-zA-Z0-9-]+$/.test(asset.id) || assetIds.has(asset.id) || typeof asset.name !== 'string' || !SUPPORTED.has(asset.ext) || !Array.isArray(asset.tags) || asset.tags.some(tag => typeof tag !== 'string') || typeof asset.hash !== 'string' || !/^[a-f0-9]{64}$/.test(asset.hash) || !Number.isFinite(asset.size) || asset.size < 0 || !Number.isFinite(asset.rating) || asset.rating < 0 || asset.rating > 5 || typeof asset.notes !== 'string' || (asset.folderId !== null && !folderIds.has(asset.folderId))) throw new Error('素材索引无效');
-      if (asset.filename !== `originals/${asset.id}.${asset.ext}` || (asset.thumbnail !== null && asset.thumbnail !== `thumbnails/${asset.id}.jpg`)) throw new Error('素材路径无效');
-      if ('mediaType' in asset && asset.mediaType !== (VIDEO.has(asset.ext) ? 'video' : 'image')) throw new Error('素材媒体类型无效');
+      if (PROJECT.has(asset.ext)) {
+        validateProjectBundle(asset.projectBundle);
+        if (path.posix.extname(asset.projectBundle.entry).slice(1).toLowerCase() !== asset.ext || asset.projectBundle.hash !== asset.hash || asset.projectBundle.size !== asset.size || asset.filename !== `${bundleRelative(asset.id, asset.ext)}/${asset.projectBundle.entry}` || 'modelBundle' in asset) throw new Error('AE 工程包索引无效');
+      } else if (MODEL.has(asset.ext)) {
+        validateModelBundle(asset.modelBundle);
+        if (path.posix.extname(asset.modelBundle.entry).slice(1).toLowerCase() !== asset.ext || asset.modelBundle.hash !== asset.hash || asset.modelBundle.size !== asset.size || asset.filename !== `${bundleRelative(asset.id)}/${asset.modelBundle.entry}` || 'projectBundle' in asset) throw new Error('模型包索引无效');
+      } else if (asset.filename !== `originals/${asset.id}.${asset.ext}` || 'modelBundle' in asset || 'projectBundle' in asset) throw new Error('素材路径无效');
+      if (asset.thumbnail !== null && asset.thumbnail !== `thumbnails/${asset.id}.jpg`) throw new Error('缩略图路径无效');
+      if ('mediaType' in asset && asset.mediaType !== mediaType(asset.ext)) throw new Error('素材媒体类型无效');
       if ('duration' in asset && (!Number.isFinite(asset.duration) || asset.duration < 0)) throw new Error('视频时长无效');
+      if ('projectPreview' in asset) {
+        if (!PROJECT.has(asset.ext)) throw new Error('AE 预览素材类型无效');
+        projectPreviewMetadata(asset.projectPreview, asset.hash);
+      }
       if ('codec' in asset && (typeof asset.codec !== 'string' || !/^[a-zA-Z0-9_.-]{1,80}$/.test(asset.codec))) throw new Error('视频编码无效');
       if ('sourceUrl' in asset) webUrl(asset.sourceUrl, '素材链接');
       if ('pageUrl' in asset) webUrl(asset.pageUrl, '来源网页');
@@ -156,7 +236,7 @@ class Library {
 
   snapshot() {
     this._ready();
-    const assets = clone(this.data.assets).map(asset => ({ ...asset, mediaType: VIDEO.has(asset.ext) ? 'video' : 'image' }));
+    const assets = clone(this.data.assets).map(asset => ({ ...asset, mediaType: mediaType(asset.ext) }));
     const active = assets.filter(asset => !asset.trashedAt);
     const tagCounts = new Map();
     for (const asset of active) for (const tag of asset.tags) tagCounts.set(tag, (tagCounts.get(tag) || 0) + 1);
@@ -174,10 +254,14 @@ class Library {
       if (!Array.isArray(paths)) throw new Error('导入路径必须是数组');
       const sourceMetadata = importMetadata(metadata);
       this._folder(folderId);
-      const report = { imported: 0, duplicates: 0, unsupported: [], errors: [], assetIds: [] };
-      const candidates = [];
+      const report = { imported: 0, duplicates: 0, unsupported: [], errors: [], assetIds: [], warnings: [] };
+      const projectPreparations = [];
+      try {
+      let candidates = [];
       const seen = new Set();
-      const walk = async entry => {
+      const explicitFiles = new Set(paths.map(entry => importPathKey(String(entry))));
+      const allowedRoots = [];
+      const walk = async (entry, explicit = false) => {
         const absolute = path.resolve(String(entry));
         if (seen.has(absolute)) return;
         seen.add(absolute);
@@ -186,6 +270,7 @@ class Library {
           const info = await fs.lstat(absolute);
           if (info.isSymbolicLink()) { report.errors.push({ path: absolute, message: '已跳过符号链接' }); return; }
           if (info.isDirectory()) {
+            if (explicit) allowedRoots.push(absolute);
             const children = await fs.readdir(absolute);
             for (const child of children) await walk(path.join(absolute, child));
           } else if (info.isFile()) {
@@ -194,7 +279,49 @@ class Library {
           }
         } catch (error) { report.errors.push({ path: absolute, message: error.message }); }
       };
-      for (const entry of paths) await walk(entry);
+      for (const entry of paths) await walk(entry, true);
+      const plans = new Map();
+      const dependencies = new Set();
+      const projectPlans = new Map();
+      const projectDependencies = new Set();
+      for (const candidate of candidates) {
+        if (!PROJECT.has(path.extname(candidate.absolute).slice(1).toLowerCase())) continue;
+        try {
+          if (typeof this.prepareProjectBundle !== 'function') throw new Error('AE 工程自动收集需要本机可用的 After Effects，请安装或检查 AE 后重试');
+          const prepared = await this.prepareProjectBundle(candidate.absolute, { allowedRoots });
+          projectPreparations.push(prepared);
+          validateProjectBundle(prepared?.manifest);
+          if (isWithin(this.root, path.resolve(prepared.directory))) throw new Error('不能将素材库自身作为 AE 工程收集目录');
+          for (const filename of prepared.sourceFiles || []) {
+            if (typeof filename !== 'string' || !path.isAbsolute(filename)) throw new Error('AE 工程依赖路径无效');
+            if (isWithin(this.root, filename)) throw new Error('不能导入素材库自身的 AE 工程依赖');
+            if (importPathKey(filename) !== importPathKey(candidate.absolute)) { projectDependencies.add(importPathKey(filename)); dependencies.add(importPathKey(filename)); }
+          }
+          projectPlans.set(candidate.absolute, prepared);
+        } catch (error) { report.errors.push({ path: candidate.absolute, message: error.message }); }
+      }
+      for (const candidate of candidates) {
+        if (projectDependencies.has(importPathKey(candidate.absolute)) && !explicitFiles.has(importPathKey(candidate.absolute))) continue;
+        if (!MODEL.has(path.extname(candidate.absolute).slice(1).toLowerCase())) continue;
+        try {
+          const plan = await collectModelBundle(candidate.absolute, { allowedRoots });
+          for (const file of plan.files) {
+            if (isWithin(this.root, file.source)) throw new Error('不能导入素材库自身的模型依赖');
+            if (importPathKey(file.source) !== importPathKey(candidate.absolute)) dependencies.add(importPathKey(file.source));
+          }
+          plans.set(candidate.absolute, plan);
+        } catch (error) { report.errors.push({ path: candidate.absolute, message: error.message }); }
+      }
+      // A dropped project folder becomes one model asset with its textures.
+      // Separately selected image files still import as independent images.
+      candidates = candidates.filter(({ absolute }) => {
+        const ext = path.extname(absolute).slice(1).toLowerCase();
+        if (projectDependencies.has(importPathKey(absolute)) && !explicitFiles.has(importPathKey(absolute))) return false;
+        if (PROJECT.has(ext)) return projectPlans.has(absolute);
+        return MODEL.has(ext) ? plans.has(absolute) && (MODEL_NATIVE.has(ext) || explicitFiles.has(importPathKey(absolute)) || !dependencies.has(importPathKey(absolute)))
+          : explicitFiles.has(importPathKey(absolute)) || !dependencies.has(importPathKey(absolute));
+      });
+      report.unsupported = report.unsupported.filter(filename => !dependencies.has(importPathKey(filename)));
       const draft = clone(this.data);
       const hashes = new Set(draft.assets.map(asset => asset.hash));
       const created = [];
@@ -202,41 +329,126 @@ class Library {
         const { absolute, info } = candidates[index];
         let copied = null;
         let thumbnailPath = null;
+        let modelPlan = null;
+        let projectPlan = null;
         try {
-          const hash = await hashFile(absolute);
-          if (hashes.has(hash)) report.duplicates++;
-          else {
-            const id = crypto.randomUUID();
-            const ext = path.extname(absolute).slice(1).toLowerCase();
-            const filename = `originals/${id}.${ext}`;
-            copied = path.join(this.root, filename);
-            await fs.copyFile(absolute, copied, require('node:fs').constants.COPYFILE_EXCL);
-            // Hash the managed copy too so a source changing during import never gets a stale identity.
-            const copyHash = await hashFile(copied);
-            if (hashes.has(copyHash)) { await fs.rm(copied); copied = null; report.duplicates++; }
+          const ext = path.extname(absolute).slice(1).toLowerCase();
+          if (PROJECT.has(ext)) {
+            projectPlan = projectPlans.get(absolute);
+            const manifest = projectPlan.manifest;
+            const sameSource = manifest.sourceIdentity && draft.assets.some(asset => asset.projectBundle?.sourceIdentity === manifest.sourceIdentity);
+            if (hashes.has(manifest.hash) || sameSource) report.duplicates++;
             else {
-              let dimensions = {};
-              let thumbnail = null;
+              const id = crypto.randomUUID();
+              const relativeDirectory = bundleRelative(id, ext);
+              const projectDirectory = path.join(this.root, relativeDirectory);
+              await this._checkManagedParent(relativeDirectory);
+              const projectBundle = await copyProjectBundle(projectPlan, projectDirectory);
+              copied = projectDirectory;
+              const filename = `${relativeDirectory}/${projectBundle.entry}`;
+              const entryExtension = path.posix.extname(projectBundle.entry).slice(1).toLowerCase();
+              let dimensions = {}, thumbnail = null;
               if (this.createThumbnail) {
                 thumbnailPath = path.join(this.root, 'thumbnails', `${id}.jpg`);
                 try {
-                  dimensions = await this.createThumbnail(copied, thumbnailPath) || {};
-                  await fs.access(thumbnailPath);
-                  thumbnail = `thumbnails/${id}.jpg`;
+                  dimensions = await this.createThumbnail(path.join(this.root, filename), thumbnailPath, { projectBundle, projectDirectory: copied }) || {};
+                  await fs.access(thumbnailPath); thumbnail = `thumbnails/${id}.jpg`;
                 } catch { await fs.rm(thumbnailPath, { force: true }).catch(() => {}); thumbnailPath = null; }
               }
               const timestamp = now();
-              const copyInfo = await fs.stat(copied);
-              draft.assets.push({ id, name: path.basename(absolute, path.extname(absolute)), ext, mediaType: VIDEO.has(ext) ? 'video' : 'image', size: copyInfo.size, width: Number(dimensions.width) || 0, height: Number(dimensions.height) || 0, ...mediaMetadata(dimensions), hash: copyHash, createdAt: timestamp, updatedAt: timestamp, tags: [], folderId, rating: 0, notes: '', trashedAt: null, filename, thumbnail, ...sourceMetadata });
-              hashes.add(copyHash);
-              created.push(copied);
-              if (thumbnail) created.push(thumbnailPath);
-              report.imported++;
-              report.assetIds.push(id);
+              draft.assets.push({ id, name: path.basename(absolute, path.extname(absolute)), ext: entryExtension, mediaType: 'project', size: projectBundle.size,
+                width: Number(dimensions.width) || 0, height: Number(dimensions.height) || 0, hash: projectBundle.hash,
+                createdAt: timestamp, updatedAt: timestamp, tags: [], folderId, rating: 0, notes: '', trashedAt: null,
+                filename, thumbnail, projectBundle, ...sourceMetadata });
+              hashes.add(projectBundle.hash);
+              created.push({ path: copied, files: projectBundle.files.map(file => file.path) });
+              if (thumbnail) created.push({ path: thumbnailPath });
+              for (const message of projectBundle.warnings) report.warnings.push({ path: absolute, message });
+              if (projectBundle.missing.length) report.warnings.push({ path: absolute,
+                message: `有 ${projectBundle.missing.length} 个 AE 工程引用未收集：${projectBundle.missing.slice(0, 3).join('、')}` });
+              report.imported++; report.assetIds.push(id);
+            }
+          } else if (MODEL.has(ext)) {
+            modelPlan = plans.get(absolute);
+            if (hashes.has(modelPlan.hash)) {
+              report.duplicates++;
+            } else {
+              const id = crypto.randomUUID();
+              const relativeDirectory = bundleRelative(id);
+              const modelDirectory = path.join(this.root, relativeDirectory);
+              await this._checkManagedParent(relativeDirectory);
+              const modelBundle = await copyModelBundle(modelPlan, modelDirectory);
+              copied = modelDirectory;
+              validateModelBundle(modelBundle);
+              if (hashes.has(modelBundle.hash)) {
+                await removeBundleFiles(copied, modelPlan.files.map(file => file.relative));
+                copied = null;
+                report.duplicates++;
+              } else {
+                const filename = `${relativeDirectory}/${modelBundle.entry}`;
+                let dimensions = {}, thumbnail = null;
+                if (this.createThumbnail) {
+                  thumbnailPath = path.join(this.root, 'thumbnails', `${id}.jpg`);
+                  try {
+                    dimensions = await this.createThumbnail(path.join(this.root, filename), thumbnailPath, { modelBundle, modelDirectory: copied }) || {};
+                    await fs.access(thumbnailPath);
+                    thumbnail = `thumbnails/${id}.jpg`;
+                  } catch { await fs.rm(thumbnailPath, { force: true }).catch(() => {}); thumbnailPath = null; }
+                }
+                const timestamp = now();
+                draft.assets.push({ id, name: path.basename(absolute, path.extname(absolute)), ext, mediaType: 'model', size: modelBundle.size,
+                  width: Number(dimensions.width) || 0, height: Number(dimensions.height) || 0, hash: modelBundle.hash,
+                  createdAt: timestamp, updatedAt: timestamp, tags: [], folderId, rating: 0, notes: '', trashedAt: null,
+                  filename, thumbnail, modelBundle, ...sourceMetadata });
+                hashes.add(modelBundle.hash);
+                created.push({ path: copied, files: modelPlan.files.map(file => file.relative) });
+                if (thumbnail) created.push({ path: thumbnailPath });
+                for (const message of modelBundle.warnings) report.warnings.push({ path: absolute, message });
+                if (modelBundle.missing.length) report.warnings.push({ path: absolute,
+                  message: `有 ${modelBundle.missing.length} 个模型引用未收集：${modelBundle.missing.slice(0, 3).join('、')}` });
+                report.imported++;
+                report.assetIds.push(id);
+              }
+            }
+          } else {
+            const hash = await hashFile(absolute);
+            if (hashes.has(hash)) report.duplicates++;
+            else {
+              const id = crypto.randomUUID();
+              const filename = `originals/${id}.${ext}`;
+              copied = path.join(this.root, filename);
+              await fs.copyFile(absolute, copied, require('node:fs').constants.COPYFILE_EXCL);
+              // Hash the managed copy too so a source changing during import never gets a stale identity.
+              const copyHash = await hashFile(copied);
+              if (hashes.has(copyHash)) { await fs.rm(copied); copied = null; report.duplicates++; }
+              else {
+                let dimensions = {};
+                let thumbnail = null;
+                if (this.createThumbnail) {
+                  thumbnailPath = path.join(this.root, 'thumbnails', `${id}.jpg`);
+                  try {
+                    dimensions = await this.createThumbnail(copied, thumbnailPath) || {};
+                    await fs.access(thumbnailPath);
+                    thumbnail = `thumbnails/${id}.jpg`;
+                  } catch { await fs.rm(thumbnailPath, { force: true }).catch(() => {}); thumbnailPath = null; }
+                }
+                const timestamp = now();
+                const copyInfo = await fs.stat(copied);
+                draft.assets.push({ id, name: path.basename(absolute, path.extname(absolute)), ext, mediaType: VIDEO.has(ext) ? 'video' : 'image', size: copyInfo.size, width: Number(dimensions.width) || 0, height: Number(dimensions.height) || 0, ...mediaMetadata(dimensions), hash: copyHash, createdAt: timestamp, updatedAt: timestamp, tags: [], folderId, rating: 0, notes: '', trashedAt: null, filename, thumbnail, ...sourceMetadata });
+                hashes.add(copyHash);
+                created.push({ path: copied });
+                if (thumbnail) created.push({ path: thumbnailPath });
+                report.imported++;
+                report.assetIds.push(id);
+              }
             }
           }
         } catch (error) {
-          if (copied) await fs.rm(copied, { force: true }).catch(() => {});
+          if (copied) {
+            if (projectPlan) await removeBundleFiles(copied, projectPlan.manifest.files.map(file => file.path)).catch(() => {});
+            else if (modelPlan) await removeBundleFiles(copied, modelPlan.files.map(file => file.relative)).catch(() => {});
+            else await fs.rm(copied, { force: true }).catch(() => {});
+          }
           if (thumbnailPath) await fs.rm(thumbnailPath, { force: true }).catch(() => {});
           report.errors.push({ path: absolute, message: error.message });
         }
@@ -244,9 +456,18 @@ class Library {
       }
       if (report.imported) {
         try { await this._persist(draft); }
-        catch (error) { for (const file of created) await fs.rm(file, { force: true }).catch(() => {}); throw error; }
+        catch (error) {
+          for (const file of created) {
+            if (file.files) await removeBundleFiles(file.path, file.files).catch(() => {});
+            else await fs.rm(file.path, { force: true }).catch(() => {});
+          }
+          throw error;
+        }
       }
       return report;
+      } finally {
+        for (const prepared of projectPreparations) if (typeof prepared?.cleanup === 'function') await Promise.resolve().then(() => prepared.cleanup()).catch(() => {});
+      }
     });
   }
 
@@ -297,8 +518,14 @@ class Library {
 
   async _checkManagedParent(relative) {
     const directory = path.join(this.root, path.dirname(relative));
-    const info = await fs.lstat(directory);
-    if (!info.isDirectory() || info.isSymbolicLink()) throw new Error('素材目录不能是符号链接');
+    if (!isWithin(this.root, directory)) throw new Error('素材目录超出当前素材库');
+    const components = path.relative(this.root, directory).split(path.sep).filter(Boolean);
+    let current = this.root;
+    for (const component of components) {
+      current = path.join(current, component);
+      const info = await fs.lstat(current);
+      if (!info.isDirectory() || info.isSymbolicLink()) throw new Error('素材目录不能是符号链接');
+    }
   }
 
   async _deletionDirectoryEntries(directory) {
@@ -316,8 +543,14 @@ class Library {
 
   async _cleanDeletion(directory, files) {
     await this._checkDeletionDirectory(directory, files);
-    // Remove only enumerated files, never recursively delete a computed path.
-    for (const name of [...files.map(file => file.staged), 'manifest.json.tmp', 'manifest.json']) {
+    // Inspect every package before cleaning any files, preserving unexpected
+    // user-created contents instead of recursively deleting a directory.
+    for (const file of files) if (deletionBundle(file)) await checkBundleTree(path.join(directory, file.staged), deletionBundle(file).files.map(item => item.path));
+    for (const file of files) {
+      if (deletionBundle(file)) await removeBundleFiles(path.join(directory, file.staged), deletionBundle(file).files.map(item => item.path));
+      else await fs.unlink(path.join(directory, file.staged)).catch(error => { if (error.code !== 'ENOENT') throw error; });
+    }
+    for (const name of ['manifest.json.tmp', 'manifest.json']) {
       await fs.unlink(path.join(directory, name)).catch(error => { if (error.code !== 'ENOENT') throw error; });
     }
     await fs.rmdir(directory);
@@ -343,11 +576,12 @@ class Library {
     if (!present.some(Boolean)) { await this._finishDeletion(directory, files); return; }
     for (const file of files) {
       const asset = present.find(asset => asset.id === file.id);
-      if (![asset.filename, asset.thumbnail].includes(file.relative)) throw new Error('永久删除清单与素材路径不一致');
+      const expectedOriginal = isBundle(asset.ext) ? bundleRelative(asset.id, asset.ext) : asset.filename;
+      if (![expectedOriginal, asset.thumbnail].includes(file.relative) || (deletionBundle(file) && JSON.stringify(deletionBundle(file)) !== JSON.stringify(assetBundle(asset)))) throw new Error('永久删除清单与素材路径不一致');
       const staged = path.join(directory, file.staged);
       const info = await fileInfo(staged);
       if (!info) continue;
-      if (!info.isFile() || info.isSymbolicLink()) throw new Error('永久删除暂存文件无效');
+      if (info.isSymbolicLink() || (deletionBundle(file) ? !info.isDirectory() : !info.isFile())) throw new Error('永久删除暂存文件无效');
       await this._checkManagedParent(file.relative);
       const original = path.join(this.root, file.relative);
       if (await fileInfo(original)) throw new Error('恢复删除时发现文件冲突，已保留两份文件');
@@ -369,7 +603,8 @@ class Library {
       const assets = this.data.assets.filter(asset => selected.has(asset.id));
       if (assets.some(asset => !asset.trashedAt)) throw new Error('只能永久删除回收站中的素材');
       await this._recoverPendingDeletions();
-      const manifest = { version: 1, assets: assets.map(asset => ({ id: asset.id, ext: asset.ext, hasThumbnail: Boolean(asset.thumbnail) })) };
+      const manifest = { version: 1, assets: assets.map(asset => ({ id: asset.id, ext: asset.ext, hasThumbnail: Boolean(asset.thumbnail),
+        ...(PROJECT.has(asset.ext) ? { projectBundle: asset.projectBundle } : MODEL.has(asset.ext) ? { modelBundle: asset.modelBundle } : {}) })) };
       const files = deletionFiles(manifest);
       for (const file of files) await this._checkManagedParent(file.relative);
       const directory = path.join(this.root, `.pending-delete-${crypto.randomUUID()}`);
@@ -384,7 +619,8 @@ class Library {
           const original = path.join(this.root, file.relative);
           const info = await fileInfo(original);
           if (!info) continue;
-          if (!info.isFile() || info.isSymbolicLink()) throw new Error('素材文件无效，已停止永久删除');
+          if (info.isSymbolicLink() || (deletionBundle(file) ? !info.isDirectory() : !info.isFile())) throw new Error('素材文件无效，已停止永久删除');
+          if (deletionBundle(file)) await checkBundleTree(original, deletionBundle(file).files.map(item => item.path));
           await fs.rename(original, path.join(directory, file.staged));
         }
         const draft = clone(this.data);
@@ -446,6 +682,70 @@ class Library {
     return relative ? path.join(this.root, relative) : null;
   }
 
+  getModelBundleDirectory(id) {
+    this._ready();
+    const asset = this.data.assets.find(item => item.id === id);
+    return asset && MODEL.has(asset.ext) ? path.join(this.root, bundleRelative(asset.id)) : null;
+  }
+
+  getModelFilePath(id, relative) {
+    this._ready();
+    const asset = this.data.assets.find(item => item.id === id);
+    if (!asset || !MODEL.has(asset.ext) || !isSafeBundlePath(relative) || !asset.modelBundle.files.some(file => file.path === relative)) return null;
+    return path.join(this.root, bundleRelative(asset.id), relative);
+  }
+
+  getProjectBundleDirectory(id) {
+    this._ready();
+    const asset = this.data.assets.find(item => item.id === id);
+    return asset && PROJECT.has(asset.ext) ? path.join(this.root, bundleRelative(asset.id, asset.ext)) : null;
+  }
+
+  getProjectFilePath(id, relative) {
+    this._ready();
+    const asset = this.data.assets.find(item => item.id === id);
+    if (!asset || !PROJECT.has(asset.ext) || !isSafeBundlePath(relative) || !asset.projectBundle.files.some(file => file.path === relative)) return null;
+    return path.join(this.root, bundleRelative(asset.id, asset.ext), relative);
+  }
+
+  publishProjectPreview(id, { expectedRoot, expectedHash, thumbnailPath, preview, signal } = {}) {
+    return this._mutate(async () => {
+      signal?.throwIfAborted();
+      const current = this.data.assets.find(asset => asset.id === id);
+      if (this.root !== expectedRoot || !current || current.trashedAt || !PROJECT.has(current.ext) || current.hash !== expectedHash) return null;
+      const metadata = projectPreviewMetadata(preview, expectedHash);
+      if (typeof thumbnailPath !== 'string' || !path.isAbsolute(thumbnailPath)) throw new Error('AE 缩略图路径无效');
+      const source = path.resolve(thumbnailPath), info = await fs.lstat(source);
+      if (!info.isFile() || info.isSymbolicLink() || info.size > 16 * 1024 * 1024 || await fs.realpath(source) !== source) throw new Error('AE 缩略图文件无效');
+      const bytes = await fs.readFile(source);
+      if (bytes.length < 4 || bytes[0] !== 0xff || bytes[1] !== 0xd8) throw new Error('AE 缩略图不是 JPEG');
+      const relative = `thumbnails/${id}.jpg`;
+      await this._checkManagedParent(relative);
+      const destination = path.join(this.root, relative), previous = await fileInfo(destination);
+      if (previous && (!previous.isFile() || previous.isSymbolicLink())) throw new Error('AE 缩略图目标无效');
+      const temporary = `${destination}.${crypto.randomUUID()}.tmp`, backup = `${destination}.${crypto.randomUUID()}.previous`;
+      let replaced = false, savedPrevious = false, committed = false;
+      try {
+        await fs.writeFile(temporary, bytes, { flag: 'wx' });
+        signal?.throwIfAborted();
+        if (previous) { await fs.rename(destination, backup); savedPrevious = true; }
+        await fs.rename(temporary, destination); replaced = true;
+        signal?.throwIfAborted();
+        const draft = clone(this.data), asset = draft.assets.find(item => item.id === id);
+        Object.assign(asset, { thumbnail: relative, width: metadata.width, height: metadata.height, duration: metadata.duration, projectPreview: metadata });
+        await this._persist(draft); committed = true;
+        return this.snapshot();
+      } finally {
+        await fs.unlink(temporary).catch(error => { if (error.code !== 'ENOENT') throw error; });
+        if (!committed && replaced) await fs.unlink(destination);
+        if (savedPrevious) {
+          if (committed) await fs.unlink(backup);
+          else await fs.rename(backup, destination);
+        }
+      }
+    });
+  }
+
   refreshVideoMetadata(ids, { signal } = {}) {
     return this._mutate(async () => {
       signal?.throwIfAborted();
@@ -487,6 +787,30 @@ class Library {
         if (!selected.has(asset.id)) continue;
         const basename = safeName(asset.name);
         let number = 0;
+        if (isBundle(asset.ext)) {
+          const manifest = assetBundle(asset);
+          const source = PROJECT.has(asset.ext) ? this.getProjectBundleDirectory(asset.id) : this.getModelBundleDirectory(asset.id);
+          await this._checkManagedParent(`${bundleRelative(asset.id, asset.ext)}/entry`);
+          await checkBundleTree(source, manifest.files.map(file => file.path));
+          let output;
+          while (true) {
+            output = path.join(destination, `${basename}${number ? ` (${number})` : ''}`);
+            try { await fs.mkdir(output); break; }
+            catch (error) { if (error.code !== 'EEXIST') throw error; number++; }
+          }
+          try {
+            for (const file of manifest.files) {
+              const target = path.join(output, file.path);
+              await fs.mkdir(path.dirname(target), { recursive: true });
+              await fs.copyFile(path.join(source, file.path), target, require('node:fs').constants.COPYFILE_EXCL);
+            }
+          } catch (error) {
+            await removeBundleFiles(output, manifest.files.map(file => file.path)).catch(() => {});
+            throw error;
+          }
+          files.push(output);
+          continue;
+        }
         while (true) {
           const output = path.join(destination, `${basename}${number ? ` (${number})` : ''}.${asset.ext}`);
           try { await fs.copyFile(this.getAssetPath(asset.id), output, require('node:fs').constants.COPYFILE_EXCL); files.push(output); break; }
@@ -510,4 +834,4 @@ class Library {
   }
 }
 
-module.exports = { Library, SUPPORTED, VIDEO };
+module.exports = { Library, SUPPORTED, VIDEO, MODEL, PROJECT };

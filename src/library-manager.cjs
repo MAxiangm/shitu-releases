@@ -3,6 +3,9 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { createReadStream } = require('node:fs');
 const { Library } = require('./library.cjs');
+const { MODEL, PROJECT } = require('./media-formats.cjs');
+const { validateModelBundle, modelBundleHash } = require('./model-bundle.cjs');
+const { validateProjectBundle, projectBundleHash } = require('./project-bundle.cjs');
 
 function absolute(value, label) {
   if (typeof value !== 'string' || !value.trim() || !path.isAbsolute(value)) throw new Error(`${label}必须是绝对路径`);
@@ -20,11 +23,12 @@ function directoryName(value) {
 }
 
 class LibraryManager {
-  constructor({ configPath, legacyRoot, createThumbnail, overrideRoot } = {}) {
+  constructor({ configPath, legacyRoot, createThumbnail, prepareProjectBundle, overrideRoot } = {}) {
     this.configPath = absolute(configPath, '配置路径');
     this.legacyRoot = legacyRoot ? absolute(legacyRoot, '旧素材库路径') : null;
     this.overrideRoot = overrideRoot ? absolute(overrideRoot, '测试素材库路径') : null;
     this.createThumbnail = createThumbnail;
+    this.prepareProjectBundle = prepareProjectBundle;
     this._current = null;
     this._error = null;
     this._legacyCandidate = null;
@@ -49,7 +53,7 @@ class LibraryManager {
     return result;
   }
 
-  _library(root) { return new Library({ root, createThumbnail: this.createThumbnail }); }
+  _library(root) { return new Library({ root, createThumbnail: this.createThumbnail, prepareProjectBundle: this.prepareProjectBundle }); }
 
   async _existing(root) {
     root = absolute(root, '素材库路径');
@@ -169,6 +173,26 @@ class LibraryManager {
       const candidate = await this._existing(destination);
       for (const asset of candidate.snapshot().assets) {
         try {
+          if (MODEL.has(asset.ext) || PROJECT.has(asset.ext)) {
+            const project = PROJECT.has(asset.ext);
+            const manifest = project ? validateProjectBundle(asset.projectBundle) : validateModelBundle(asset.modelBundle);
+            const directory = project ? candidate.getProjectBundleDirectory(asset.id) : candidate.getModelBundleDirectory(asset.id);
+            const files = [];
+            for (const file of manifest.files) {
+              const filename = project ? candidate.getProjectFilePath(asset.id, file.path) : candidate.getModelFilePath(asset.id, file.path);
+              await candidate._checkManagedParent(path.relative(candidate.root, filename));
+              const info = await fs.lstat(filename);
+              if (!info.isFile() || info.isSymbolicLink() || info.size !== file.size) throw new Error('模型包文件大小与索引不一致');
+              if (!contains(directory, await fs.realpath(filename))) throw new Error('资源依赖指向资源包之外');
+              const hash = crypto.createHash('sha256');
+              for await (const chunk of createReadStream(filename)) hash.update(chunk);
+              const digest = hash.digest('hex');
+              if (digest !== file.hash) throw new Error('模型包文件校验失败');
+              files.push({ ...file, hash: digest });
+            }
+            if ((project ? projectBundleHash : modelBundleHash)(files, manifest.entry) !== asset.hash || files.reduce((sum, file) => sum + file.size, 0) !== asset.size) throw new Error('资源包整体校验失败');
+            continue;
+          }
           const filename = candidate.getAssetPath(asset.id, 'original');
           const info = await fs.lstat(filename);
           if (!info.isFile() || info.size !== asset.size) throw new Error('文件大小与索引不一致或不是普通文件');

@@ -23,6 +23,14 @@ contextBridge.exposeInMainWorld('shitu', Object.freeze({
   },
   getLibrary: () => call('get-library'),
   prepareVideo: (id, expectedRoot) => call('prepare-video', id, expectedRoot),
+  prepareModel: (id, expectedRoot) => call('prepare-model', id, expectedRoot),
+  prepareProjectPreview: (id, expectedRoot, compositionId) => call('prepare-project-preview', id, expectedRoot, compositionId),
+  projectPreviewState: id => call('project-preview-state', id),
+  onProjectPreview: callback => {
+    const listener = (_event, state) => callback(state);
+    ipcRenderer.on('shitu:project-preview', listener);
+    return () => ipcRenderer.removeListener('shitu:project-preview', listener);
+  },
   startAssetDrag: (ids, expectedRoot) => ipcRenderer.send('shitu:start-drag', ids, expectedRoot),
   copyAssetImage: (id, expectedRoot) => call('copy-asset-image', id, expectedRoot),
   copyAssetPaths: (ids, expectedRoot) => call('copy-asset-paths', ids, expectedRoot),
@@ -47,6 +55,11 @@ contextBridge.exposeInMainWorld('shitu', Object.freeze({
   revealLibrary: () => call('reveal-library'),
   requestClose: () => call('request-close'),
   getCollectorInfo: () => call('collector-info'),
+  onWebCapture: callback => {
+    const listener = (_event, result) => callback(result);
+    ipcRenderer.on('shitu:web-capture', listener);
+    return () => ipcRenderer.removeListener('shitu:web-capture', listener);
+  },
   openExtensionFolder: () => call('open-extension-folder'),
   openSource: id => call('open-source',id),
   getFilePath: file => webUtils.getPathForFile(file),

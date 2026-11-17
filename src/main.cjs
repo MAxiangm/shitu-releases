@@ -10,8 +10,13 @@ const { assetMenuTemplate } = require('./asset-menu.cjs');
 const sharp = require('sharp');
 const { createImagePlugins } = require('./image-plugins.cjs');
 const { createAppUpdater } = require('./app-updater.cjs');
+const { createUpdateScheduler, updateIntervalMs } = require('./update-scheduler.cjs');
 const { createVideoEngine } = require('./video-engine.cjs');
-const { VIDEO, SUPPORTED } = require('./media-formats.cjs');
+const { createModelService } = require('./model-service.cjs');
+const { createAEProjectCollector } = require('./ae-projects.cjs');
+const { createAEPreviewEngine } = require('./ae-preview.cjs');
+const { createAEPreviewService } = require('./ae-preview-service.cjs');
+const { VIDEO, MODEL, PROJECT, SUPPORTED } = require('./media-formats.cjs');
 const crypto = require('node:crypto');
 const { spawn } = require('node:child_process');
 const updateConfig = require('../update-config.json');
@@ -19,7 +24,7 @@ const updateConfig = require('../update-config.json');
 app.setName('拾图');
 nativeTheme.themeSource = 'dark';
 app.setAppUserModelId('local.shitu.desktop');
-protocol.registerSchemesAsPrivileged([{ scheme: 'shitu', privileges: { standard: true, secure: true, supportFetchAPI: true } }]);
+protocol.registerSchemesAsPrivileged([{ scheme: 'shitu', privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true } }]);
 let mainWindow;
 let library;
 let importing = false;
@@ -32,11 +37,14 @@ let switchingLibrary=false;
 let draggingAssets=false;
 let imagePlugins;
 let videoEngine;
+let modelService;
+let aeProjects;
+let aePreviewService;
 const videoPreviews = new Map();
 const videoRequests = new Set();
+let activeVideoRequest;
 let appUpdater;
-let updateTimer;
-let updateInterval;
+let updateScheduler;
 let installingUpdate = false;
 let activeOperations = 0;
 const indexPage = pathToFileURL(path.join(__dirname, 'index.html')).href;
@@ -61,11 +69,17 @@ async function prepareVideo(id, expectedRoot) {
   let asset = current.snapshot().assets.find(item => item.id === id);
   if (!asset || asset.mediaType !== 'video') throw new Error('请选择有效的视频素材');
   const source = current.getAssetPath(id, 'original');
+  // Reopening the same clip must not cancel the preparation it still needs.
+  if (activeVideoRequest?.library === current && activeVideoRequest.id === id &&
+      activeVideoRequest.source === source && activeVideoRequest.hash === asset.hash &&
+      !activeVideoRequest.controller.signal.aborted) return activeVideoRequest.promise;
   // A single viewer is active; switching clips should stop its previous conversion.
   for (const previous of videoRequests) previous.abort();
   const controller = new AbortController();
   videoRequests.add(controller);
-  try {
+  const request = { library: current, id, source, hash: asset.hash, controller, promise: null };
+  activeVideoRequest = request;
+  request.promise = (async () => { try {
     if (!asset.thumbnail || !asset.codec) {
       const result = await current.refreshVideoMetadata([id], { signal: controller.signal });
       if (result.updated) {
@@ -81,7 +95,11 @@ async function prepareVideo(id, expectedRoot) {
     videoPreviews.set(key, { id, root: current.root, source, path: result.path });
     return { url: `shitu://asset/${encodeURIComponent(id)}?kind=preview&key=${key}`, width: result.width,
       height: result.height, duration: result.duration, codec: result.sourceCodec || asset.codec || result.codec, mimeType: result.mimeType };
-  } finally { videoRequests.delete(controller); }
+  } finally {
+    videoRequests.delete(controller);
+    if (activeVideoRequest === request) activeVideoRequest = null;
+  } })();
+  return request.promise;
 }
 async function switchLibrary(mode) {
   if(switchingLibrary || importing || draggingAssets || imagePlugins?.busy() || collector?.activeCount())throw new Error('请等待当前导入、采集、图片处理或拖放完成后再切换素材库');
@@ -100,14 +118,19 @@ async function switchLibrary(mode) {
   }
     for (const controller of videoRequests) controller.abort();
     videoPreviews.clear();
+    modelService?.invalidate();
+    aePreviewService?.invalidate();
     library=mode==='create'?await libraryManager.create(selected):mode==='migrate'?await libraryManager.migrate(selected):await libraryManager.open(selected);
     const snapshot=librarySnapshot();
+    aePreviewService?.scheduleLibrary(library);
     mainWindow.webContents.send('shitu:library-changed');
     return {snapshot};
   } finally {switchingLibrary=false;}
 }
 
 async function createThumbnail(source, destination, options) {
+  if (PROJECT.has(path.extname(source).slice(1).toLowerCase())) return {};
+  if (MODEL.has(path.extname(source).slice(1).toLowerCase())) return modelService.thumbnail(source, destination, options);
   if (VIDEO.has(path.extname(source).slice(1).toLowerCase())) return videoEngine.thumbnail(source, destination, options);
   try {
     const metadata = await sharp(source, { limitInputPixels: 80_000_000 }).metadata();
@@ -134,7 +157,7 @@ function checkedHandler(channel, handler) {
   ipcMain.handle(`shitu:${channel}`, async (event, ...args) => {
     assertTrustedSender(event);
     if (installingUpdate && channel !== 'update-state') throw new Error('正在安装更新，请稍候');
-    if (channel.startsWith('update-') || channel === 'prepare-video') return handler(...args);
+    if (channel.startsWith('update-') || ['prepare-video', 'prepare-model', 'prepare-project-preview', 'project-preview-state'].includes(channel)) return handler(...args);
     activeOperations++;
     try { return await handler(...args); }
     finally { activeOperations--; }
@@ -161,7 +184,7 @@ async function installDownloadedUpdate({ filePath }) {
       child.once('error', reject);
       child.once('spawn', () => { child.unref(); resolve(); });
     });
-    await Promise.allSettled([imagePlugins?.shutdown(), collector?.close(), videoEngine?.shutdown()]);
+    await Promise.allSettled([imagePlugins?.shutdown(), collector?.close(), videoEngine?.shutdown(), modelService?.shutdown(), aeProjects?.shutdown(), aePreviewService?.shutdown()]);
     setTimeout(() => { mayClose = true; app.quit(); }, 150);
   } catch (error) {
     installingUpdate = false;
@@ -184,13 +207,12 @@ function initializeAppUpdater() {
     onEvent: state => sendActionEvent('update-state', state),
     install: installDownloadedUpdate
   });
-  if (app.isPackaged && updateConfig.repository) {
-    updateTimer = setTimeout(() => checkForApplicationUpdate().catch(() => {}), 15000);
-    updateTimer.unref();
-    const hours = Math.min(24, Math.max(1, Number(updateConfig.checkIntervalHours) || 6));
-    updateInterval = setInterval(() => checkForApplicationUpdate().catch(() => {}), hours * 3600000);
-    updateInterval.unref();
-  }
+  updateScheduler = createUpdateScheduler({
+    enabled: app.isPackaged && process.platform === 'win32' && process.arch === 'x64' && Boolean(updateConfig.repository),
+    check: checkForApplicationUpdate, getState: () => appUpdater.state(),
+    isOnline: () => net.isOnline(), canCheck: () => !closing && !installingUpdate,
+    intervalMs: updateIntervalMs(updateConfig)
+  });
 }
 
 function sendActionEvent(channel, payload) {
@@ -218,7 +240,7 @@ function startAssetDrag(ids, expectedRoot) {
 
 async function copyAssetImage(id, expectedRoot) {
   const { assets, files } = resolveAssetFiles(requireLibrary(), [id], expectedRoot);
-  if (assets[0].mediaType === 'video') throw new Error('视频不能作为位图复制，请拖出或导出原文件');
+  if (assets[0].mediaType !== 'image') throw new Error('请选择图片复制为位图，视频、模型和工程可拖出或导出原文件');
   const bitmap = nativeImage.createFromPath(files[0]);
   if (bitmap.isEmpty()) throw new Error('此图片格式暂不支持复制位图，请拖出或导出原文件');
   const png = bitmap.toPNG();
@@ -235,21 +257,25 @@ async function copyAssetPaths(ids, expectedRoot) {
 
 async function importPaths(paths, folderId = null) {
   requireLibrary();
-  if (importing) throw new Error('正在导入图片，请等待当前任务完成');
+  if (importing) throw new Error('正在导入素材，请等待当前任务完成');
   if (!Array.isArray(paths) || paths.some(p => typeof p !== 'string' || !path.isAbsolute(p))) throw new Error('无效的导入路径');
   importing = true;
   try {
     const report = await library.importPaths(paths, { folderId: folderId || null, onProgress: progress => {
       if (!mainWindow?.isDestroyed()) mainWindow.webContents.send('shitu:import-progress', progress);
     } });
+    aePreviewService?.scheduleLibrary(library);
     return { snapshot: library.snapshot(), report };
   } finally { importing = false; }
 }
 
 function bindHandlers() {
   checkedHandler('prepare-video', prepareVideo);
+  checkedHandler('prepare-model', (id, expectedRoot) => modelService.prepare(requireLibrary(), id, expectedRoot));
+  checkedHandler('prepare-project-preview', (id, expectedRoot, compositionId) => aePreviewService.prepare(requireLibrary(), id, { expectedRoot, compositionId }));
+  checkedHandler('project-preview-state', id => aePreviewService.state(requireLibrary(), id));
   checkedHandler('update-state', () => appUpdater.state());
-  checkedHandler('update-check', () => checkForApplicationUpdate());
+  checkedHandler('update-check', () => { updateScheduler?.recordManualCheck(); return checkForApplicationUpdate(); });
   checkedHandler('update-download', () => appUpdater.download());
   checkedHandler('update-install', () => { ensureUpdateCanInstall(); return appUpdater.install(); });
   checkedHandler('plugins-list', () => imagePlugins.list());
@@ -288,7 +314,7 @@ function bindHandlers() {
   checkedHandler('migrate-library',()=>switchLibrary('migrate'));
   checkedHandler('use-legacy-library',()=>switchLibrary('legacy'));
   checkedHandler('request-close', () => mainWindow.close());
-  checkedHandler('collector-info', () => ({ enabled:collector?.info().enabled||false, baseUrl:collector?.info().baseUrl, ready:Boolean(library)&&!switchingLibrary, error:collectorError || collector?.info().error, extensionPath }));
+  checkedHandler('collector-info', () => ({ enabled:collector?.info().enabled||false, baseUrl:collector?.info().baseUrl, ready:Boolean(library)&&!switchingLibrary, error:collectorError || collector?.info().error, lastCapture:collector?.info().lastCapture, appVersion:app.getVersion(), extensionPath }));
   checkedHandler('open-extension-folder', async () => {
     const error=await shell.openPath(extensionPath); if(error)throw new Error(error);
   });
@@ -302,7 +328,7 @@ function bindHandlers() {
   });
   checkedHandler('import-files', async folderId => {
     requireLibrary();
-    const result = await dialog.showOpenDialog(mainWindow, { title: '导入图片或视频', properties: ['openFile', 'multiSelections'], filters: [{ name: '图片和视频', extensions: [...SUPPORTED] }] });
+    const result = await dialog.showOpenDialog(mainWindow, { title: '导入图片、视频、模型或 AE 工程', properties: ['openFile', 'multiSelections'], filters: [{ name: '支持的素材', extensions: [...SUPPORTED] }, { name: 'AE 工程', extensions: [...PROJECT] }, { name: '3D 模型', extensions: [...MODEL] }] });
     return result.canceled ? { snapshot: library.snapshot(), cancelled: true } : importPaths(result.filePaths, folderId);
   });
   checkedHandler('import-folder', async folderId => {
@@ -370,6 +396,7 @@ async function createWindow() {
   };
   for (const event of ['minimize', 'hide']) mainWindow.on(event, () => sendVisibility(false));
   for (const event of ['restore', 'show', 'focus']) mainWindow.on(event, () => sendVisibility(true));
+  for (const event of ['restore', 'focus']) mainWindow.on(event, () => updateScheduler?.trigger(event));
   mainWindow.on('close', event => {
     if (mayClose) { mayClose=false; closing=false; return; }
     event.preventDefault();
@@ -379,7 +406,7 @@ async function createWindow() {
     }
     if (closing) return;
     closing = true;
-    Promise.resolve(library?.flush()).then(() => { mayClose = true; mainWindow.close(); }).catch(error => {
+    Promise.resolve(library?.flush()).then(() => Promise.allSettled([modelService?.shutdown(), aeProjects?.shutdown(), aePreviewService?.shutdown()])).then(() => { mayClose = true; mainWindow.close(); }).catch(error => {
       closing = false;
       dialog.showErrorBox('保存未完成', error.message);
     });
@@ -393,9 +420,25 @@ else {
   app.on('second-instance', () => { if (mainWindow) { if (mainWindow.isMinimized()) mainWindow.restore(); mainWindow.focus(); } });
   app.whenReady().then(async () => {
     videoEngine = createVideoEngine({ runtimeDir: path.join(__dirname, '..', 'video-runtime'), cacheDir: path.join(app.getPath('userData'), 'video-previews') });
-    libraryManager=new LibraryManager({configPath:path.join(app.getPath('userData'),'library-location.json'),legacyRoot,createThumbnail,overrideRoot});
+    modelService = createModelService({ BrowserWindow, cacheDir: path.join(app.getPath('userData'), 'model-previews'), getLibrary: () => library });
+    aeProjects = createAEProjectCollector({ cacheDir: path.join(app.getPath('userData'), 'ae-projects') });
+    libraryManager=new LibraryManager({configPath:path.join(app.getPath('userData'),'library-location.json'),legacyRoot,createThumbnail,
+      prepareProjectBundle:(source, options)=>{
+        sendActionEvent('import-progress', { current: 0, total: 1, name: `正在收集 AE 工程与素材：${path.basename(source)}` });
+        return aeProjects.prepareProjectBundle(source, options);
+      },overrideRoot});
     await libraryManager.init();
     library=libraryManager.current();
+    const aePreviewEngine = createAEPreviewEngine({
+      cacheDir: path.join(app.getPath('userData'), 'ae-previews'),
+      onProgress: detail => aePreviewService?.progress(detail)
+    });
+    aePreviewService = createAEPreviewService({
+      engine: aePreviewEngine,
+      getLibrary: () => library,
+      onChanged: owner => { if (owner === library) sendActionEvent('library-changed'); },
+      onProgress: (owner, detail) => { if (owner === library) sendActionEvent('project-preview', detail); }
+    });
     imagePlugins=createImagePlugins({
       rootDir:path.join(process.env.SHITU_PLUGIN_ROOT || app.getPath('userData'),'plugins'),
       getLibrary:requireLibrary,
@@ -404,16 +447,19 @@ else {
         if(event.type==='complete' || (event.type==='error' && event.results?.length)) sendActionEvent('library-changed');
       }
     });
-    collector=createCollector({library:{importPaths:(...args)=>{
+    collector=createCollector({library:{snapshot:()=>requireLibrary().snapshot(),importPaths:(...args)=>{
       if (installingUpdate) throw new Error('正在安装更新，暂时无法采集');
       return requireLibrary().importPaths(...args);
-    }},isReady:()=>Boolean(library)&&!switchingLibrary&&!installingUpdate,configPath:path.join(app.getPath('userData'),'collector.json'),allowPrivate:!app.isPackaged && process.env.SHITU_TEST_ALLOW_PRIVATE==='1',onImported:()=>{
+    }},appVersion:app.getVersion(),isReady:()=>Boolean(library)&&!switchingLibrary&&!installingUpdate,configPath:path.join(app.getPath('userData'),'collector.json'),allowPrivate:!app.isPackaged && process.env.SHITU_TEST_ALLOW_PRIVATE==='1',onImported:result=>{
       if(mainWindow&&!mainWindow.isDestroyed())mainWindow.webContents.send('shitu:library-changed');
+      sendActionEvent('web-capture', result);
     }});
     try {await collector.start();} catch(error) {collectorError=error.message;}
     protocol.handle('shitu', async request => {
       try {
         const url = new URL(request.url);
+        if (url.hostname === 'model') return modelService.response(request);
+        if (url.hostname === 'project-preview') return aePreviewService.response(request);
         if (request.method !== 'GET' || url.hostname !== 'asset') return new Response(null, { status: 404 });
         const id = decodeURIComponent(url.pathname.slice(1));
         const kind = url.searchParams.get('kind') === 'original' ? 'original' : 'thumbnail';
@@ -440,14 +486,16 @@ else {
     initializeAppUpdater();
     bindHandlers();
     await createWindow();
+    updateScheduler.start();
+    aePreviewService.scheduleLibrary(library);
   }).catch(error => {
     dialog.showErrorBox('拾图无法启动', `${error.message}\n\n请保留库内文件，检查权限或使用备份恢复。`);
     app.quit();
   });
   app.on('window-all-closed', () => app.quit());
   app.on('will-quit', () => {
-    clearTimeout(updateTimer); clearInterval(updateInterval); appUpdater?.dispose();
+    updateScheduler?.dispose(); appUpdater?.dispose();
     for (const controller of videoRequests) controller.abort();
-    imagePlugins?.shutdown().catch(()=>{}); collector?.close().catch(()=>{}); videoEngine?.shutdown().catch(()=>{});
+    imagePlugins?.shutdown().catch(()=>{}); collector?.close().catch(()=>{}); videoEngine?.shutdown().catch(()=>{}); modelService?.shutdown().catch(()=>{}); aeProjects?.shutdown().catch(()=>{}); aePreviewService?.shutdown().catch(()=>{});
   });
 }

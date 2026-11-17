@@ -17,6 +17,9 @@ let marqueeFrame = 0;
 let suppressMarqueeClick = false;
 let deletingAssets = false;
 let videoPreviewSerial = 0;
+let projectPreviewView;
+let modelViewer;
+let modelViewerModule;
 const updateUi = {
   snapshot: { status: 'idle', currentVersion: '', latestVersion: '', progress: 0 },
   pending: false, preparingInstall: false, previousFocus: null, notices: new Set(), revision: 0
@@ -56,7 +59,7 @@ function date(value) {
   const d = new Date(value);
   return Number.isNaN(d.getTime()) ? '—' : d.toLocaleString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false });
 }
-function dimensions(a) { return a.width && a.height ? `${a.width} × ${a.height}` : '尺寸未知'; }
+function dimensions(a) { return isProject(a) ? 'AE 工程' : isModel(a) ? '3D 模型' : a.width && a.height ? `${a.width} × ${a.height}` : '尺寸未知'; }
 function videoDuration(value) {
   if (!Number.isFinite(Number(value)) || Number(value) <= 0) return '';
   const seconds = Math.round(Number(value));
@@ -66,6 +69,9 @@ function videoDuration(value) {
 }
 const videoExtensions = new Set(['mp4', 'm4v', 'mov', 'qt', 'webm', 'ogv', 'ogg', 'mkv', 'avi', 'wmv', 'asf', 'mpg', 'mpeg', 'mpe', 'm1v', 'm2v', 'mts', 'm2ts', 'ts', 'm2t', 'vob', 'flv', 'f4v', 'mxf', '3gp', '3g2', 'divx', 'dxv', 'rm', 'rmvb', 'dv']);
 function isVideo(asset) { return asset.mediaType === 'video' || videoExtensions.has((asset.ext || '').replace(/^\./, '').toLowerCase()); }
+const modelExtensions = new Set(['glb', 'gltf', 'obj', 'fbx', 'stl', 'ply', 'blend', 'c4d', 'max']);
+function isModel(asset) { return asset.mediaType === 'model' || modelExtensions.has((asset.ext || '').replace(/^\./, '').toLowerCase()); }
+function isProject(asset) { return asset.mediaType === 'project' || ['aep', 'aepx'].includes((asset.ext || '').replace(/^\./, '').toLowerCase()); }
 function mimeType(asset) {
   return asset.mimeType || ({ mp4: 'video/mp4', m4v: 'video/mp4', f4v: 'video/mp4', webm: 'video/webm', mov: 'video/quicktime', qt: 'video/quicktime', dxv: 'video/quicktime', ogv: 'video/ogg', ogg: 'video/ogg', avi: 'video/x-msvideo', divx: 'video/x-msvideo', mkv: 'video/x-matroska', mpg: 'video/mpeg', mpeg: 'video/mpeg', mpe: 'video/mpeg', m1v: 'video/mpeg', m2v: 'video/mpeg', mts: 'video/mp2t', m2ts: 'video/mp2t', m2t: 'video/mp2t', ts: 'video/mp2t', vob: 'video/mpeg', wmv: 'video/x-ms-wmv', asf: 'video/x-ms-asf', flv: 'video/x-flv', mxf: 'application/mxf', '3gp': 'video/3gpp', '3g2': 'video/3gpp2', rm: 'application/vnd.rn-realmedia', rmvb: 'application/vnd.rn-realmedia-vbr', dv: 'video/dv', jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', svg: 'image/svg+xml', webp: 'image/webp', avif: 'image/avif' })[(asset.ext || '').toLowerCase()] || '—';
 }
@@ -76,11 +82,13 @@ function viewName() {
   if (state.folder) return state.library.folders.find((f) => f.id === state.folder)?.name || '文件夹';
   return { all: '全部素材', recent: '最近导入', favorites: '收藏', unfiled: '未分类', trash: '回收站' }[state.view] || '全部素材';
 }
-function toast(message, error = false, duration = 4500) {
+function toast(message, error = false, duration = 4500, link) {
   const item = el('div', `toast${error ? ' error' : ''}`, message);
   item.setAttribute('role', error ? 'alert' : 'status');
+  if (link) item.append(action(link.text, 'toast-action', () => run(link.run)));
   $('toastStack').append(item);
   setTimeout(() => item.remove(), duration);
+  return item;
 }
 function messageError(error) { toast(error?.message || String(error), true, 8000); }
 async function run(fn) { try { return await fn(); } catch (error) { messageError(error); return null; } }
@@ -314,8 +322,10 @@ function filteredAssets() {
     const ext = (a.ext || '').replace(/^\./, '').toLowerCase();
     if (state.format !== 'all') {
       if (state.format === 'video') { if (!isVideo(a)) return false; }
-      else if (state.format === 'images') { if (isVideo(a)) return false; }
-      else if (state.format === 'jpg' ? !['jpg', 'jpeg'].includes(ext) : state.format === 'other' ? ['jpg', 'jpeg', 'png', 'webp', 'gif', 'svg'].includes(ext) || isVideo(a) : ext !== state.format) return false;
+      else if (state.format === 'model') { if (!isModel(a)) return false; }
+      else if (state.format === 'project') { if (!isProject(a)) return false; }
+      else if (state.format === 'images') { if (isVideo(a) || isModel(a) || isProject(a)) return false; }
+      else if (state.format === 'jpg' ? !['jpg', 'jpeg'].includes(ext) : state.format === 'other' ? ['jpg', 'jpeg', 'png', 'webp', 'gif', 'svg'].includes(ext) || isVideo(a) || isModel(a) || isProject(a) : ext !== state.format) return false;
     }
     if (terms.length) {
       const haystack = `${a.name} ${(a.tags || []).join(' ')} ${a.notes || ''} ${a.sourceUrl || ''} ${a.pageUrl || ''}`.toLocaleLowerCase();
@@ -409,6 +419,7 @@ function imageFor(asset, kind, className = '', videoThumbnail = false) {
   const img = el('img', className);
   img.draggable = false;
   img.src = api.assetUrl(asset.id, kind);
+  if (isProject(asset) && asset.projectPreview?.generatedAt) img.src += `&v=${encodeURIComponent(asset.projectPreview.generatedAt)}`;
   img.alt = asset.name;
   img.loading = 'lazy';
   img.decoding = 'async';
@@ -421,6 +432,18 @@ function imageFor(asset, kind, className = '', videoThumbnail = false) {
   return img;
 }
 function mediaFor(asset, kind) {
+  if (isProject(asset)) {
+    if (asset.thumbnail) return imageFor(asset, 'thumbnail');
+    const fallback = el('div', 'asset-fallback asset-project-placeholder');
+    fallback.append(el('span', 'project-ae-glyph', 'Ae'), el('span', '', `${asset.ext.toUpperCase()} · 已打包工程`));
+    return fallback;
+  }
+  if (isModel(asset)) {
+    if (asset.thumbnail) return imageFor(asset, 'thumbnail');
+    const fallback = el('div', 'asset-fallback asset-model-placeholder');
+    fallback.append(el('span', 'model-cube-glyph', '⬡'), el('span', '', `${asset.ext.toUpperCase()} · 3D 模型`));
+    return fallback;
+  }
   if (!isVideo(asset)) return imageFor(asset, kind);
   if (asset.thumbnail) return imageFor(asset, 'thumbnail', '', true);
   const fallback = el('div', 'asset-fallback');
@@ -444,9 +467,9 @@ function renderGallery(list) {
     check.setAttribute('aria-hidden', 'true');
     check.append(icon('check'));
     thumb.append(mediaFor(asset, 'thumb'), check, el('span', 'asset-format', (asset.ext || '').toUpperCase()));
-    if (isVideo(asset)) {
+    if (isVideo(asset) || isModel(asset) || isProject(asset)) {
       const badge = el('span', 'asset-video-badge');
-      badge.append(icon('video'), document.createTextNode('视频'));
+      badge.append(icon(isProject(asset) ? 'folder' : isModel(asset) ? 'grid' : 'video'), document.createTextNode(isProject(asset) ? 'AE 工程' : isModel(asset) ? '3D 模型' : '视频'));
       thumb.append(badge);
     }
     const info = el('div', 'asset-card-info');
@@ -579,7 +602,7 @@ async function openPluginCenter(pluginId, ids = [...state.selected]) {
   if (!await waitForMetadata()) return;
   if (state.previewId) closePreview();
   window.shituPlugins.open({
-    assets: state.library.assets.filter(asset => !asset.trashedAt && !isVideo(asset)),
+    assets: state.library.assets.filter(asset => !asset.trashedAt && !isVideo(asset) && !isModel(asset) && !isProject(asset)),
     selectedIds: ids, libraryRoot: state.library.root, pluginId
   });
 }
@@ -746,7 +769,7 @@ function renderDetails() {
     preview.dataset.assetId = asset.id;
     preview.append(mediaFor(asset, 'thumb'));
     preview.addEventListener('click', () => openPreview(asset.id));
-    preview.title = isVideo(asset) ? '点击播放视频' : '点击预览原图';
+    preview.title = isProject(asset) ? '查看已打包的 AE 工程' : isModel(asset) ? '点击旋转预览 3D 模型' : isVideo(asset) ? '点击播放视频' : '点击预览原图';
     box.append(preview);
   } else {
     const preview = el('div', 'detail-preview multi-preview');
@@ -835,7 +858,19 @@ function renderDetails() {
   notes.maxLength = 20000;
   notes.addEventListener('change', () => saveTextInput(notes, 'notes'));
   box.append(field('备注', notes), el('div', 'detail-save-note', '修改后自动保存到本地素材库。'), el('div', 'detail-separator'));
-  const metadata = one ? [['类型', isVideo(asset) ? '视频' : '图片'], ['格式', asset.ext.toUpperCase()], ['MIME', mimeType(asset)], ['尺寸', dimensions(asset)], ['文件大小', size(asset.size)], ['导入时间', date(asset.createdAt)]] : [['已选素材', `${assets.length} 个`], ['总大小', size(assets.reduce((n, a) => n + a.size, 0))]];
+  const metadata = one ? [['类型', isProject(asset) ? 'AE 工程' : isModel(asset) ? '3D 模型' : isVideo(asset) ? '视频' : '图片'], ['格式', asset.ext.toUpperCase()], ['MIME', isProject(asset) ? '工程资源包' : isModel(asset) ? '模型资源包' : mimeType(asset)], [isModel(asset) || isProject(asset) ? '包内文件' : '尺寸', isProject(asset) ? `${asset.projectBundle?.files?.length || 1} 个` : isModel(asset) ? `${asset.modelBundle?.files?.length || 1} 个` : dimensions(asset)], ['文件大小', size(asset.size)], ['导入时间', date(asset.createdAt)]] : [['已选素材', `${assets.length} 个`], ['总大小', size(assets.reduce((n, a) => n + a.size, 0))]];
+  if (one && isProject(asset)) {
+    if (asset.projectPreview?.composition) metadata.push(['封面合成', asset.projectPreview.composition.name], ['合成尺寸', `${asset.projectPreview.width} × ${asset.projectPreview.height}`]);
+    if (asset.projectBundle?.compositions?.length) metadata.push(['合成数量', `${asset.projectBundle.compositions.length} 个`]);
+    if (asset.projectBundle?.collectedWithVersion) metadata.push(['收集引擎', `After Effects ${asset.projectBundle.collectedWithVersion}`]);
+    if (asset.projectBundle?.missing?.length) metadata.push(['缺失素材', `${asset.projectBundle.missing.length} 个`]);
+    metadata.push(['导出方式', '已链接工程与依赖素材的完整文件夹']);
+  }
+  if (one && isModel(asset)) {
+    const missing = asset.modelBundle?.missing || [];
+    if (missing.length) metadata.push(['缺失资源', `${missing.length} 个（预览可能不完整）`]);
+    metadata.push(['打包方式', '模型、材质与贴图一起保存']);
+  }
   if (one && isVideo(asset)) {
     if (videoDuration(asset.duration)) metadata.splice(4, 0, ['时长', videoDuration(asset.duration)]);
     if (typeof asset.codec === 'string' && asset.codec) metadata.splice(4, 0, ['视频编码', asset.codec.toUpperCase()]);
@@ -998,6 +1033,7 @@ async function importImages(folder, paths) {
       if (r.errors?.length) messages.push(`${r.errors.length} 个文件导入失败`);
       toast(messages.join('，'), Boolean(r.errors?.length), 6500);
       if (r.errors?.length) toast(`首个失败原因：${r.errors[0].message || r.errors[0]}`, true, 10000);
+      if (r.warnings?.length) toast(`资源打包提醒：${r.warnings[0].message}`, false, 10000);
     }
   } catch (error) { messageError(error); }
   finally { state.busy = false; $('progressPanel').classList.add('hidden'); renderHeader(filteredAssets()); }
@@ -1060,6 +1096,8 @@ const cylinderPreview = new window.ShituCylinderPreview({
   viewport: $('previewCylinder'), ring: $('previewCylinderRing'), parking: $('previewMediaParking'),
   media: [$('previewImage'), $('previewVideo'), $('previewFallback')],
   createThumbnail: asset => {
+    if (isProject(asset)) return asset.thumbnail ? imageFor(asset, 'thumbnail', 'cylinder-thumb') : el('div', 'cylinder-video-placeholder project-ae-glyph', 'Ae');
+    if (isModel(asset)) return asset.thumbnail ? imageFor(asset, 'thumbnail', 'cylinder-thumb') : el('div', 'cylinder-video-placeholder', `3D 模型 · ${asset.ext.toUpperCase()}`);
     if (isVideo(asset)) return asset.thumbnail ? imageFor(asset, 'thumbnail', 'cylinder-thumb', true) : el('div', 'cylinder-video-placeholder', `视频 · ${(asset.ext || '').toUpperCase()}`);
     return imageFor(asset, 'thumb', 'cylinder-thumb');
   },
@@ -1072,8 +1110,81 @@ const cylinderPreview = new window.ShituCylinderPreview({
     $('previewPrev').setAttribute('aria-label', single ? '上一张图片' : '向左转动圆柱');
     $('previewNext').setAttribute('aria-label', single ? '下一张图片' : '向右转动圆柱');
     $('previewHelp').textContent = single ? '滚轮缩放 · 中键拖动 · ← → 切图 · Esc 返回阵列' : '双击单图查看 · 滚轮转动 · Ctrl＋滚轮调整行数';
+    if (isModel(state.library.assets.find(asset => asset.id === state.previewId) || {})) $('previewHelp').textContent = '左键旋转 · 滚轮缩放 · 右键平移 · ← → 切换模型';
+    if (isProject(state.library.assets.find(asset => asset.id === state.previewId) || {})) $('previewHelp').textContent = '工程与素材已打包 · 导出后保留完整文件夹';
   },
 });
+function displayProjectPreview(asset) {
+  const expectedRoot = state.library.root, serial = videoPreviewSerial, bundle = asset.projectBundle;
+  const box = $('previewProject');
+  box.classList.remove('hidden');
+  const layout = el('div', 'project-preview-layout');
+  const surface = el('div', 'project-preview-surface');
+  const image = el('img', 'hidden'); image.id = 'projectCompositionPreview'; image.alt = `${asset.name} 合成预览`; image.draggable = false;
+  const placeholder = el('span', 'project-ae-glyph', 'Ae');
+  const status = el('p', 'project-preview-status', '正在生成合成缩略图…'); status.id = 'projectPreviewStatus'; status.setAttribute('role', 'status');
+  surface.append(image, placeholder, status);
+  const info = el('div', 'project-preview-summary');
+  const label = el('label', 'project-composition-control', '合成');
+  const select = el('select'); select.id = 'projectCompositionSelect'; select.setAttribute('aria-label', '选择 AE 合成'); select.disabled = true; label.append(select);
+  const compositionMeta = el('p', 'project-composition-meta');
+  const warnings = el('p', 'project-preview-notes hidden');
+  const retry = action('重试生成预览', 'secondary-button hidden', () => request(view.compositionId), 'refresh'); retry.id = 'projectPreviewRetry';
+  const actions = el('div', 'project-preview-actions');
+  actions.append(action('使用 AE 打开', 'primary-button', () => run(() => api.openAsset(asset.id)), 'external'),
+    action('导出完整文件夹', 'secondary-button', () => run(async () => {
+      const result = await api.exportAssets([asset.id]);
+      if (result && !result.cancelled) toast('已导出 AE 工程与素材文件夹');
+    }), 'download'), retry);
+  info.append(el('h2', '', asset.name), label, compositionMeta,
+    el('p', '', `${bundle?.files?.length || 1} 个文件 · ${size(asset.size)} · 工程已重新链接包内素材`), warnings, actions);
+  layout.append(surface, info); box.replaceChildren(layout);
+  const view = { id: asset.id, root: expectedRoot, compositionId: undefined, requestSerial: 0, pending: false, updateProgress };
+  projectPreviewView = view;
+  const stillCurrent = () => serial === videoPreviewSerial && state.previewId === asset.id && state.library.root === expectedRoot && projectPreviewView === view;
+  function updateProgress(detail) {
+    if (!stillCurrent() || !view.pending || detail.status === 'ready') return;
+    if (view.compositionId !== undefined && detail.compositionId != null && detail.compositionId !== view.compositionId) return;
+    const text = { queued: '已加入缩略图生成队列…', preparing: '正在读取 AE 合成…', rendering: '正在渲染合成静态预览…', encoding: '正在保存合成缩略图…' }[detail.status];
+    if (text) status.textContent = text;
+  }
+  function populate(compositions, selectedId) {
+    const list = (compositions || []).filter(item => Number.isSafeInteger(item.id));
+    select.replaceChildren(...list.map((item, index) => {
+      const duplicate = list.some(other => other !== item && other.name === item.name);
+      const option = el('option', '', `${item.name}${duplicate ? `（合成 ${index + 1}）` : ''} · ${item.width} × ${item.height}`); option.value = String(item.id); return option;
+    }));
+    select.disabled = !list.length;
+    if (selectedId != null) select.value = String(selectedId);
+  }
+  async function request(compositionId) {
+    const revision = ++view.requestSerial; view.compositionId = compositionId; view.pending = true;
+    if (compositionId !== undefined) { image.classList.add('hidden'); placeholder.classList.remove('hidden'); }
+    retry.classList.add('hidden'); status.classList.remove('hidden'); status.textContent = '正在生成合成静态预览…';
+    try {
+      const prepared = await api.prepareProjectPreview(asset.id, expectedRoot, compositionId);
+      if (!stillCurrent() || revision !== view.requestSerial) return;
+      const url = new URL(prepared?.thumbnailUrl);
+      if (url.protocol !== 'shitu:' || url.hostname !== 'project-preview' || !/^\/[a-z0-9-]+\/thumbnail\.jpg$/i.test(url.pathname)) throw new Error('合成预览地址无效，请重试');
+      populate(prepared.compositions, prepared.composition.id);
+      view.compositionId = prepared.composition.id;
+      image.onload = () => { if (stillCurrent() && revision === view.requestSerial) { status.classList.add('hidden'); placeholder.classList.add('hidden'); } };
+      image.onerror = () => { if (stillCurrent() && revision === view.requestSerial) { status.textContent = '合成预览图片无法读取，请重试'; status.classList.remove('hidden'); retry.classList.remove('hidden'); } };
+      image.src = url.href; image.classList.remove('hidden');
+      compositionMeta.textContent = `${prepared.composition.name} · ${prepared.width} × ${prepared.height} · ${prepared.frameRate} fps · ${videoDuration(prepared.duration)}`;
+      const notes = [...(bundle?.missing?.length ? [`缺少 ${bundle.missing.length} 个素材，请在 AE 中检查。`] : []), ...(bundle?.warnings || []), ...(prepared.warnings || [])];
+      warnings.textContent = [...new Set(notes)].slice(0, 5).join('\n'); warnings.classList.toggle('hidden', !warnings.textContent);
+    } catch (error) {
+      if (!stillCurrent() || revision !== view.requestSerial) return;
+      status.textContent = `合成预览未生成：${error?.message || '请稍后重试'}。工程已收录，可使用 AE 打开。`;
+      status.classList.remove('hidden'); retry.classList.remove('hidden');
+    } finally { if (revision === view.requestSerial) view.pending = false; }
+  }
+  populate(bundle?.compositions || asset.projectPreview?.compositions, asset.projectPreview?.composition?.id);
+  if (asset.thumbnail) { image.src = api.assetUrl(asset.id, 'thumbnail') + `&v=${encodeURIComponent(asset.projectPreview?.generatedAt || '')}`; image.classList.remove('hidden'); placeholder.classList.add('hidden'); }
+  select.addEventListener('change', () => request(Number(select.value)));
+  request(undefined);
+}
 function displayPreviewAsset(asset, index, total) {
   resetPreviewMedia();
   state.previewId = asset.id;
@@ -1082,7 +1193,42 @@ function displayPreviewAsset(asset, index, total) {
   $('previewMeta').textContent = `${asset.ext.toUpperCase()}  ·  ${dimensions(asset)}  ·  ${size(asset.size)}`;
   $('previewIndex').textContent = `${index + 1} / ${total}`;
   $('previewFallback').classList.add('hidden');
-  if (isVideo(asset)) {
+  if (isProject(asset)) {
+    $('preview').classList.add('is-project-preview');
+    displayProjectPreview(asset);
+    $('previewHelp').textContent = '合成静态预览 · ← → 切换素材 · 导出保留工程与素材文件夹';
+  } else if (isModel(asset)) {
+    const serial = videoPreviewSerial;
+    const expectedRoot = state.library.root;
+    const stillCurrent = () => serial === videoPreviewSerial && state.previewId === asset.id && state.library.root === expectedRoot;
+    $('preview').classList.add('is-model-preview');
+    $('previewModel').classList.remove('hidden');
+    $('previewModelStatus').textContent = ['blend', 'c4d', 'max'].includes(asset.ext)
+      ? '正在准备 3D 预览，首次打开原生工程需要本机软件转换…' : '正在载入模型与贴图…';
+    $('previewModelStatus').classList.remove('hidden');
+    $('previewModelSurface').classList.add('hidden');
+    $('previewHelp').textContent = '左键旋转 · 滚轮缩放 · 右键平移 · ← → 切换模型';
+    Promise.resolve().then(async () => {
+      if (!stillCurrent()) return;
+      const prepared = await api.prepareModel(asset.id, expectedRoot);
+      if (!stillCurrent()) return;
+      modelViewerModule ||= import('./model-viewer.js');
+      const module = await modelViewerModule;
+      if (!stillCurrent()) return;
+      modelViewer ||= module.create($('previewModelSurface'));
+      $('previewModelSurface').classList.remove('hidden');
+      const metadata = await modelViewer.load(prepared);
+      if (!stillCurrent()) return;
+      $('previewModelStatus').classList.add('hidden');
+      $('previewModel').dataset.ready = 'true';
+      $('previewMeta').textContent = [asset.ext.toUpperCase(), `${metadata.meshes} 个网格`, `${metadata.triangles.toLocaleString()} 个三角面`, `${asset.modelBundle.files.length} 个文件`, size(asset.size)].join('  ·  ');
+    }).catch(error => {
+      if (!stillCurrent()) return;
+      $('previewModelSurface').classList.add('hidden');
+      $('previewModelStatus').textContent = `暂时无法预览：${error?.message || '请稍后重试'}。模型与贴图已保存在资源包中，可从右上角使用原软件打开。`;
+      $('previewModelStatus').classList.remove('hidden');
+    });
+  } else if (isVideo(asset)) {
     const serial = videoPreviewSerial;
     const expectedRoot = state.library.root;
     const video = $('previewVideo');
@@ -1096,7 +1242,7 @@ function displayPreviewAsset(asset, index, total) {
     $('previewFallback').textContent = '正在准备视频预览，首次打开可能需要一点时间…';
     $('previewFallback').classList.remove('hidden');
     const stillCurrent = () => serial === videoPreviewSerial && state.previewId === asset.id && state.library.root === expectedRoot;
-    Promise.resolve().then(() => api.prepareVideo(asset.id, expectedRoot)).then(prepared => {
+    Promise.resolve().then(() => stillCurrent() ? api.prepareVideo(asset.id, expectedRoot) : null).then(prepared => {
       if (!stillCurrent()) return;
       const url = new URL(prepared?.url);
       if (url.protocol !== 'shitu:' || url.hostname !== 'asset' || decodeURIComponent(url.pathname.slice(1)) !== asset.id || url.searchParams.get('kind') !== 'preview')
@@ -1129,6 +1275,14 @@ function openPreview(id) {
 }
 function resetPreviewMedia() {
   videoPreviewSerial++;
+  projectPreviewView = null;
+  $('previewProject').replaceChildren();
+  modelViewer?.clear();
+  $('preview').classList.remove('is-model-preview');
+  $('preview').classList.remove('is-project-preview');
+  $('previewProject').classList.add('hidden');
+  $('previewModel').classList.add('hidden');
+  delete $('previewModel').dataset.ready;
   $('previewVideo').pause();
   $('previewVideo').removeAttribute('src');
   $('previewVideo').removeAttribute('poster');
@@ -1148,7 +1302,40 @@ function toggleDetails(show = !state.details) {
   if (show) renderDetails();
 }
 let refreshingCollector = false;
-async function refreshCollector() {
+let collectorRefreshTimer;
+async function showCapturedAssets(result) {
+  if (!await waitForMetadata()) return;
+  if (result.libraryRoot && state.library.root !== result.libraryRoot) throw new Error('采集保存到了其他素材库，请切换到采集时的素材库查看');
+  const snapshot = await api.getLibrary();
+  if (snapshot.root !== state.library.root) return;
+  if (result.libraryRoot && snapshot.root !== result.libraryRoot) throw new Error('素材库已切换，请回到采集时的素材库查看');
+  const ids = [...(result.assetIds || []), ...(result.existingAssets || []).map(asset => asset.id)];
+  const asset = snapshot.assets.find(item => ids.includes(item.id));
+  closePreview();
+  state.view = asset?.trashedAt ? 'trash' : 'all';
+  state.folder = null; state.tag = null; state.search = ''; state.format = 'all'; state.sort = 'newest';
+  $('searchInput').value = ''; $('formatFilter').value = 'all'; $('sortSelect').value = 'newest';
+  applyLibrary(snapshot, false);
+  if (asset) {
+    state.selected = new Set([asset.id]);
+    state.limit = Math.max(240, filteredAssets().findIndex(item => item.id === asset.id) + 1);
+    render();
+    requestAnimationFrame(() => document.querySelector(`.asset-card[data-asset-id="${CSS.escape(asset.id)}"]`)?.scrollIntoView({ block: 'center' }));
+  }
+  if (!$('collectorOverlay').classList.contains('hidden')) closeCollector();
+}
+function renderCaptureResult(result) {
+  const box = $('collectorLastCapture');
+  box.replaceChildren(); box.classList.toggle('hidden', !result);
+  if (!result) return;
+  const messages = { receiving: '正在接收浏览器中的素材…', downloading: '正在下载网页素材，尚未入库…', importing: '下载完成，正在写入素材库…' };
+  let message = messages[result.status];
+  if (result.status === 'error') message = `上次采集未保存：${result.error || '请重试'}`;
+  if (result.status === 'complete') message = result.imported ? `已采集 ${result.imported} 个素材` : result.existingAssets?.some(asset => asset.trashedAt) ? '这份素材已在回收站中，可查看后恢复' : '素材库中已有这份文件';
+  box.append(el('span', '', message || '采集处理中…'));
+  if (result.status === 'complete') box.append(action('查看采集素材', 'text-button', () => run(() => showCapturedAssets(result))));
+}
+async function refreshCollector(quiet = false) {
   if (refreshingCollector) return;
   if (!hasLibrary()) {
     $('collectorStatus').classList.add('unavailable');
@@ -1157,7 +1344,7 @@ async function refreshCollector() {
   }
   refreshingCollector = true;
   $('refreshCollector').disabled = true;
-  $('collectorStatus').textContent = '正在检查本地接收服务…';
+  if (!quiet) $('collectorStatus').textContent = '正在检查本地接收服务…';
   try {
     const info = await api.getCollectorInfo();
     const available = info.enabled && info.ready !== false;
@@ -1165,6 +1352,7 @@ async function refreshCollector() {
     $('collectorStatus').textContent = info.ready === false ? '请先选择素材库位置，再使用浏览器采集。' : available ? '本地接收服务已就绪 · 采集时请保持拾图运行' : `本地接收服务暂不可用${info.error ? `：${info.error}` : '，请重启拾图后再试'}`;
     $('collectorPath').textContent = info.extensionPath ? `扩展目录：${info.extensionPath}` : '';
     $('openExtensionFolder').disabled = !info.extensionPath;
+    renderCaptureResult(info.lastCapture);
   } catch (error) {
     $('collectorStatus').classList.add('unavailable');
     $('collectorStatus').textContent = `无法读取本地接收服务状态：${error.message || error}`;
@@ -1174,8 +1362,13 @@ function showCollector() {
   $('collectorOverlay').classList.remove('hidden');
   $('collectorClose').focus();
   refreshCollector();
+  clearInterval(collectorRefreshTimer);
+  collectorRefreshTimer = setInterval(() => {
+    if ($('collectorOverlay').classList.contains('hidden')) { clearInterval(collectorRefreshTimer); return; }
+    refreshCollector(true);
+  }, 1500);
 }
-function closeCollector() { $('collectorOverlay').classList.add('hidden'); $('collectorButton').focus(); }
+function closeCollector() { clearInterval(collectorRefreshTimer); $('collectorOverlay').classList.add('hidden'); $('collectorButton').focus(); }
 
 $('newFolder').addEventListener('click', createFolder);
 // Collection menus use native disclosure controls and keep the workspace clear.
@@ -1281,7 +1474,7 @@ $('preview').addEventListener('contextmenu', event => {
   if (!state.previewId) return;
   const target = event.target instanceof Element ? event.target : event.target.parentElement;
   const card = target?.closest('.cylinder-card[data-asset-id]');
-  const focusedImage = target?.closest('#previewFocusContent,#previewImage,#previewVideo,#previewFallback');
+  const focusedImage = target?.closest('#previewFocusContent,#previewImage,#previewVideo,#previewFallback,#previewProject');
   if (card || focusedImage) assetContextMenuEvent(event, card?.dataset.assetId || state.previewId);
 }, true);
 $('detailsContent').addEventListener('contextmenu', event => {
@@ -1291,7 +1484,7 @@ $('detailsContent').addEventListener('contextmenu', event => {
 }, true);
 $('previewImage').addEventListener('error', () => {
   const asset = state.library.assets.find((item) => item.id === state.previewId);
-  if (asset && !isVideo(asset)) {
+  if (asset && !isVideo(asset) && !isModel(asset) && !isProject(asset)) {
     $('previewImage').classList.add('hidden');
     $('previewFallback').textContent = '此图片格式无法在窗口中预览，可使用右上角按钮在系统应用中打开。';
     $('previewFallback').classList.remove('hidden');
@@ -1307,7 +1500,7 @@ $('previewVideo').addEventListener('error', () => {
 });
 $('previewImage').addEventListener('load', () => {
   const asset = state.library.assets.find((item) => item.id === state.previewId);
-  if (asset && !isVideo(asset)) { $('previewImage').classList.remove('hidden'); $('previewFallback').classList.add('hidden'); }
+  if (asset && !isVideo(asset) && !isModel(asset) && !isProject(asset)) { $('previewImage').classList.remove('hidden'); $('previewFallback').classList.add('hidden'); }
 });
 $('previewVideo').addEventListener('loadeddata', () => {
   const asset = state.library.assets.find((item) => item.id === state.previewId);
@@ -1349,14 +1542,14 @@ document.addEventListener('keydown', (e) => {
     return;
   }
   if (state.previewId) {
-    if (e.key === 'Escape') { e.preventDefault(); if (cylinderPreview.singleMode) cylinderPreview.exitSingle(); else closePreview(); return; }
+    if (e.key === 'Escape') { e.preventDefault(); if (cylinderPreview.singleMode && !$('preview').classList.contains('is-model-preview') && !$('preview').classList.contains('is-project-preview')) cylinderPreview.exitSingle(); else closePreview(); return; }
     if (e.key === ' ') {
       e.preventDefault();
       const asset = state.library.assets.find((item) => item.id === state.previewId);
       if (asset && isVideo(asset) && !$('previewVideo').classList.contains('hidden')) {
         if ($('previewVideo').paused) $('previewVideo').play().catch(messageError);
         else $('previewVideo').pause();
-      } else closePreview();
+      } else if (!asset || (!isModel(asset) && !isProject(asset))) closePreview();
     }
     if (e.key === 'ArrowLeft') { e.preventDefault(); movePreview(-1); }
     if (e.key === 'ArrowRight') { e.preventDefault(); movePreview(1); }
@@ -1393,13 +1586,23 @@ api.onImportProgress?.((event) => {
   const total = event.total || 0;
   $('progressCount').textContent = total ? `${done} / ${total}` : '';
   $('progressFill').style.width = total ? `${Math.min(100, done / total * 100)}%` : '8%';
-  $('progressFile').textContent = event.name || event.file || event.path || '正在读取图片…';
+  $('progressFile').textContent = event.name || event.file || event.path || '正在读取素材…';
+});
+api.onWebCapture?.(result => {
+  if (!result?.ok) return;
+  const message = result.imported ? `浏览器已采集 ${result.imported} 个素材` : result.existingAssets?.some(asset => asset.trashedAt) ? '这份素材已在回收站中' : '素材库中已有这份文件';
+  const notice = toast(message, false, 20000, { text: '查看', run: () => showCapturedAssets(result) });
+  notice.dataset.webCapture = 'true';
+  renderCaptureResult({ ...result, status: 'complete' });
 });
 api.onLibraryChanged?.(() => run(async () => {
   const serial = ++libraryRefreshSerial;
   const snapshot = await api.getLibrary();
   if (serial === libraryRefreshSerial) applyLibrary(snapshot);
 }));
+api.onProjectPreview?.(detail => {
+  if (detail?.id === projectPreviewView?.id && detail.root === projectPreviewView.root) projectPreviewView.updateProgress(detail);
+});
 window.addEventListener('beforeunload', (event) => {
   if (closeReady) return;
   flushDetailDrafts();
