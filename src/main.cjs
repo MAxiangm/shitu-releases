@@ -369,7 +369,8 @@ function bindHandlers() {
     if (typeof expectedRoot !== 'string' || expectedRoot !== current.root) throw new Error('素材库已切换，请重新选择素材');
     return current.deletePermanently(ids);
   });
-  checkedHandler('create-folder', name => requireLibrary().createFolder(name));
+  checkedHandler('create-folder', (name, parentId = null) => requireLibrary().createFolder(name, parentId));
+  checkedHandler('move-folder', (id, parentId = null) => requireLibrary().moveFolder(id, parentId));
   checkedHandler('rename-folder', (id, name) => requireLibrary().renameFolder(id, name));
   checkedHandler('delete-folder', id => requireLibrary().deleteFolder(id));
   checkedHandler('export-assets', async ids => {

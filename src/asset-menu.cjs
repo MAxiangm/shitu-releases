@@ -1,4 +1,5 @@
 'use strict';
+const FolderTree = require('./folder-tree.js');
 
 function assetMenuTemplate(assets, folders, choose) {
   const one = assets.length === 1;
@@ -34,7 +35,7 @@ function assetMenuTemplate(assets, folders, choose) {
       id: 'move-folder', label: '移入文件夹', enabled: !anyTrashed,
       submenu: [
         { id: 'folder-unfiled', label: '未分类', type: 'checkbox', checked: assets.every(asset => !asset.folderId), click: () => choose('folder', { folderId: null }) },
-        ...folders.map(folder => ({ id: `folder-${folder.id}`, label: folder.name, type: 'checkbox', checked: assets.every(asset => asset.folderId === folder.id), click: () => choose('folder', { folderId: folder.id }) }))
+        ...FolderTree.flatten(folders).map(folder => ({ id: `folder-${folder.id}`, label: folder.path, type: 'checkbox', checked: assets.every(asset => asset.folderId === folder.id), click: () => choose('folder', { folderId: folder.id }) }))
       ]
     },
     item(allFavorite ? 'unfavorite' : 'favorite', allFavorite ? '取消收藏（清除评分）' : '加入收藏', !anyTrashed),

@@ -9,8 +9,9 @@ const updateSmoke = process.env.SHITU_UPDATE_SMOKE === '1';
 const videoSmoke = process.env.SHITU_VIDEO_SMOKE === '1';
 const modelSmoke = process.env.SHITU_MODEL_SMOKE === '1';
 const aeSmoke = process.env.SHITU_AE_SMOKE === '1';
-if ([smoke, updateSmoke, videoSmoke, modelSmoke, aeSmoke].filter(Boolean).length > 1) throw new Error('Choose one smoke test mode at a time.');
-const testing = smoke || updateSmoke || videoSmoke || modelSmoke || aeSmoke;
+const folderSmoke = process.env.SHITU_FOLDER_SMOKE === '1';
+if ([smoke, updateSmoke, videoSmoke, modelSmoke, aeSmoke, folderSmoke].filter(Boolean).length > 1) throw new Error('Choose one smoke test mode at a time.');
+const testing = smoke || updateSmoke || videoSmoke || modelSmoke || aeSmoke || folderSmoke;
 const base = testing
   ? path.resolve(process.env.SHITU_SMOKE_DIRECTORY)
   : path.join(root, '.recovery', 'development');
@@ -41,6 +42,12 @@ if (aeSmoke) {
   if (!relative || relative.startsWith('..') || path.isAbsolute(relative) || fs.lstatSync(base).isSymbolicLink()) throw new Error('AE smoke directory must stay inside .recovery/tests.');
   const marker = JSON.parse(fs.readFileSync(path.join(base, 'ae-smoke-fixture.json'), 'utf8'));
   if (!process.env.SHITU_AE_SMOKE_TOKEN || marker.token !== process.env.SHITU_AE_SMOKE_TOKEN) throw new Error('AE smoke marker does not match.');
+}
+if (folderSmoke) {
+  const relative = path.relative(path.join(root, '.recovery', 'tests'), base);
+  if (!relative || relative.startsWith('..') || path.isAbsolute(relative) || fs.lstatSync(base).isSymbolicLink()) throw new Error('Folder smoke directory must stay inside .recovery/tests.');
+  const marker = JSON.parse(fs.readFileSync(path.join(base, 'folder-smoke-fixture.json'), 'utf8'));
+  if (!process.env.SHITU_FOLDER_SMOKE_TOKEN || marker.token !== process.env.SHITU_FOLDER_SMOKE_TOKEN) throw new Error('Folder smoke marker does not match.');
 }
 for (const name of ['profile', 'sessions', 'crashes', 'plugins']) {
   fs.mkdirSync(path.join(base, name), { recursive: true });
@@ -157,6 +164,7 @@ if (updateSmoke) configureUpdateSmoke();
 if (videoSmoke) require('./video-smoke-bootstrap.cjs')({ root, base });
 if (modelSmoke) require('./model-smoke-bootstrap.cjs')({ root, base });
 if (aeSmoke) require('./ae-smoke-bootstrap.cjs')({ root, base });
+if (folderSmoke) require('./folders-smoke-bootstrap.cjs')({ root, base });
 
 function configureUpdateSmoke() {
   // This branch only runs inside an explicitly marked, isolated smoke process.
@@ -292,6 +300,16 @@ function configureUpdateSmoke() {
   });
   app.on('browser-window-created', (_event, window) => {
     // Keep a live compositor without exposing or focusing the test window.
+    const sendToRenderer = window.webContents.send.bind(window.webContents);
+    window.webContents.send = (channel, payload, ...rest) => {
+      if (channel === 'shitu:update-state' && payload?.status === 'downloaded' && payload.error) {
+        // State notifications and invoke rejections use separate renderer IPC
+        // paths. Exercise their ordering explicitly instead of depending on CPU load.
+        setTimeout(() => { if (!window.webContents.isDestroyed()) sendToRenderer(channel, payload, ...rest); }, 75);
+        return;
+      }
+      return sendToRenderer(channel, payload, ...rest);
+    };
     window.setSkipTaskbar(true);
     window.setOpacity(0);
     window.webContents.setBackgroundThrottling(false);
@@ -386,17 +404,18 @@ function configureUpdateSmoke() {
           let failed;
           while (true) {
             failed = await api.updateState();
-            if (failed.error && !document.getElementById('appUpdateCheck').disabled) break;
+            if (failed.error && updateUi.snapshot.status === failed.status && updateUi.snapshot.error === failed.error &&
+                !updateUi.pending && !document.getElementById('appUpdateCheck').disabled) break;
             if (Date.now() > deadline) throw new Error('Downloaded update recheck failure did not finish');
             await new Promise(resolve => setTimeout(resolve, 20));
           }
           if (failed.status !== 'downloaded' || document.getElementById('appUpdateInstall').disabled ||
               document.getElementById('appUpdateInstall').classList.contains('hidden'))
-            throw new Error('Network failure discarded the already verified downloaded update');
+            throw new Error('Network failure discarded the already verified downloaded update: ' + JSON.stringify({ main: failed, ui: updateUi.snapshot, pending: updateUi.pending, installDisabled: document.getElementById('appUpdateInstall').disabled, installHidden: document.getElementById('appUpdateInstall').classList.contains('hidden') }));
           const text = document.getElementById('appUpdateStatus').textContent;
           if (text !== failed.error || /Error invoking remote method|shitu:update-|^Error:/.test(text))
             throw new Error('Downloaded state displayed a raw IPC error');
-          return { downloadedUpdatePreservedAfterCheckFailure: true };
+          return { downloadedUpdatePreservedAfterCheckFailure: true, delayedUpdateErrorStateSynchronized: true };
         })()`);
         Object.assign(uiResult, preservedUi);
         updateNetworkBlocked = false;

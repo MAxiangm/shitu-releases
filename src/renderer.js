@@ -3,8 +3,12 @@
 const api = window.shitu;
 const $ = (id) => document.getElementById(id);
 const SVG = 'http://www.w3.org/2000/svg';
+const folderTree = window.ShituFolders;
 const state = { library: { assets: [], folders: [], tags: [], stats: {}, root: null, needsLibrary: true }, view: 'all', folder: null, tag: null, selected: new Set(), selectionMode: false, anchor: null, search: '', format: 'all', sort: 'newest', limit: 240, previewId: null, details: false, busy: false, libraryChanging: false };
 let modalResolve = null;
+let modalHasParent = false;
+let folderMenuAnchor = null;
+const collapsedFolders = new Set();
 let metadataQueue = Promise.resolve(true);
 const pendingSaves = new Set();
 let closeReady = false;
@@ -295,6 +299,8 @@ function applyLibrary(library, preserveSelection = true) {
   libraryRefreshSerial += 1;
   const rootChanged = (state.library.root || '').toLowerCase() !== (library.root || '').toLowerCase();
   if (rootChanged) {
+    closeFolderMenu();
+    collapsedFolders.clear();
     closePreview();
     state.selectionMode = false;
     state.view = 'all';
@@ -324,9 +330,10 @@ function applyLibrary(library, preserveSelection = true) {
 function filteredAssets() {
   const terms = state.search.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
   const weekAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
+  const folderScope = state.folder ? folderTree.descendantIds(state.library.folders, state.folder) : null;
   const list = state.library.assets.filter((a) => {
     if (state.view === 'trash' ? !a.trashedAt : Boolean(a.trashedAt)) return false;
-    if (state.folder && a.folderId !== state.folder) return false;
+    if (folderScope && !folderScope.has(a.folderId)) return false;
     if (!state.folder && state.view === 'recent' && new Date(a.createdAt).getTime() < weekAgo) return false;
     if (!state.folder && state.view === 'favorites' && (a.rating || 0) < 4) return false;
     if (!state.folder && state.view === 'unfiled' && a.folderId) return false;
@@ -357,6 +364,12 @@ function filteredAssets() {
 function changeView(view, folder = null) {
   state.view = view;
   state.folder = folder;
+  if (folder) {
+    const folders = new Map(state.library.folders.map(item => [item.id, item]));
+    for (let current = folders.get(folder), visited = new Set(); current && !visited.has(current.id); current = folders.get(folderTree.parentId(current))) {
+      visited.add(current.id); collapsedFolders.delete(current.id);
+    }
+  }
   state.tag = null;
   state.selected.clear();
   state.anchor = null;
@@ -383,18 +396,58 @@ function renderNavigation() {
   }));
   const counts = new Map();
   active.forEach((a) => counts.set(a.folderId, (counts.get(a.folderId) || 0) + 1));
-  $('folderNav').replaceChildren(...state.library.folders.map((folder) => {
+  const folders = folderTree.flatten(state.library.folders);
+  const parents = new Set(folders.map(folder => folder.parentId).filter(id => id !== null));
+  for (let index = folders.length - 1; index >= 0; index--) {
+    const folder = folders[index];
+    if (folder.parentId !== null) counts.set(folder.parentId, (counts.get(folder.parentId) || 0) + (counts.get(folder.id) || 0));
+  }
+  let collapsedDepth = null;
+  const folderRows = [];
+  for (const folder of folders) {
+    if (collapsedDepth !== null && folder.depth > collapsedDepth) continue;
+    collapsedDepth = null;
     const row = el('div', 'folder-row');
+    row.dataset.folderId = folder.id;
+    row.dataset.depth = String(folder.depth);
+    row.style.setProperty('--folder-depth', String(folder.depth));
+    const children = parents.has(folder.id), expanded = !collapsedFolders.has(folder.id);
+    if (children) {
+      const toggle = action('', 'folder-toggle', event => {
+        event.stopPropagation();
+        if (collapsedFolders.has(folder.id)) collapsedFolders.delete(folder.id); else collapsedFolders.add(folder.id);
+        renderNavigation();
+        $('folderNav').querySelector(`[data-folder-toggle="${CSS.escape(folder.id)}"]`)?.focus();
+      }, 'chevron');
+      toggle.dataset.folderToggle = folder.id;
+      toggle.setAttribute('aria-expanded', String(expanded));
+      toggle.setAttribute('aria-label', `${expanded ? '收起' : '展开'}「${folder.name}」的子文件夹`);
+      row.append(toggle);
+    } else row.append(el('span', 'folder-toggle-spacer'));
     const item = action('', `nav-item${state.folder === folder.id ? ' active' : ''}`, () => changeView('all', folder.id), 'folder');
     item.dataset.folderId = folder.id;
     item.append(el('span', 'nav-name', folder.name), el('span', 'nav-count', String(counts.get(folder.id) || 0)));
-    item.title = folder.name;
-    const more = action('', 'folder-more', () => manageFolder(folder), 'more');
+    item.title = `${folder.path} · ${counts.get(folder.id) || 0} 个素材（含子文件夹）`;
+    if (state.folder === folder.id) item.setAttribute('aria-current', 'page');
+    item.addEventListener('keydown', event => {
+      if (event.key === 'ArrowRight' && children && collapsedFolders.has(folder.id) || event.key === 'ArrowLeft' && children && !collapsedFolders.has(folder.id)) {
+        event.preventDefault(); event.stopPropagation();
+        if (event.key === 'ArrowRight') collapsedFolders.delete(folder.id); else collapsedFolders.add(folder.id);
+        renderNavigation(); $('folderNav').querySelector(`.nav-item[data-folder-id="${CSS.escape(folder.id)}"]`)?.focus();
+      }
+    });
+    const more = action('', 'folder-more', event => { event.stopPropagation(); showFolderMenu(folder, event.currentTarget); }, 'more');
     more.title = `管理文件夹「${folder.name}」`;
     more.setAttribute('aria-label', more.title);
+    more.setAttribute('aria-haspopup', 'menu');
+    row.addEventListener('contextmenu', event => { event.preventDefault(); event.stopPropagation(); showFolderMenu(folder, more, { x: event.clientX, y: event.clientY }); });
     row.append(item, more);
-    return row;
-  }));
+    folderRows.push(row);
+    if (children && !expanded) collapsedDepth = folder.depth;
+  }
+  $('folderNav').replaceChildren(...folderRows);
+  $('folderBrowserLabel').textContent = state.folder ? viewName() : '文件夹';
+  $('folderBrowserLabel').title = state.folder ? folderTree.path(state.library.folders, state.folder) : '文件夹';
   $('folderHint').classList.toggle('hidden', state.library.folders.length > 0);
   const tags = state.library.tags.map((tag) => typeof tag === 'string' ? { name: tag } : tag);
   $('tagCount').textContent = tags.length;
@@ -413,7 +466,9 @@ function renderNavigation() {
 }
 function renderHeader(list) {
   const name = viewName();
-  $('breadcrumbCurrent').textContent = name;
+  const folderPath = state.folder ? folderTree.path(state.library.folders, state.folder) : name;
+  $('breadcrumbCurrent').textContent = folderPath;
+  $('breadcrumbCurrent').title = folderPath;
   $('pageTitle').replaceChildren(document.createTextNode(name), el('span', 'title-dot', '.'));
   $('pageSubtitle').textContent = state.folder ? '把相关的灵感放在一起。' : { all: '收集值得留下的灵感。', recent: '过去 7 天，为灵感留个位置。', favorites: '四星及以上的素材，值得再次回看。', unfiled: '为散落的灵感，找到一个位置。', trash: '暂时放下的素材，随时可以恢复。' }[state.view];
   $('resultCount').textContent = `${list.length.toLocaleString()} 个素材${state.search || state.format !== 'all' || state.tag ? ' · 筛选结果' : ''}`;
@@ -802,7 +857,7 @@ function renderDetails() {
   const mixed = !assets.every((a) => a.folderId === asset.folderId);
   if (mixed) { const option = el('option', '', '多个文件夹'); option.value = '__mixed__'; option.disabled = true; folder.append(option); }
   const unfiled = el('option', '', '未分类'); unfiled.value = ''; folder.append(unfiled);
-  state.library.folders.forEach((item) => { const option = el('option', '', item.name); option.value = item.id; folder.append(option); });
+  folderTree.flatten(state.library.folders).forEach((item) => { const option = el('option', '', item.path); option.value = item.id; folder.append(option); });
   folder.value = mixed ? '__mixed__' : asset.folderId || '';
   folder.addEventListener('change', () => updateSelected({ folderId: folder.value || null }));
   box.append(field('所在文件夹', folder));
@@ -982,17 +1037,26 @@ async function changeLibrary(kind) {
     for (const id of ['setupOperationStatus', 'managerOperationStatus']) $(id).classList.add('hidden');
   }
 }
-function modal({ title, description = '', value = '', input = true, confirm = '确定', cancel = '取消', destructive = false }) {
+function modal({ title, description = '', value = '', input = true, confirm = '确定', cancel = '取消', destructive = false, parentOptions = null, parentId = null }) {
+  closeFolderMenu();
   if (modalResolve) modalResolve(null);
   $('modalTitle').textContent = title;
   $('modalDescription').textContent = description;
   $('modalInput').value = value;
   $('modalInput').classList.toggle('hidden', !input);
+  modalHasParent = Array.isArray(parentOptions);
+  $('modalParentField').classList.toggle('hidden', !modalHasParent);
+  $('modalParent').replaceChildren();
+  if (modalHasParent) {
+    const rootOption = el('option', '', '素材库根目录'); rootOption.value = ''; $('modalParent').append(rootOption);
+    for (const folder of parentOptions) { const option = el('option', '', folder.path); option.value = folder.id; $('modalParent').append(option); }
+    $('modalParent').value = parentId || '';
+  }
   $('modalConfirm').textContent = confirm;
   $('modalCancel').textContent = cancel;
   $('modalOverlay').querySelector('.modal-icon use').setAttribute('href', destructive ? '#i-trash' : '#i-folder');
   $('modalOverlay').classList.remove('hidden');
-  setTimeout(() => { if (input) { $('modalInput').focus(); $('modalInput').select(); } else $(destructive ? 'modalCancel' : 'modalConfirm').focus(); }, 30);
+  setTimeout(() => { if (input) { $('modalInput').focus(); $('modalInput').select(); } else if (modalHasParent) $('modalParent').focus(); else $(destructive ? 'modalCancel' : 'modalConfirm').focus(); }, 30);
   return new Promise((resolve) => { modalResolve = resolve; });
 }
 function resolveModal(value) {
@@ -1001,23 +1065,60 @@ function resolveModal(value) {
   modalResolve = null;
   if (resolve) resolve(value);
 }
-async function createFolder() {
+async function createFolder(parentId = currentFolder()) {
   if (!hasLibrary() || state.libraryChanging) return;
-  const name = await modal({ title: '新建文件夹', description: '按项目、主题或使用场景，把灵感收在一起。' });
-  if (!name?.trim()) return;
-  const snapshot = await run(() => api.createFolder(name.trim()));
+  const root = state.library.root;
+  const result = await modal({ title: parentId ? '新建子文件夹' : '新建文件夹', description: '选择上级文件夹，按项目、主题或使用场景收好素材。', parentOptions: folderTree.flatten(state.library.folders), parentId });
+  if (!result?.name?.trim() || !await waitForMetadata() || state.library.root !== root || state.libraryChanging) return;
+  const snapshot = await run(() => api.createFolder(result.name.trim(), result.parentId));
   if (snapshot) { applyLibrary(snapshot, false); const created = snapshot.folders[snapshot.folders.length - 1]; if (created) changeView('all', created.id); toast('文件夹已创建'); }
 }
-async function manageFolder(folder) {
-  const result = await modal({ title: '管理文件夹', description: '修改名称并保存。移除文件夹后，其中的素材会回到「未分类」。', value: folder.name, confirm: '保存名称', cancel: '移除文件夹' });
-  if (result === null) return;
-  if (result === false) {
-    const sure = await modal({ title: `移除「${folder.name}」？`, description: '只移除这个分类，素材仍会完整保留在素材库中。', input: false, confirm: '移除文件夹' });
-    if (!sure) return;
+function closeFolderMenu(restoreFocus = false) {
+  $('folderContextMenu')?.classList.add('hidden');
+  if (restoreFocus && folderMenuAnchor?.isConnected) folderMenuAnchor.focus();
+  folderMenuAnchor = null;
+}
+function showFolderMenu(folder, anchor, point) {
+  closeFolderMenu();
+  if (!hasLibrary() || state.libraryChanging) return;
+  const root = state.library.root, menu = $('folderContextMenu');
+  folderMenuAnchor = anchor;
+  const items = [['create', '新建子文件夹', 'plus'], ['rename', '重命名', 'folder'], ['move', '移动文件夹…', 'arrow'], ['delete', '删除文件夹…', 'trash']];
+  menu.replaceChildren(...items.map(([kind, label, glyph]) => {
+    const button = action(label, kind === 'delete' ? 'is-destructive' : '', () => {
+      closeFolderMenu();
+      const current = state.library.folders.find(item => item.id === folder.id);
+      if (root !== state.library.root || !current) return;
+      if (kind === 'create') createFolder(current.id); else manageFolder(current, kind);
+    }, glyph);
+    button.dataset.folderAction = kind; button.setAttribute('role', 'menuitem'); return button;
+  }));
+  menu.classList.remove('hidden');
+  const bounds = anchor.getBoundingClientRect();
+  menu.style.left = `${Math.max(8, Math.min(point?.x ?? bounds.right - menu.offsetWidth, window.innerWidth - menu.offsetWidth - 8))}px`;
+  menu.style.top = `${Math.max(8, Math.min(point?.y ?? bounds.bottom + 5, window.innerHeight - menu.offsetHeight - 8))}px`;
+  menu.querySelector('button')?.focus();
+}
+async function manageFolder(folder, kind = 'rename') {
+  const root = state.library.root;
+  if (kind === 'delete') {
+    const descendants = folderTree.descendantIds(state.library.folders, folder.id);
+    const children = descendants.size - 1;
+    const count = state.library.assets.filter(asset => descendants.has(asset.folderId)).length;
+    const sure = await modal({ title: `删除「${folder.name}」？`, description: `将删除此文件夹${children ? `及 ${children} 个子文件夹` : ''}。${count} 个素材会完整保留并回到「未分类」，原文件不会删除。`, input: false, destructive: true, confirm: '删除文件夹' });
+    if (!sure || !await waitForMetadata() || state.library.root !== root || state.libraryChanging) return;
     const snapshot = await run(() => api.deleteFolder(folder.id));
-    if (snapshot) { applyLibrary(snapshot); toast('文件夹已移除，素材已回到未分类'); }
-  } else if (result.trim()) {
-    const snapshot = await run(() => api.renameFolder(folder.id, result.trim()));
+    if (snapshot) { applyLibrary(snapshot); toast('文件夹已删除，素材已保留在未分类'); }
+  } else if (kind === 'move') {
+    const excluded = folderTree.descendantIds(state.library.folders, folder.id);
+    const result = await modal({ title: `移动「${folder.name}」`, description: '子文件夹和其中的素材会一起保留在原有层级中。', input: false, parentOptions: folderTree.flatten(state.library.folders).filter(item => !excluded.has(item.id)), parentId: folderTree.parentId(folder), confirm: '移动文件夹' });
+    if (!result || !await waitForMetadata() || state.library.root !== root || state.libraryChanging) return;
+    const snapshot = await run(() => api.moveFolder(folder.id, result.parentId));
+    if (snapshot) { applyLibrary(snapshot); changeView('all', folder.id); toast('文件夹已移动'); }
+  } else {
+    const name = await modal({ title: '重命名文件夹', description: folderTree.path(state.library.folders, folder.id), value: folder.name, confirm: '保存名称' });
+    if (!name?.trim() || !await waitForMetadata() || state.library.root !== root || state.libraryChanging) return;
+    const snapshot = await run(() => api.renameFolder(folder.id, name.trim()));
     if (snapshot) { applyLibrary(snapshot); toast('文件夹名称已保存'); }
   }
 }
@@ -1382,7 +1483,26 @@ function showCollector() {
 }
 function closeCollector() { clearInterval(collectorRefreshTimer); $('collectorOverlay').classList.add('hidden'); $('collectorButton').focus(); }
 
-$('newFolder').addEventListener('click', createFolder);
+$('newFolder').addEventListener('click', () => createFolder());
+document.addEventListener('pointerdown', event => {
+  if (!$('folderContextMenu').classList.contains('hidden') && !$('folderContextMenu').contains(event.target) && !event.target.closest('.folder-more')) closeFolderMenu();
+});
+$('folderNav').addEventListener('keydown', event => {
+  // Keep a focused folder control's Space/Enter/Delete away from gallery shortcuts.
+  if ([' ', 'Enter', 'Delete', 'Backspace'].includes(event.key)) event.stopPropagation();
+});
+$('folderContextMenu').addEventListener('keydown', event => {
+  event.stopPropagation();
+  const buttons = [...$('folderContextMenu').querySelectorAll('button')];
+  const index = buttons.indexOf(document.activeElement);
+  if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
+    event.preventDefault(); event.stopPropagation();
+    const next = event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1 : (index + (event.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length;
+    buttons[next]?.focus();
+  } else if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); closeFolderMenu(true); }
+  else if (event.key === 'Tab') closeFolderMenu();
+});
+window.addEventListener('resize', () => closeFolderMenu());
 // Collection menus use native disclosure controls and keep the workspace clear.
 const collectionMenus = [...document.querySelectorAll('.collection-menu')];
 for (const menu of collectionMenus) menu.addEventListener('toggle', () => {
@@ -1478,8 +1598,13 @@ $('managerMigrateLibrary').addEventListener('click', () => changeLibrary('migrat
 $('managerRevealLibrary').addEventListener('click', () => run(() => api.revealLibrary()));
 $('managerCloseLibrary').addEventListener('click', closeLibraryManager);
 $('libraryManagerOverlay').addEventListener('click', (event) => { if (event.target === $('libraryManagerOverlay')) closeLibraryManager(); });
-$('modalForm').addEventListener('submit', (e) => { e.preventDefault(); if ($('modalInput').classList.contains('hidden')) resolveModal(true); else if ($('modalInput').value.trim()) resolveModal($('modalInput').value.trim()); });
-$('modalCancel').addEventListener('click', () => resolveModal($('modalCancel').textContent === '移除文件夹' ? false : null));
+$('modalForm').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const input = !$('modalInput').classList.contains('hidden'), name = $('modalInput').value.trim();
+  if (input && !name) return;
+  resolveModal(modalHasParent ? { name, parentId: $('modalParent').value || null } : input ? name : true);
+});
+$('modalCancel').addEventListener('click', () => resolveModal(null));
 $('modalOverlay').addEventListener('click', (e) => { if (e.target === $('modalOverlay')) resolveModal(null); });
 $('previewClose').addEventListener('click', closePreview);
 $('previewBack').addEventListener('click', () => cylinderPreview.exitSingle());

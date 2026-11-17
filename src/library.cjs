@@ -6,6 +6,7 @@ const { createReadStream } = require('node:fs');
 const { VIDEO, MODEL, MODEL_NATIVE, PROJECT, SUPPORTED } = require('./media-formats.cjs');
 const { collectModelBundle, copyModelBundle, validateModelBundle, isSafeBundlePath } = require('./model-bundle.cjs');
 const { validateProjectBundle, copyProjectBundle } = require('./project-bundle.cjs');
+const FolderTree = require('./folder-tree.js');
 const mediaType = ext => PROJECT.has(ext) ? 'project' : MODEL.has(ext) ? 'model' : VIDEO.has(ext) ? 'video' : 'image';
 const bundleRelative = (id, ext) => `originals/${id}.${PROJECT.has(ext) ? 'project' : 'model'}`;
 const isBundle = ext => MODEL.has(ext) || PROJECT.has(ext);
@@ -102,6 +103,18 @@ async function hashFile(filename) {
   return hash.digest('hex');
 }
 
+async function replaceIndexFile(source, destination) {
+  // Windows scanners and readers can briefly deny replacing an existing file.
+  // Retry the atomic rename itself; never unlink the current valid index.
+  for (let attempt = 0; ; attempt++) {
+    try { await fs.rename(source, destination); return; }
+    catch (error) {
+      if (!['EPERM', 'EACCES', 'EBUSY'].includes(error.code) || attempt >= 5) throw error;
+      await new Promise(resolve => setTimeout(resolve, 25 * (attempt + 1)));
+    }
+  }
+}
+
 function deletionFiles(manifest) {
   if (manifest?.version !== 1 || !Array.isArray(manifest.assets) || !manifest.assets.length) throw new Error('永久删除清单无效');
   const ids = new Set();
@@ -177,12 +190,9 @@ class Library {
   }
 
   _validate(data) {
-    if (!data || data.version !== 1 || !Array.isArray(data.assets) || !Array.isArray(data.folders)) throw new Error('索引格式无效或版本不受支持');
-    const folderIds = new Set();
-    for (const folder of data.folders) {
-      if (!folder || typeof folder.id !== 'string' || folderIds.has(folder.id) || typeof folder.name !== 'string' || !folder.name.trim()) throw new Error('分类索引无效');
-      folderIds.add(folder.id);
-    }
+    if (!data || ![1, 2].includes(data.version) || !Array.isArray(data.assets) || !Array.isArray(data.folders)) throw new Error('索引格式无效或版本不受支持');
+    FolderTree.validate(data.folders);
+    const folderIds = new Set(data.folders.map(folder => folder.id));
     const assetIds = new Set();
     for (const asset of data.assets) {
       if (!asset || typeof asset.id !== 'string' || !/^[a-zA-Z0-9-]+$/.test(asset.id) || assetIds.has(asset.id) || typeof asset.name !== 'string' || !SUPPORTED.has(asset.ext) || !Array.isArray(asset.tags) || asset.tags.some(tag => typeof tag !== 'string') || typeof asset.hash !== 'string' || !/^[a-f0-9]{64}$/.test(asset.hash) || !Number.isFinite(asset.size) || asset.size < 0 || !Number.isFinite(asset.rating) || asset.rating < 0 || asset.rating > 5 || typeof asset.notes !== 'string' || (asset.folderId !== null && !folderIds.has(asset.folderId))) throw new Error('素材索引无效');
@@ -212,6 +222,10 @@ class Library {
   async flush() { await this._queue; }
 
   async _persist(data) {
+    // Older releases ignore folder parents. Mark a hierarchical library with a
+    // format they reject, and retain that format after the last child is removed.
+    // Keep the caller's draft and current data untouched until the write succeeds.
+    if (data?.version === 1 && (this.data?.version === 2 || Array.isArray(data.folders) && data.folders.some(folder => FolderTree.parentId(folder) !== null))) data = { ...data, version: 2 };
     this._validate(data);
     const temporary = `${this.indexPath}.${crypto.randomUUID()}.tmp`;
     try {
@@ -220,7 +234,7 @@ class Library {
       finally { await handle.close(); }
       try { await fs.copyFile(this.indexPath, path.join(this.root, 'index.backup.json')); }
       catch (error) { if (error.code !== 'ENOENT') throw error; }
-      await fs.rename(temporary, this.indexPath);
+      await replaceIndexFile(temporary, this.indexPath);
       this.data = data;
     } catch (error) {
       await fs.rm(temporary, { force: true }).catch(() => {});
@@ -243,7 +257,7 @@ class Library {
     return {
       root: this.root,
       assets,
-      folders: clone(this.data.folders),
+      folders: clone(this.data.folders).map(folder => ({ ...folder, parentId: FolderTree.parentId(folder) })),
       tags: [...tagCounts].map(([name, count]) => ({ name, count })).sort((a, b) => a.name.localeCompare(b.name, 'zh-CN')),
       stats: { total: assets.length, active: active.length, trashed: assets.length - active.length, untagged: active.filter(a => !a.tags.length).length, unfiled: active.filter(a => !a.folderId).length, bytes: assets.reduce((sum, a) => sum + a.size, 0) }
     };
@@ -637,12 +651,13 @@ class Library {
     });
   }
 
-  createFolder(name) {
+  createFolder(name, parentId = null) {
     return this._mutate(async () => {
-      name = text(name, '分类名称', 100);
-      if (this.data.folders.some(folder => folder.name === name)) throw new Error('该分类名称已存在');
+      name = text(name, '文件夹名称', 100);
+      this._folder(parentId);
+      if (this.data.folders.some(folder => FolderTree.parentId(folder) === parentId && folder.name === name)) throw new Error('同级文件夹中已存在此名称');
       const draft = clone(this.data);
-      draft.folders.push({ id: crypto.randomUUID(), name, createdAt: now() });
+      draft.folders.push({ id: crypto.randomUUID(), name, parentId, createdAt: now() });
       await this._persist(draft);
       return this.snapshot();
     });
@@ -652,10 +667,26 @@ class Library {
     return this._mutate(async () => {
       this._folder(id);
       if (id === null) throw new Error('分类不存在');
-      name = text(name, '分类名称', 100);
-      if (this.data.folders.some(folder => folder.id !== id && folder.name === name)) throw new Error('该分类名称已存在');
+      name = text(name, '文件夹名称', 100);
+      const parentId = FolderTree.parentId(this.data.folders.find(folder => folder.id === id));
+      if (this.data.folders.some(folder => folder.id !== id && FolderTree.parentId(folder) === parentId && folder.name === name)) throw new Error('同级文件夹中已存在此名称');
       const draft = clone(this.data);
       draft.folders.find(folder => folder.id === id).name = name;
+      await this._persist(draft);
+      return this.snapshot();
+    });
+  }
+
+  moveFolder(id, parentId = null) {
+    return this._mutate(async () => {
+      this._folder(id); this._folder(parentId);
+      if (id === null) throw new Error('分类不存在');
+      if (id === parentId || FolderTree.descendantIds(this.data.folders, id).has(parentId)) throw new Error('文件夹不能移入自己或自己的子文件夹');
+      const folder = this.data.folders.find(item => item.id === id);
+      if (FolderTree.parentId(folder) === parentId) return this.snapshot();
+      if (this.data.folders.some(item => item.id !== id && FolderTree.parentId(item) === parentId && item.name === folder.name)) throw new Error('同级文件夹中已存在此名称');
+      const draft = clone(this.data);
+      Object.assign(draft.folders.find(item => item.id === id), { parentId, updatedAt: now() });
       await this._persist(draft);
       return this.snapshot();
     });
@@ -665,9 +696,10 @@ class Library {
     return this._mutate(async () => {
       this._folder(id);
       if (id === null) throw new Error('分类不存在');
+      const removed = FolderTree.descendantIds(this.data.folders, id);
       const draft = clone(this.data);
-      draft.folders = draft.folders.filter(folder => folder.id !== id);
-      for (const asset of draft.assets) if (asset.folderId === id) Object.assign(asset, { folderId: null, updatedAt: now() });
+      draft.folders = draft.folders.filter(folder => !removed.has(folder.id));
+      for (const asset of draft.assets) if (removed.has(asset.folderId)) Object.assign(asset, { folderId: null, updatedAt: now() });
       await this._persist(draft);
       return this.snapshot();
     });
