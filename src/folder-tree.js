@@ -15,6 +15,7 @@
           typeof folder.name !== 'string' || !folder.name.trim()) throw new Error('文件夹索引无效');
       const parent = parentId(folder);
       if (parent !== null && typeof parent !== 'string') throw new Error('文件夹父级无效');
+      if (folder.sortOrder !== undefined && (!Number.isSafeInteger(folder.sortOrder) || folder.sortOrder < 0)) throw new Error('文件夹排序无效');
       byId.set(folder.id, folder);
       if (!siblings.has(parent)) siblings.set(parent, new Set());
       if (siblings.get(parent).has(folder.name)) throw new Error('同级文件夹中已存在此名称');
@@ -55,8 +56,17 @@
       if (!children.has(parent)) children.set(parent, []);
       children.get(parent).push(folder);
     }
+    // Legacy folders keep their sibling position. This fallback also keeps a
+    // newly appended folder at the end if undo removes older sortOrder fields.
+    for (const list of children.values()) {
+      const positions = new Map(list.map((folder, index) => [folder.id, index]));
+      list.sort((left, right) => (left.sortOrder ?? positions.get(left.id)) - (right.sortOrder ?? positions.get(right.id)) ||
+        positions.get(left.id) - positions.get(right.id));
+    }
     return { byId, children };
   }
+
+  function children(folders, id = null) { return (tree(folders).children.get(id) || []).slice(); }
 
   function flatten(folders) {
     const { children } = tree(folders), result = [];
@@ -89,5 +99,5 @@
     return result;
   }
 
-  return Object.freeze({ MAX_DEPTH, parentId, validate, flatten, path, descendantIds });
+  return Object.freeze({ MAX_DEPTH, parentId, validate, children, flatten, path, descendantIds });
 });

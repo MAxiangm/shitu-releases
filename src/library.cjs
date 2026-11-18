@@ -8,6 +8,8 @@ const { collectModelBundle, copyModelBundle, validateModelBundle, isSafeBundlePa
 const { validateProjectBundle, copyProjectBundle } = require('./project-bundle.cjs');
 const FolderTree = require('./folder-tree.js');
 const ColorLabels = require('./color-labels.js');
+const FolderIcons = require('./folder-icons.js');
+const FolderIconFiles = require('./folder-icons.cjs');
 const { MetadataHistory, sameField } = require('./metadata-history.cjs');
 const SmartFolders = require('./smart-folders.js');
 const mediaType = (ext, stored) => PROJECT.has(ext) ? 'project' : MODEL.has(ext) ? 'model'
@@ -242,8 +244,9 @@ class Library {
       const backupExists = await fs.access(path.join(this.root, 'index.backup.json')).then(() => true, failure => { if (failure.code === 'ENOENT') return false; throw failure; });
       const originalFiles = await fs.readdir(path.join(this.root, 'originals')).catch(failure => { if (failure.code === 'ENOENT') return []; throw failure; });
       const thumbnailFiles = await fs.readdir(path.join(this.root, 'thumbnails')).catch(failure => { if (failure.code === 'ENOENT') return []; throw failure; });
+      const folderIconFiles = await fs.readdir(path.join(this.root, 'folder-icons')).catch(failure => { if (failure.code === 'ENOENT') return []; throw failure; });
       const pendingDeletion = (await fs.readdir(this.root)).some(name => PENDING_DELETE.test(name) || PENDING_BUNDLE_REPAIR.test(name));
-      if (backupExists || originalFiles.length || thumbnailFiles.length || pendingDeletion) throw new Error('素材库索引缺失，但发现已有素材或备份，已保留原文件。请恢复 index.json 后重新打开。');
+      if (backupExists || originalFiles.length || thumbnailFiles.length || folderIconFiles.length || pendingDeletion) throw new Error('素材库索引缺失，但发现已有素材或备份，已保留原文件。请恢复 index.json 后重新打开。');
       const data = { version: 1, assets: [], folders: [] };
       await this._persist(data);
     }
@@ -268,7 +271,11 @@ class Library {
         ids.add(folder.id);
       }
     }
-    for (const folder of data.folders) ColorLabels.normalize(folder.colorLabel);
+    for (const folder of data.folders) {
+      ColorLabels.normalize(folder.colorLabel);
+      FolderIcons.normalizeIcon(folder.icon);
+      FolderIcons.normalizeColor(folder.iconColor);
+    }
     const folderIds = new Set(data.folders.map(folder => folder.id));
     const assetIds = new Set();
     for (const asset of data.assets) {
@@ -364,7 +371,7 @@ class Library {
 
   listFolders() {
     this._ready();
-    return this.data.folders.map(({ id, name, parentId = null }) => ({ id, name, parentId }));
+    return FolderTree.flatten(this.data.folders).map(({ id, name, parentId = null }) => ({ id, name, parentId }));
   }
 
   hasAsset(id) {
@@ -886,7 +893,12 @@ class Library {
       this._folder(parentId);
       if (this.data.folders.some(folder => FolderTree.parentId(folder) === parentId && folder.name === name)) throw new Error('同级文件夹中已存在此名称');
       const draft = clone(this.data);
-      draft.folders.push({ id: crypto.randomUUID(), name, parentId, createdAt: now() });
+      const siblings = FolderTree.children(draft.folders, parentId);
+      const ordered = siblings.some(folder => folder.sortOrder !== undefined);
+      // Appending to an arranged group must not jump in front of its children.
+      const nextOrder = ordered ? siblings.reduce((maximum, folder, index) => Math.max(maximum, folder.sortOrder ?? index), -1) + 1 : null;
+      if (ordered && !Number.isSafeInteger(nextOrder)) throw new Error('文件夹排序超出范围，请先调整同级顺序');
+      draft.folders.push({ id: crypto.randomUUID(), name, parentId, createdAt: now(), ...(ordered ? { sortOrder: nextOrder } : {}) });
       await this._persist(draft);
       return this.snapshot();
     });
@@ -926,6 +938,68 @@ class Library {
     });
   }
 
+  async _saveFolderAppearance(id, key, value, record, label) {
+    this._folder(id);
+    if (id === null) throw new Error('分类不存在');
+    const folder = this.data.folders.find(item => item.id === id);
+    const normalize = key === 'icon' ? FolderIcons.normalizeIcon : FolderIcons.normalizeColor;
+    if (JSON.stringify(normalize(folder[key])) === JSON.stringify(value)) return this.snapshot();
+    const draft = clone(this.data), changed = draft.folders.find(item => item.id === id);
+    if (value === null) delete changed[key];
+    else changed[key] = value;
+    changed.updatedAt = now();
+    const entry = record ? this._history.prepare(this.data, draft, 'folders', new Set([id]), [key], label) : null;
+    await this._persist(draft);
+    this._history.record(entry);
+    return this.snapshot();
+  }
+
+  setFolderIcon(id, name, options = {}) {
+    return this._mutate(async () => {
+      const record = this._recordHistory(options);
+      const icon = name === null || name === 'folder' ? null : FolderIcons.normalizeIcon({ type: 'builtin', name });
+      return this._saveFolderAppearance(id, 'icon', icon, record, '修改文件夹图标');
+    });
+  }
+
+  setFolderIconColor(id, color, options = {}) {
+    return this._mutate(async () => this._saveFolderAppearance(id, 'iconColor', FolderIcons.normalizeColor(color), this._recordHistory(options), '修改图标颜色'));
+  }
+
+  importFolderIcon(id, filename, options = {}) {
+    return this._mutate(async () => {
+      const record = this._recordHistory(options);
+      this._folder(id);
+      if (id === null) throw new Error('分类不存在');
+      const icon = await FolderIconFiles.importImage(this.root, filename);
+      // Retain immutable previous images for history and index.backup.json.
+      return this._saveFolderAppearance(id, 'icon', icon, record, '自定义文件夹图标');
+    });
+  }
+
+  async readFolderIcon(id, expectedHash) {
+    this._ready();
+    const icon = FolderIcons.normalizeIcon(this.data.folders.find(folder => folder.id === id)?.icon);
+    if (icon?.type !== 'image' || icon.hash !== expectedHash) throw new Error('文件夹图标已更改或不存在');
+    const result = await FolderIconFiles.readStored(this.root, icon);
+    if (this.data.folders.find(folder => folder.id === id)?.icon?.hash !== expectedHash) throw new Error('文件夹图标已更改或不存在');
+    return result;
+  }
+
+  async verifyFolderIcons() {
+    this._ready();
+    const verified = new Set();
+    for (const folder of this.data.folders) {
+      const icon = FolderIcons.normalizeIcon(folder.icon);
+      if (icon?.type !== 'image') continue;
+      const reference = JSON.stringify(icon);
+      if (verified.has(reference)) continue;
+      try { await FolderIconFiles.readStored(this.root, icon, { decode: true }); }
+      catch (error) { throw new Error(`文件夹“${folder.name}”的自定义图标校验失败：${error.message}`); }
+      verified.add(reference);
+    }
+  }
+
   moveFolder(id, parentId = null, options = {}) {
     return this._mutate(async () => {
       const record = this._recordHistory(options);
@@ -933,11 +1007,36 @@ class Library {
       if (id === null) throw new Error('分类不存在');
       if (id === parentId || FolderTree.descendantIds(this.data.folders, id).has(parentId)) throw new Error('文件夹不能移入自己或自己的子文件夹');
       const folder = this.data.folders.find(item => item.id === id);
-      if (FolderTree.parentId(folder) === parentId) return this.snapshot();
+      const previousParent = FolderTree.parentId(folder);
+      const before = options.beforeId !== undefined, after = options.afterId !== undefined;
+      if (before && after) throw new Error('文件夹排序位置不能同时指定前后参照');
+      const anchorId = before ? options.beforeId : after ? options.afterId : undefined;
+      if (anchorId !== undefined) {
+        if (typeof anchorId !== 'string' || anchorId === id) throw new Error('文件夹排序参照无效');
+        const anchor = this.data.folders.find(item => item.id === anchorId);
+        if (!anchor || FolderTree.parentId(anchor) !== parentId) throw new Error('排序参照不在目标文件夹层级中');
+      }
+      if (previousParent === parentId && anchorId === undefined) return this.snapshot();
       if (this.data.folders.some(item => item.id !== id && FolderTree.parentId(item) === parentId && item.name === folder.name)) throw new Error('同级文件夹中已存在此名称');
+      const previousOrder = FolderTree.children(this.data.folders, parentId).map(item => item.id);
+      const nextOrder = previousOrder.filter(value => value !== id);
+      const anchorIndex = anchorId === undefined ? nextOrder.length : nextOrder.indexOf(anchorId) + (after ? 1 : 0);
+      nextOrder.splice(anchorIndex, 0, id);
+      if (previousParent === parentId && nextOrder.every((value, index) => value === previousOrder[index])) return this.snapshot();
       const draft = clone(this.data);
-      Object.assign(draft.folders.find(item => item.id === id), { parentId, updatedAt: now() });
-      const entry = record ? this._history.prepare(this.data, draft, 'folders', new Set([id]), ['parentId'], '移动文件夹') : null;
+      const byId = new Map(draft.folders.map(item => [item.id, item]));
+      Object.assign(byId.get(id), { parentId, updatedAt: now() });
+      const affected = new Set([id]);
+      for (const [index, siblingId] of nextOrder.entries()) {
+        const sibling = byId.get(siblingId);
+        sibling.sortOrder = index; affected.add(siblingId);
+      }
+      if (previousParent !== parentId) {
+        FolderTree.children(draft.folders, previousParent).forEach((sibling, index) => {
+          sibling.sortOrder = index; affected.add(sibling.id);
+        });
+      }
+      const entry = record ? this._history.prepare(this.data, draft, 'folders', affected, ['parentId', 'sortOrder'], previousParent === parentId ? '调整文件夹顺序' : '移动文件夹') : null;
       await this._persist(draft);
       this._history.record(entry);
       return this.snapshot();

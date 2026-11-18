@@ -205,6 +205,8 @@ class LibraryManager {
           throw new Error(`迁移校验失败：${asset.name}。原素材库仍保留，未切换位置。${error.message}`);
         }
       }
+      try { await candidate.verifyFolderIcons(); }
+      catch (error) { throw new Error(`迁移校验失败。原素材库仍保留，未切换位置。${error.message}`); }
       return candidate;
     });
   }

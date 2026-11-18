@@ -8,6 +8,7 @@ const { pathToFileURL } = require('node:url');
 const { LibraryManager } = require('./library-manager.cjs');
 const { createCollector } = require('./collector.cjs');
 const { mediaResponse } = require('./media-response.cjs');
+const FolderIconFiles = require('./folder-icons.cjs');
 const { resolveAssetFiles, createDragIcon } = require('./asset-actions.cjs');
 const { assetMenuTemplate } = require('./asset-menu.cjs');
 const sharp = require('sharp');
@@ -657,9 +658,38 @@ function bindHandlers() {
     return saveUserMetadata('deletePermanently', [ids], { expectedRoot });
   });
   checkedHandler('create-folder', (name, parentId = null) => saveUserMetadata('createFolder', [name, parentId]));
-  checkedHandler('move-folder', (id, parentId = null) => saveUserMetadata('moveFolder', [id, parentId], { recordHistory: true }));
+  checkedHandler('move-folder', (id, parentId = null, placement = {}, expectedRoot) => {
+    if (!placement || typeof placement !== 'object' || Array.isArray(placement) ||
+        Object.keys(placement).some(key => !['beforeId', 'afterId'].includes(key))) throw new Error('文件夹放置位置无效');
+    const options = { recordHistory: true };
+    for (const key of ['beforeId', 'afterId']) if (placement[key] !== undefined) {
+      if (typeof placement[key] !== 'string' || !placement[key] || placement[key].length > 512) throw new Error('文件夹放置位置无效');
+      options[key] = placement[key];
+    }
+    if (options.beforeId && options.afterId) throw new Error('文件夹放置位置无效');
+    return saveUserMetadata('moveFolder', [id, parentId, options], { expectedRoot });
+  });
   checkedHandler('rename-folder', (id, name) => saveUserMetadata('renameFolder', [id, name], { recordHistory: true }));
   checkedHandler('set-folder-color', (id, colorLabel) => saveUserMetadata('setFolderColor', [id, colorLabel], { recordHistory: true }));
+  checkedHandler('set-folder-icon', (id, name, expectedRoot) => {
+    if (typeof expectedRoot !== 'string' || expectedRoot !== requireLibrary().root) throw new Error('素材库已切换，请重新选择文件夹');
+    return saveUserMetadata('setFolderIcon', [id, name], { recordHistory: true, expectedRoot });
+  });
+  checkedHandler('set-folder-icon-color', (id, color, expectedRoot) => {
+    if (typeof expectedRoot !== 'string' || expectedRoot !== requireLibrary().root) throw new Error('素材库已切换，请重新选择文件夹');
+    return saveUserMetadata('setFolderIconColor', [id, color], { recordHistory: true, expectedRoot });
+  });
+  checkedHandler('choose-folder-icon', async (id, expectedRoot) => {
+    const current = requireLibrary();
+    if (typeof expectedRoot !== 'string' || expectedRoot !== current.root) throw new Error('素材库已切换，请重新选择文件夹');
+    if (!current.snapshot().folders.some(folder => folder.id === id)) throw new Error('文件夹已不存在');
+    const choice = await dialog.showOpenDialog(mainWindow, { title: '选择文件夹图标', properties: ['openFile'],
+      filters: [{ name: '图片与动画', extensions: [...FolderIconFiles.IMPORT_EXTENSIONS] }] });
+    if (library !== current || expectedRoot !== current.root) throw new Error('素材库已切换，请重新选择文件夹');
+    if (choice.canceled) return null;
+    if (choice.filePaths.length !== 1) throw new Error('请选择一张图标图片');
+    return saveUserMetadata('importFolderIcon', [id, choice.filePaths[0]], { recordHistory: true, expectedRoot });
+  });
   checkedHandler('delete-folder', id => saveUserMetadata('deleteFolder', [id]));
   checkedHandler('export-assets', async ids => {
     requireLibrary();
@@ -842,6 +872,11 @@ else {
     protocol.handle('shitu', async request => {
       try {
         const url = new URL(request.url);
+        if (url.hostname === 'folder-icon') {
+          const current = library;
+          const result = await FolderIconFiles.response(current, request);
+          return current === library ? result : new Response(null, { status: 404 });
+        }
         if (url.hostname === 'model') return modelService.response(request);
         if (url.hostname === 'model-hover') return modelService.hoverResponse(request);
         if (url.hostname === 'font') return fontService.response(request);

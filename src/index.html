@@ -10,6 +10,7 @@
   <link rel="stylesheet" href="./font-preview.css">
   <link rel="stylesheet" href="./batch-rename.css">
   <link rel="stylesheet" href="./font-compare.css">
+  <link rel="stylesheet" href="./folder-icons.css">
   <link rel="stylesheet" href="./smart-folders.css">
   <link rel="stylesheet" href="./organize-tools.css">
   <link rel="stylesheet" href="./skins-base.css">
@@ -101,7 +102,7 @@
       <div class="collection-navigation" aria-label="素材导航">
         <nav id="mainNav" aria-label="资料库"></nav>
         <div class="collection-menus">
-          <details id="folderBrowser" class="collection-menu folder-browser"><summary id="folderBrowserToggle" aria-controls="folderNav" aria-expanded="false" title="展开文件夹列表"><svg class="icon"><use href="#i-folder"/></svg><span id="folderBrowserLabel">文件夹</span><svg class="icon tiny"><use href="#i-chevron"/></svg></summary><div id="folderPanel" class="browser-popover"><div class="section-label section-heading"><span>文件夹</span><div class="folder-panel-heading-actions"><button id="newFolder" class="icon-button" aria-label="新建文件夹" title="新建文件夹"><svg class="icon"><use href="#i-plus"/></svg></button><button id="folderPanelPin" class="folder-panel-pin" type="button" aria-label="固定到左侧" aria-pressed="false" title="固定到左侧"><svg class="icon" aria-hidden="true"><use href="#i-pin"/></svg><span id="folderPanelPinLabel">固定</span></button></div></div><nav id="folderNav" aria-label="文件夹层级"></nav><p class="sidebar-hint" id="folderHint">还没有文件夹，点击右上角 ＋ 新建</p><div class="section-label section-heading smart-folder-heading"><span>智能文件夹</span><button id="newSmartFolder" class="icon-button" type="button" aria-label="新建智能文件夹" title="按筛选条件创建智能文件夹"><svg class="icon"><use href="#i-plus"/></svg></button></div><nav id="smartFolderNav" aria-label="智能文件夹"></nav><p class="sidebar-hint" id="smartFolderHint">保存条件，自动汇总匹配的素材</p></div></details>
+          <details id="folderBrowser" class="collection-menu folder-browser"><summary id="folderBrowserToggle" aria-controls="folderNav" aria-expanded="false" title="展开文件夹列表"><svg class="icon"><use href="#i-folder"/></svg><span id="folderBrowserLabel">文件夹</span><svg class="icon tiny"><use href="#i-chevron"/></svg></summary><div id="folderPanel" class="browser-popover"><div class="section-label section-heading"><span>文件夹</span><div class="folder-panel-heading-actions"><button id="newFolder" class="icon-button" aria-label="新建文件夹" title="新建文件夹"><svg class="icon"><use href="#i-plus"/></svg></button><button id="folderPanelPin" class="folder-panel-pin" type="button" aria-label="固定到左侧" aria-pressed="false" title="固定到左侧"><svg class="icon" aria-hidden="true"><use href="#i-pin"/></svg><span id="folderPanelPinLabel">固定</span></button></div></div><div id="folderRootDropTarget" class="folder-root-drop-target hidden" aria-hidden="true"><svg class="icon" aria-hidden="true"><use href="#i-folder"/></svg><span>移至最外层末尾</span></div><nav id="folderNav" aria-label="文件夹层级"></nav><p class="sidebar-hint" id="folderHint">还没有文件夹，点击右上角 ＋ 新建</p><div class="section-label section-heading smart-folder-heading"><span>智能文件夹</span><button id="newSmartFolder" class="icon-button" type="button" aria-label="新建智能文件夹" title="按筛选条件创建智能文件夹"><svg class="icon"><use href="#i-plus"/></svg></button></div><nav id="smartFolderNav" aria-label="智能文件夹"></nav><p class="sidebar-hint" id="smartFolderHint">保存条件，自动汇总匹配的素材</p></div></details>
           <details class="collection-menu tag-browser"><summary><svg class="icon"><use href="#i-tag"/></svg>标签<span id="tagCount" class="small-count">0</span><svg class="icon tiny"><use href="#i-chevron"/></svg></summary><div class="browser-popover"><div class="section-label">标签</div><div id="tagNav" class="tag-nav"></div><p class="sidebar-hint" id="tagHint">选择图片，为它添加第一个标签</p></div></details>
         </div>
       </div>
@@ -251,6 +252,7 @@
   <div id="folderContextMenu" class="folder-context-menu hidden" role="menu" aria-label="文件夹操作"></div>
   <div id="toastStack" class="toast-stack" aria-live="polite"></div>
   <div id="assetDragGhost" class="asset-drag-ghost hidden" role="status" aria-live="polite"></div>
+  <div id="folderDragGhost" class="folder-drag-ghost hidden" role="status" aria-live="polite"></div>
   <script src="./particle-background.js"></script>
   <script src="./brand-motion.js"></script>
   <script src="./cylinder-preview.js"></script>
@@ -258,10 +260,14 @@
   <script src="./folder-tree.js"></script>
   <script src="./folder-navigation.js"></script>
   <script src="./color-labels.js"></script>
+  <script src="./folder-icons.js"></script>
+  <script src="./folder-icon-view.js"></script>
+  <script src="./folder-icons-ui.js"></script>
   <script src="./video-hover.js"></script>
   <script src="./model-hover.js"></script>
   <script src="./model-warmup.js"></script>
   <script src="./asset-folder-drag.js"></script>
+  <script src="./folder-tree-drag.js"></script>
   <script src="./history-ui.js"></script>
   <script src="./batch-rename.js"></script>
   <script src="./font-compare.js"></script>

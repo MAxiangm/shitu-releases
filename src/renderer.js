@@ -6,6 +6,7 @@ const SVG = 'http://www.w3.org/2000/svg';
 const folderTree = window.ShituFolders;
 const folderNavigation = window.ShituFolderNavigation.create({ limit: 80 });
 const colorLabels = window.ShituColorLabels;
+const folderIcons = window.ShituFolderIcons;
 const historyControls = window.ShituHistoryUi;
 const assetHealth = window.ShituAssetHealth;
 const state = { library: { assets: [], folders: [], smartFolders: [], tags: [], stats: {}, root: null, needsLibrary: true }, view: 'all', folder: null, smartFolder: null, tag: null, selected: new Set(), selectionMode: false, anchor: null, search: '', format: 'all', missingResources: false, sort: 'newest', limit: 240, previewId: null, details: false, busy: false, libraryChanging: false };
@@ -22,6 +23,15 @@ let closeReady = false;
 let closing = false;
 let libraryRefreshSerial = 0;
 let draggingAssets = false;
+let draggingFolders = false;
+let folderMoveSaving = false;
+let suppressFolderClickUntil = 0;
+let folderDragPosition = null;
+let folderDragPayload = null;
+let folderDragScrollFrame = 0;
+let folderDragExpandTimer = null;
+let folderDragExpandId = null;
+let folderDragTarget = null;
 let nativeAssetDrag = false;
 let dragTargetNode = null;
 let dragPosition = null;
@@ -53,7 +63,7 @@ const audioPreview = window.ShituAudioPreview.create({
 });
 const galleryPreviewGuards = {
   allowed: () => !state.selectionMode && !state.previewId && !state.busy && !state.libraryChanging &&
-    !draggingAssets && !deletingAssets && !closing && !document.hidden && !featureDialogOpen() &&
+    !draggingAssets && !draggingFolders && !folderMoveSaving && !deletingAssets && !closing && !document.hidden && !featureDialogOpen() &&
     !document.querySelector('.modal-overlay:not(.hidden),.preview:not(.hidden),.sp-overlay:not([hidden])') &&
     $('folderContextMenu').classList.contains('hidden'),
   current: (asset, root) => state.library.root === root && state.library.assets.some(item => item.id === asset.id && item.hash === asset.hash)
@@ -92,6 +102,17 @@ const assetFolderDrag = window.ShituAssetFolderDrag.create({
   external: startExternalAssetDrag,
   error: messageError
 });
+const folderTreeDrag = window.ShituFolderTreeDrag.create({
+  prepare: prepareFolderTreeDrag,
+  current: folderTreeDragIsCurrent,
+  targetAt: folderTreeDropTarget,
+  start: startFolderTreeDrag,
+  move: positionFolderTreeDrag,
+  target: highlightFolderTreeTarget,
+  finish: finishFolderTreeDrag,
+  drop: (payload, destination) => { void run(() => moveDraggedFolder(payload, destination)); },
+  error: messageError
+});
 const updateUi = {
   snapshot: { status: 'idle', currentVersion: '', latestVersion: '', progress: 0 },
   pending: false, preparingInstall: false, previousFocus: null, notices: new Set(), revision: 0
@@ -114,6 +135,13 @@ const smartFoldersUi = window.ShituSmartFoldersUi.create({
   onApplied: snapshot => { if (snapshot.root === state.library.root) applyLibrary(snapshot); }, onError: messageError,
   getContext: () => ({ root: state.library.root })
 });
+const folderIconsUi = window.ShituFolderIconsUi.create({
+  setIcon: (id, name, root) => saveFolderAppearance(root, () => api.setFolderIcon(id, name, root)),
+  setColor: (id, color, root) => saveFolderAppearance(root, () => api.setFolderIconColor(id, color, root)),
+  chooseImage: (id, root) => saveFolderAppearance(root, () => api.chooseFolderIcon(id, root)),
+  getContext: () => ({ root: state.library.root, folders: state.library.folders }),
+  onClose: id => $('folderNav').querySelector(`.nav-item[data-folder-id="${CSS.escape(id)}"]`)?.focus({ preventScroll: true })
+});
 const similarImagesUi = window.ShituSimilarImages.create({
   find: api.findSimilarImages, cancel: api.cancelSimilarImages, assetUrl: api.assetUrl,
   lookupAsset: id => state.library.assets.find(asset => asset.id === id && !asset.trashedAt),
@@ -124,7 +152,7 @@ const similarImagesUi = window.ShituSimilarImages.create({
     if (asset) showAssetInOverview(asset, state.library);
   })
 });
-function featureDialogOpen() { return skinPickerUi.isOpen() || batchRenameUi.isOpen() || fontCompareUi.isOpen() || smartFoldersUi.isOpen() || similarImagesUi.isOpen(); }
+function featureDialogOpen() { return skinPickerUi.isOpen() || batchRenameUi.isOpen() || fontCompareUi.isOpen() || smartFoldersUi.isOpen() || folderIconsUi.isOpen() || similarImagesUi.isOpen(); }
 function activeSmartFolder() { return (state.library.smartFolders || []).find(folder => folder.id === state.smartFolder) || null; }
 async function openBatchRename(ids = [...state.selected]) {
   const root = state.library.root;
@@ -162,6 +190,29 @@ function icon(name) {
   use.setAttribute('href', `#i-${name}`);
   node.append(use);
   return node;
+}
+function folderIcon(folder) {
+  return window.ShituFolderIconView.create(folder, { imageUrl: folderIcons.iconUrl, fallbackColor: colorLabels.get(folder?.colorLabel)?.color });
+}
+async function saveFolderAppearance(root, operation) {
+  flushDetailDrafts();
+  let snapshot = null, failure = null;
+  await saveMetadata(async () => {
+    try {
+      if (state.library.root !== root || state.libraryChanging) throw new Error('素材库已切换，请重新设置图标');
+      snapshot = await operation();
+      return state.library.root === root ? snapshot : null;
+    } catch (error) { failure = error; throw error; }
+  });
+  if (failure) throw failure;
+  return state.library.root === root ? snapshot : null;
+}
+async function openFolderIconEditor(folder) {
+  folderTreeDrag.cancel(); assetFolderDrag.cancel(); closeFolderMenu(); stopGalleryPreviews();
+  const root = state.library.root;
+  if (!await waitForMetadata() || state.library.root !== root || state.libraryChanging) return;
+  const current = state.library.folders.find(item => item.id === folder.id);
+  if (current) folderIconsUi.open(current, root);
 }
 function action(label, className, handler, glyph) {
   const node = el('button', className);
@@ -355,7 +406,7 @@ async function loadTranscodeSettings(refresh = false) {
 }
 function openTranscodeSettings() {
   const ui = transcodeSettingsUi;
-  assetFolderDrag.cancel(); stopGalleryPreviews(); closeFolderMenu();
+  folderTreeDrag.cancel(); assetFolderDrag.cancel(); stopGalleryPreviews(); closeFolderMenu();
   if (state.previewId) closePreview();
   ui.previousFocus = document.activeElement;
   ui.returnToTranscode = !$('videoTranscodeOverlay').classList.contains('hidden');
@@ -489,7 +540,7 @@ function receiveVideoTranscode(snapshot, notify = true) {
   }
 }
 function openVideoTranscode(ids, preset) {
-  assetFolderDrag.cancel(); stopGalleryPreviews(); closeFolderMenu();
+  folderTreeDrag.cancel(); assetFolderDrag.cancel(); stopGalleryPreviews(); closeFolderMenu();
   if (state.previewId) closePreview();
   if (ids && !transcodeActive() && !transcodeUi.pending) {
     const assets = ids.map(id => state.library.assets.find(asset => asset.id === id));
@@ -647,7 +698,7 @@ async function waitForMetadata() {
   return true;
 }
 function historyBlocked() {
-  return !hasLibrary() || state.libraryChanging || state.busy || draggingAssets || nativeAssetDrag || assetFolderDrag.pending || deletingAssets || closing ||
+  return !hasLibrary() || state.libraryChanging || state.busy || draggingAssets || draggingFolders || folderMoveSaving || folderTreeDrag.pending || nativeAssetDrag || assetFolderDrag.pending || deletingAssets || closing ||
     Boolean(state.previewId || modalResolve || featureDialogOpen() || window.shituPlugins?.isOpen() || document.querySelector('.modal-overlay:not(.hidden),.preview:not(.hidden),.sp-overlay:not([hidden]),#dropOverlay:not(.hidden)'));
 }
 function hasHistoryDrafts() {
@@ -798,6 +849,7 @@ function receiveUpdateState(snapshot, notify = true) {
 }
 
 function showAppUpdate() {
+  folderTreeDrag.cancel();
   assetFolderDrag.cancel();
   stopGalleryPreviews();
   updateUi.previousFocus = document.activeElement;
@@ -846,7 +898,7 @@ async function runUpdateAction(action) {
 
 async function installAppUpdate() {
   if (updateUi.pending || updateUi.snapshot.status !== 'downloaded') return;
-  if (state.busy || state.libraryChanging || draggingAssets || deletingAssets) {
+  if (state.busy || state.libraryChanging || draggingAssets || draggingFolders || folderMoveSaving || deletingAssets) {
     toast('请等待当前素材操作完成后再更新。', true);
     return;
   }
@@ -861,6 +913,7 @@ function applyLibrary(library, preserveSelection = true) {
   if (!library || !Array.isArray(library.assets)) return;
   libraryRefreshSerial += 1;
   const rootChanged = (state.library.root || '').toLowerCase() !== (library.root || '').toLowerCase();
+  if (folderTreeDrag.pending && (rootChanged || window.ShituFolderTreeDrag.fingerprint(state.library.folders) !== window.ShituFolderTreeDrag.fingerprint(library.folders))) folderTreeDrag.cancel();
   if (!rootChanged && state.previewId) {
     const previous = state.library.assets.find(item => item.id === state.previewId);
     const current = library.assets.find(item => item.id === state.previewId);
@@ -869,7 +922,7 @@ function applyLibrary(library, preserveSelection = true) {
   if (rootChanged) {
     setHeaderMenuOpen(false);
     similarImagesUi.close();
-    batchRenameUi.close(true); fontCompareUi.close(); smartFoldersUi.close(); skinPickerUi.close();
+    batchRenameUi.close(true); fontCompareUi.close(); smartFoldersUi.close(); folderIconsUi.close(true); skinPickerUi.close();
     closeFolderMenu();
     collapsedFolders.clear();
     closePreview();
@@ -946,6 +999,8 @@ function filteredAssets() {
   return list.sort(comparators[state.sort]);
 }
 function changeView(view, folder = null, tag = null, smartFolder = null) {
+  if (draggingFolders || folderMoveSaving) return;
+  folderTreeDrag.cancel();
   assetFolderDrag.cancel();
   similarImagesUi.close();
   flushDetailDrafts();
@@ -969,7 +1024,7 @@ function changeView(view, folder = null, tag = null, smartFolder = null) {
 }
 function folderLocation() { return { view: state.view, folder: state.folder, tag: state.tag, ...(state.smartFolder ? { smartFolder: state.smartFolder } : {}) }; }
 function setFolderPanelMode(mode, { persist = true, open = false, focus = false } = {}) {
-  if (!['dropdown', 'sidebar'].includes(mode) || draggingAssets || assetFolderDrag.active) return false;
+  if (!['dropdown', 'sidebar'].includes(mode) || draggingAssets || assetFolderDrag.active || folderTreeDrag.pending || folderMoveSaving) return false;
   const panel = $('folderPanel'), browser = $('folderBrowser'), sidebar = $('folderSidebar');
   const scrollTop = (folderPanelMode === 'sidebar' ? $('folderNav') : panel).scrollTop, active = document.activeElement;
   stopGalleryPreviews(); closeFolderMenu();
@@ -998,9 +1053,9 @@ function setFolderPanelMode(mode, { persist = true, open = false, focus = false 
 }
 function directChildFolders() {
   if (!hasLibrary() || state.view !== 'all' || state.tag || state.smartFolder) return [];
-  return state.library.folders.filter(folder => folderTree.parentId(folder) === currentFolder());
+  return folderTree.children(state.library.folders, currentFolder());
 }
-function canNavigateFolders() { return hasLibrary() && !state.libraryChanging && !state.busy && !draggingAssets && !deletingAssets && !closing && !featureDialogOpen(); }
+function canNavigateFolders() { return hasLibrary() && !state.libraryChanging && !state.busy && !draggingAssets && !draggingFolders && !folderMoveSaving && !deletingAssets && !closing && !featureDialogOpen(); }
 function navigateFolderHistory(direction) {
   if (!canNavigateFolders()) return;
   const destination = folderNavigation.travel(direction, state.library.root, state.library.folders, state.library.smartFolders || []);
@@ -1027,6 +1082,7 @@ function renderFolderNavigation() {
   const addCrumb = (name, folder, current = false, glyph) => {
     if (breadcrumbs.childNodes.length) { const separator = el('span', 'folder-breadcrumb-separator'); separator.setAttribute('aria-hidden', 'true'); separator.append(icon('chevron')); breadcrumbs.append(separator); }
     const button = action('', 'folder-breadcrumb', () => changeView('all', folder), glyph);
+    if (folder) button.prepend(folderIcon(state.library.folders.find(item => item.id === folder)));
     button.append(el('span', '', name));
     button.dataset.folderId = folder || '';
     button.title = name;
@@ -1081,6 +1137,8 @@ function renderNavigation() {
     collapsedDepth = null;
     const row = el('div', 'folder-row');
     row.dataset.folderId = folder.id;
+    row.draggable = false;
+    row.addEventListener('dragstart', event => event.preventDefault());
     if (folder.colorLabel) row.dataset.colorLabel = folder.colorLabel;
     row.dataset.depth = String(folder.depth);
     row.style.setProperty('--folder-depth', String(folder.depth));
@@ -1103,10 +1161,7 @@ function renderNavigation() {
     }, 'folder');
     item.dataset.folderId = folder.id;
     const folderColor = colorLabels.get(folder.colorLabel);
-    if (folderColor) {
-      item.querySelector('.icon').style.color = folderColor.color;
-      item.querySelector('.icon').style.fill = `${folderColor.color}22`;
-    }
+    item.querySelector('.icon').replaceWith(folderIcon(folder));
     item.append(el('span', 'nav-name', folder.name));
     const folderMark = colorMarker(folder.colorLabel, 'folder-color-mark');
     if (folderMark) item.append(folderMark);
@@ -1130,6 +1185,7 @@ function renderNavigation() {
     if (children && !expanded) collapsedDepth = folder.depth;
   }
   $('folderNav').replaceChildren(...folderRows);
+  if (draggingFolders) refreshFolderTreeDragRows();
   $('smartFolderNav').replaceChildren(...(state.library.smartFolders || []).map(folder => {
     const row = el('div', 'smart-folder-row');
     const item = action('', `nav-item${state.smartFolder === folder.id ? ' active' : ''}`, () => {
@@ -1147,6 +1203,8 @@ function renderNavigation() {
   }));
   $('smartFolderHint').classList.toggle('hidden', Boolean(state.library.smartFolders?.length));
   $('folderBrowserLabel').textContent = state.folder || state.smartFolder ? viewName() : '文件夹';
+  const currentFolderIcon = $('folderBrowserToggle').querySelector(':scope > .folder-icon, :scope > .icon');
+  currentFolderIcon?.replaceWith(state.folder ? folderIcon(state.library.folders.find(item => item.id === state.folder)) : icon('folder'));
   $('folderBrowserLabel').title = state.folder ? folderTree.path(state.library.folders, state.folder) : '文件夹';
   $('folderHint').classList.toggle('hidden', state.library.folders.length > 0);
   const tags = state.library.tags.map((tag) => typeof tag === 'string' ? { name: tag } : tag);
@@ -1251,7 +1309,8 @@ function renderFolderChildren() {
     }, 'folder');
     open.draggable = false; open.setAttribute('aria-label', `打开文件夹「${folder.name}」`); open.title = `打开文件夹：${folder.name}`;
     const color = colorLabels.get(folder.colorLabel);
-    if (color) { card.dataset.colorLabel = color.id; open.querySelector('.icon').style.color = color.color; open.querySelector('.icon').style.fill = `${color.color}22`; }
+    if (color) card.dataset.colorLabel = color.id;
+    open.querySelector('.icon').replaceWith(folderIcon(folder));
     const text = el('span', 'folder-card-text'), name = el('span', 'folder-card-name');
     const mark = colorMarker(folder.colorLabel, 'folder-color-mark'); if (mark) name.append(mark);
     name.append(el('span', '', folder.name));
@@ -1380,8 +1439,136 @@ function beginAssetDrag(event, asset) {
   if (!assetFolderDrag.begin(event, asset.id)) return;
   event.stopPropagation();
 }
+function canStartFolderTreeDrag() {
+  return hasLibrary() && !state.busy && !state.libraryChanging && !state.previewId && !draggingAssets && !assetFolderDrag.pending &&
+    !folderMoveSaving && !closing && !deletingAssets && !historyUi.pending && !modalResolve && !featureDialogOpen() &&
+    !document.querySelector('.modal-overlay:not(.hidden),.preview:not(.hidden),.sp-overlay:not([hidden])');
+}
+function prepareFolderTreeDrag(id) {
+  if (!canStartFolderTreeDrag()) return null;
+  const folder = state.library.folders.find(item => item.id === id);
+  if (!folder) return null;
+  flushDetailDrafts();
+  return { id, name: folder.name, root: state.library.root,
+    fingerprint: window.ShituFolderTreeDrag.fingerprint(state.library.folders),
+    descendants: window.ShituFolderTreeDrag.descendants(state.library.folders, id) };
+}
+function folderTreeDragIsCurrent(payload) {
+  return state.library.root === payload.root && !state.libraryChanging && !state.busy && !state.previewId && !closing && !deletingAssets &&
+    window.ShituFolderTreeDrag.fingerprint(state.library.folders) === payload.fingerprint;
+}
+function startFolderTreeDrag(gesture, event) {
+  stopGalleryPreviews(); stopMarquee(); closeFolderMenu();
+  draggingFolders = true;
+  folderDragPayload = gesture.payload;
+  suppressFolderClickUntil = performance.now() + 350;
+  suppressAssetClickUntil = performance.now() + 350;
+  document.body.classList.add('dragging-folder-tree');
+  $('dropOverlay').classList.add('hidden');
+  $('folderRootDropTarget').classList.remove('hidden');
+  $('folderRootDropTarget').setAttribute('aria-hidden', 'false');
+  $('folderDragGhost').classList.remove('hidden');
+  try { document.body.setPointerCapture(gesture.pointerId); } catch {}
+  refreshFolderTreeDragRows(gesture.payload);
+  positionFolderTreeDrag(event);
+  folderDragScrollFrame = requestAnimationFrame(scrollFolderTreeDrag);
+}
+function refreshFolderTreeDragRows(payload) {
+  const source = (payload || folderDragPayload)?.descendants || new Set();
+  for (const row of $('folderNav').querySelectorAll('.folder-row')) row.classList.toggle('folder-drag-source', source.has(row.dataset.folderId));
+}
+function positionFolderTreeDrag(event) {
+  folderDragPosition = { x: event.clientX, y: event.clientY, pointerId: event.pointerId };
+  $('folderDragGhost').style.left = `${Math.max(8, Math.min(innerWidth - 285, event.clientX + 16))}px`;
+  $('folderDragGhost').style.top = `${Math.max(8, Math.min(innerHeight - 55, event.clientY + 18))}px`;
+}
+function folderTreeDropTarget(event, payload) {
+  const hit = document.elementFromPoint(event.clientX, event.clientY);
+  const row = hit?.closest('#folderNav .folder-row[data-folder-id]');
+  if (row) {
+    const bounds = row.getBoundingClientRect(), ratio = (event.clientY - bounds.top) / Math.max(bounds.height, 1);
+    const mode = ratio < .25 ? 'before' : ratio > .75 ? 'after' : 'inside';
+    return { ...window.ShituFolderTreeDrag.plan(state.library.folders, payload.id, row.dataset.folderId, mode), node: row };
+  }
+  const rootTarget = hit?.closest('#folderRootDropTarget,#folderPanel>.section-heading:not(.smart-folder-heading),#folderNav');
+  if (!rootTarget) return null;
+  return { ...window.ShituFolderTreeDrag.plan(state.library.folders, payload.id, null, 'root'), node: $('folderRootDropTarget') };
+}
+function highlightFolderTreeTarget(destination, gesture) {
+  if (folderDragTarget?.node !== destination?.node || folderDragTarget?.mode !== destination?.mode || folderDragTarget?.valid !== destination?.valid) {
+    if (folderDragTarget?.node) delete folderDragTarget.node.dataset.folderTreeDrop;
+    if (destination?.node) destination.node.dataset.folderTreeDrop = destination.valid ? destination.mode : 'invalid';
+  }
+  folderDragTarget = destination;
+  const expandId = destination?.valid && destination.mode === 'inside' && collapsedFolders.has(destination.targetId) ? destination.targetId : null;
+  if (expandId !== folderDragExpandId) {
+    clearTimeout(folderDragExpandTimer); folderDragExpandTimer = null;
+    folderDragExpandId = expandId;
+    if (expandId) folderDragExpandTimer = setTimeout(() => {
+      folderDragExpandTimer = null;
+      if (!folderTreeDrag.active || folderDragTarget?.targetId !== expandId || !folderDragTarget.valid) return;
+      collapsedFolders.delete(expandId);
+      renderNavigation();
+      if (folderDragPosition) folderTreeDrag.move({ pointerId: folderDragPosition.pointerId, clientX: folderDragPosition.x, clientY: folderDragPosition.y, buttons: 1 });
+    }, 650);
+  }
+  if (gesture?.payload) {
+    const count = gesture.payload.descendants.size - 1;
+    const suffix = count ? `（含 ${count} 个子文件夹）` : '';
+    $('folderDragGhost').textContent = destination?.valid ? `移动「${gesture.payload.name}」${suffix}到${destination.name}` :
+      destination ? destination.reason : `「${gesture.payload.name}」${suffix} · 拖入文件夹或移至最外层`;
+    $('folderDragGhost').classList.toggle('is-invalid', Boolean(destination && !destination.valid));
+  }
+}
+function scrollFolderTreeDrag() {
+  folderDragScrollFrame = 0;
+  if (!folderTreeDrag.active || !folderDragPosition) return;
+  const scroller = folderPanelMode === 'sidebar' ? $('folderNav') : $('folderPanel');
+  const rect = scroller.getBoundingClientRect(), edge = 34;
+  if (folderDragPosition.x >= rect.left && folderDragPosition.x <= rect.right) {
+    const speed = folderDragPosition.y < rect.top + edge && folderDragPosition.y >= rect.top - edge ? -10 :
+      folderDragPosition.y > rect.bottom - edge && folderDragPosition.y <= rect.bottom + edge ? 10 : 0;
+    if (speed) {
+      scroller.scrollTop += speed;
+      folderTreeDrag.move({ pointerId: folderDragPosition.pointerId, clientX: folderDragPosition.x, clientY: folderDragPosition.y, buttons: 1 });
+    }
+  }
+  if (folderTreeDrag.active) folderDragScrollFrame = requestAnimationFrame(scrollFolderTreeDrag);
+}
+function finishFolderTreeDrag(_reason, gesture) {
+  cancelAnimationFrame(folderDragScrollFrame); folderDragScrollFrame = 0; folderDragPosition = null;
+  folderDragPayload = null;
+  clearTimeout(folderDragExpandTimer); folderDragExpandTimer = null; folderDragExpandId = null;
+  try { if (document.body.hasPointerCapture(gesture.pointerId)) document.body.releasePointerCapture(gesture.pointerId); } catch {}
+  for (const row of $('folderNav').querySelectorAll('.folder-drag-source')) row.classList.remove('folder-drag-source');
+  if (folderDragTarget?.node) delete folderDragTarget.node.dataset.folderTreeDrop;
+  folderDragTarget = null;
+  $('folderDragGhost').classList.add('hidden'); $('folderDragGhost').classList.remove('is-invalid');
+  $('folderRootDropTarget').classList.add('hidden'); $('folderRootDropTarget').setAttribute('aria-hidden', 'true');
+  document.body.classList.remove('dragging-folder-tree'); draggingFolders = false;
+  suppressFolderClickUntil = performance.now() + 350; suppressAssetClickUntil = performance.now() + 350;
+}
+async function moveDraggedFolder(payload, destination) {
+  if (!folderTreeDragIsCurrent(payload) || folderMoveSaving) return;
+  folderMoveSaving = true;
+  try {
+    if (!await waitForMetadata() || !folderTreeDragIsCurrent(payload)) return;
+    const check = window.ShituFolderTreeDrag.plan(state.library.folders, payload.id, destination.targetId, destination.mode);
+    if (!check.valid) return;
+    const saved = await saveMetadata(() => {
+      if (!folderTreeDragIsCurrent(payload)) throw new Error('文件夹层级已变化，请重新拖动');
+      return api.moveFolder(payload.id, check.parentId, check.placement, payload.root);
+    });
+    if (saved) {
+      const byId = new Map(state.library.folders.map(folder => [folder.id, folder]));
+      for (let id = check.parentId; id != null && byId.has(id); id = folderTree.parentId(byId.get(id))) collapsedFolders.delete(id);
+      renderNavigation();
+      toast(`已移动「${payload.name}」，子文件夹与素材保持原有层级，可撤销`);
+    }
+  } finally { folderMoveSaving = false; renderHistory(); }
+}
 function canStartAssetFolderDrag() {
-  return hasLibrary() && !state.busy && !state.libraryChanging && !state.previewId && !draggingAssets && !closing && !deletingAssets && !featureDialogOpen() &&
+  return hasLibrary() && !state.busy && !state.libraryChanging && !state.previewId && !draggingAssets && !folderTreeDrag.pending && !folderMoveSaving && !closing && !deletingAssets && !featureDialogOpen() &&
     !document.querySelector('.modal-overlay:not(.hidden),.preview:not(.hidden),.sp-overlay:not([hidden])');
 }
 function prepareAssetFolderDrag(id) {
@@ -1482,6 +1669,7 @@ async function moveDraggedAssets(payload, destination) {
   if (saved) toast(`已将 ${changed.length} 个素材移入「${destination.name}」`);
 }
 async function showAssetContextMenu(id) {
+  folderTreeDrag.cancel();
   assetFolderDrag.cancel();
   stopGalleryPreviews();
   if (!hasLibrary() || state.libraryChanging || draggingAssets) return;
@@ -1617,6 +1805,7 @@ function renderSelectionMode() {
   $('gallery').querySelectorAll('.asset-card').forEach(card => { card.draggable = false; });
 }
 function setSelectionMode(enabled) {
+  folderTreeDrag.cancel();
   assetFolderDrag.cancel();
   stopGalleryPreviews();
   stopMarquee();
@@ -1939,6 +2128,7 @@ function renderLibraryState() {
   $('managerCloseLibrary').disabled = state.libraryChanging;
 }
 function showLibraryManager() {
+  folderTreeDrag.cancel();
   assetFolderDrag.cancel();
   stopGalleryPreviews();
   renderLibraryState();
@@ -1951,8 +2141,9 @@ function closeLibraryManager() {
   if (hasLibrary()) $('libraryInfo').focus();
 }
 async function changeLibrary(kind) {
+  folderTreeDrag.cancel();
   assetFolderDrag.cancel();
-  if (state.libraryChanging || state.busy) return;
+  if (state.libraryChanging || state.busy || folderMoveSaving) return;
   stopGalleryPreviews();
   state.libraryChanging = true;
   renderLibraryState();
@@ -1982,6 +2173,7 @@ async function changeLibrary(kind) {
   }
 }
 function modal({ title, description = '', value = '', input = true, confirm = '确定', cancel = '取消', destructive = false, parentOptions = null, parentId = null, colorValue }) {
+  folderTreeDrag.cancel();
   assetFolderDrag.cancel();
   stopGalleryPreviews();
   closeFolderMenu();
@@ -2034,18 +2226,19 @@ function closeFolderMenu(restoreFocus = false) {
   folderMenuAnchor = null;
 }
 function showFolderMenu(folder, anchor, point) {
+  folderTreeDrag.cancel();
   stopGalleryPreviews();
   closeFolderMenu();
-  if (!hasLibrary() || state.libraryChanging) return;
+  if (!hasLibrary() || state.libraryChanging || folderMoveSaving) return;
   const root = state.library.root, menu = $('folderContextMenu');
   folderMenuAnchor = anchor;
-  const items = [['create', '新建子文件夹', 'plus'], ['rename', '重命名', 'folder'], ['move', '移动文件夹…', 'arrow'], ['delete', '删除文件夹…', 'trash']];
+  const items = [['create', '新建子文件夹', 'plus'], ['icon', '设置图标…', 'palette'], ['rename', '重命名', 'folder'], ['move', '移动文件夹…', 'arrow'], ['delete', '删除文件夹…', 'trash']];
   menu.replaceChildren(...items.map(([kind, label, glyph]) => {
     const button = action(label, kind === 'delete' ? 'is-destructive' : '', () => {
       closeFolderMenu();
       const current = state.library.folders.find(item => item.id === folder.id);
       if (root !== state.library.root || !current) return;
-      if (kind === 'create') createFolder(current.id); else manageFolder(current, kind);
+      if (kind === 'create') createFolder(current.id); else if (kind === 'icon') void run(() => openFolderIconEditor(current)); else manageFolder(current, kind);
     }, glyph);
     button.dataset.folderAction = kind; button.setAttribute('role', 'menuitem'); return button;
   }));
@@ -2083,6 +2276,7 @@ async function manageFolder(folder, kind = 'rename') {
   }
 }
 async function importImages(folder, paths) {
+  folderTreeDrag.cancel();
   assetFolderDrag.cancel();
   if (!hasLibrary()) { toast('请先选择素材库位置'); return; }
   if (state.libraryChanging) return;
@@ -2609,6 +2803,7 @@ function displayPreviewAsset(asset, index, total) {
   }
 }
 function openPreview(id) {
+  folderTreeDrag.cancel();
   assetFolderDrag.cancel();
   stopGalleryPreviews({ deferCancel: true });
   modelWarmup.pause();
@@ -2740,6 +2935,7 @@ async function refreshCollector(quiet = false) {
   } finally { refreshingCollector = false; $('refreshCollector').disabled = false; }
 }
 function showCollector() {
+  folderTreeDrag.cancel();
   assetFolderDrag.cancel();
   stopGalleryPreviews();
   $('collectorOverlay').classList.remove('hidden');
@@ -2771,6 +2967,15 @@ $('folderNav').addEventListener('keydown', event => {
   // Keep a focused folder control's Space/Enter/Delete away from gallery shortcuts.
   if ([' ', 'Enter', 'Delete', 'Backspace'].includes(event.key)) event.stopPropagation();
 });
+$('folderNav').addEventListener('pointerdown', event => {
+  const row = event.target.closest('.folder-row[data-folder-id]');
+  if (!row || event.target.closest('.folder-toggle,.folder-more') || !canStartFolderTreeDrag()) return;
+  folderTreeDrag.begin(event, row.dataset.folderId);
+});
+$('folderNav').addEventListener('click', event => {
+  if (!draggingFolders && !folderMoveSaving && performance.now() >= suppressFolderClickUntil) return;
+  event.preventDefault(); event.stopImmediatePropagation();
+}, true);
 $('folderPanel').addEventListener('keydown', event => {
   // Preserve native button activation without triggering gallery shortcuts.
   if (event.target.closest('button') && [' ', 'Enter', 'Delete', 'Backspace'].includes(event.key)) event.stopPropagation();
@@ -2843,25 +3048,33 @@ window.addEventListener('pointermove', event => assetFolderDrag.move(event), { p
 window.addEventListener('pointerup', event => assetFolderDrag.end(event));
 window.addEventListener('pointercancel', () => assetFolderDrag.cancel());
 document.body.addEventListener('lostpointercapture', () => { if (assetFolderDrag.active) assetFolderDrag.cancel(); });
+window.addEventListener('pointermove', event => folderTreeDrag.move(event), { passive: false });
+window.addEventListener('pointerup', event => folderTreeDrag.end(event));
+window.addEventListener('pointercancel', () => folderTreeDrag.cancel());
+document.body.addEventListener('lostpointercapture', event => {
+  if (folderTreeDrag.active && event.target === document.body) folderTreeDrag.cancel();
+});
 document.addEventListener('keydown', event => {
-  if (event.key === 'Escape' && assetFolderDrag.pending) {
-    assetFolderDrag.cancel(); event.preventDefault(); event.stopImmediatePropagation();
+  if (event.key === 'Escape' && (assetFolderDrag.pending || folderTreeDrag.pending)) {
+    folderTreeDrag.cancel(); assetFolderDrag.cancel(); event.preventDefault(); event.stopImmediatePropagation();
+  } else if (folderTreeDrag.active || folderMoveSaving) {
+    event.preventDefault(); event.stopImmediatePropagation();
   }
 }, true);
 window.addEventListener('pointerup', event => { if (marquee?.pointerId === event.pointerId) stopMarquee(false, true); });
 window.addEventListener('pointercancel', event => { if (marquee?.pointerId === event.pointerId) stopMarquee(true, true); });
-window.addEventListener('blur', () => { assetFolderDrag.cancel(); stopGalleryPreviews(); modelWarmup.pause(); stopMarquee(true, true); });
+window.addEventListener('blur', () => { folderTreeDrag.cancel(); assetFolderDrag.cancel(); stopGalleryPreviews(); modelWarmup.pause(); stopMarquee(true, true); });
 window.addEventListener('resize', () => { stopGalleryPreviews(); modelWarmup.viewportChanged(); stopMarquee(true, true); });
 window.addEventListener('focus', modelWarmup.schedule);
 window.addEventListener('pointermove', modelWarmup.schedule, { passive: true });
 window.addEventListener('keydown', modelWarmup.schedule);
 document.addEventListener('visibilitychange', () => {
-  if (document.hidden) { assetFolderDrag.cancel(); stopGalleryPreviews(); modelWarmup.pause(); }
+  if (document.hidden) { folderTreeDrag.cancel(); assetFolderDrag.cancel(); stopGalleryPreviews(); modelWarmup.pause(); }
   else modelWarmup.schedule();
 });
 api.onWindowVisibility?.(visible => {
   if (visible) modelWarmup.schedule();
-  else { stopGalleryPreviews(); modelWarmup.pause(); }
+  else { folderTreeDrag.cancel(); stopGalleryPreviews(); modelWarmup.pause(); }
 });
 $('searchInput').addEventListener('input', (e) => { state.search = e.target.value; state.limit = 240; state.selected.clear(); render(); });
 $('formatFilter').addEventListener('change', (e) => { state.format = e.target.value; state.limit = 240; state.selected.clear(); render(); });
@@ -3129,7 +3342,7 @@ $('previewSaveVideoCover').addEventListener('click', () => { void setVideoCover(
 for (const event of ['seeking', 'seeked', 'loadeddata', 'error'])
   $('previewVideo').addEventListener(event, () => renderVideoTools());
 window.addEventListener('pagehide', resetPreviewMedia);
-window.addEventListener('pagehide', () => { batchRenameUi.close(true); fontCompareUi.close(); smartFoldersUi.close(); skinPickerUi.close(); });
+window.addEventListener('pagehide', () => { batchRenameUi.close(true); fontCompareUi.close(); smartFoldersUi.close(); folderIconsUi.close(true); skinPickerUi.close(); });
 $('batchRenameSelection').addEventListener('click', () => run(() => openBatchRename()));
 $('compareFontsSelection').addEventListener('click', () => run(() => openFontCompare()));
 $('newSmartFolder').addEventListener('click', () => run(() => openSmartFolderEditor()));
@@ -3230,12 +3443,12 @@ document.addEventListener('keydown', (e) => {
   }
 });
 let dragDepth = 0;
-document.addEventListener('dragenter', (e) => { e.preventDefault(); if (!draggingAssets && hasLibrary() && !state.libraryChanging && [...(e.dataTransfer?.types || [])].includes('Files')) { dragDepth += 1; $('dropOverlay').classList.remove('hidden'); } });
-document.addEventListener('dragover', (e) => { e.preventDefault(); if (e.dataTransfer) e.dataTransfer.dropEffect = draggingAssets ? 'none' : 'copy'; });
+document.addEventListener('dragenter', (e) => { e.preventDefault(); if (!draggingAssets && !folderTreeDrag.pending && !folderMoveSaving && hasLibrary() && !state.libraryChanging && [...(e.dataTransfer?.types || [])].includes('Files')) { dragDepth += 1; $('dropOverlay').classList.remove('hidden'); } });
+document.addEventListener('dragover', (e) => { e.preventDefault(); if (e.dataTransfer) e.dataTransfer.dropEffect = draggingAssets || folderTreeDrag.pending || folderMoveSaving ? 'none' : 'copy'; });
 document.addEventListener('dragleave', (e) => { e.preventDefault(); dragDepth = Math.max(0, dragDepth - 1); if (dragDepth === 0) $('dropOverlay').classList.add('hidden'); });
 document.addEventListener('drop', (e) => {
   e.preventDefault(); dragDepth = 0; $('dropOverlay').classList.add('hidden');
-  if (draggingAssets) return;
+  if (draggingAssets || folderTreeDrag.pending || folderMoveSaving) return;
   const paths = [...(e.dataTransfer?.files || [])].map((file) => api.getFilePath(file)).filter(Boolean);
   if (paths.length) importImages(false, paths);
 });
@@ -3266,6 +3479,7 @@ api.onProjectPreview?.(detail => {
 });
 api.onSimilarImageProgress?.(detail => similarImagesUi.updateProgress(detail));
 window.addEventListener('beforeunload', (event) => {
+  folderTreeDrag.cancel();
   assetFolderDrag.cancel();
   stopGalleryPreviews();
   modelWarmup.pause();
@@ -3338,7 +3552,7 @@ if (api.onVideoPreview) api.onVideoPreview(event => {
 });
 function refreshSmartFolderTime() {
   if (!activeSmartFolder()?.rule.recentDays || document.hidden || state.busy || state.libraryChanging || state.previewId ||
-      featureDialogOpen() || pendingSaves.size || hasHistoryDrafts() || draggingAssets || ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName)) return;
+      featureDialogOpen() || pendingSaves.size || hasHistoryDrafts() || draggingAssets || folderTreeDrag.pending || folderMoveSaving || ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName)) return;
   const visible = new Set(filteredAssets().map(asset => asset.id));
   state.selected = new Set([...state.selected].filter(id => visible.has(id)));
   render();
