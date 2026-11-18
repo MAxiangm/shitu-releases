@@ -266,6 +266,12 @@ function configureUpdateSmoke() {
   const sha256 = crypto.createHash('sha256').update(installer).digest('hex');
   assert.equal(sha256, fixture.sha256);
   assert.equal(app.getVersion(), fixture.currentVersion);
+  // Production pins its packaged profile under appData. Keep that path inside
+  // this fixture too, so a running installed app cannot own the smoke lock.
+  const updateAppData = path.join(base, 'app-data');
+  const updateProfile = path.join(updateAppData, '拾图');
+  fs.mkdirSync(updateProfile, { recursive: true });
+  app.setPath('appData', updateAppData);
   Object.defineProperty(app, 'isPackaged', { configurable: true, value: true });
 
   const repository = require(path.join(root, 'update-config.json')).repository;
@@ -331,7 +337,8 @@ function configureUpdateSmoke() {
   let collectorOptions = null, collectorBlockedDuringInstall = false;
   const failures = [];
   childProcess.spawn = (filePath, args, options) => {
-    const expected = path.join(base, 'profile', 'updates', `${fixture.nextVersion}-${sha256}.exe`);
+    const expected = path.join(updateProfile, 'updates', `${fixture.nextVersion}-${sha256}.exe`);
+    assert.equal(app.getPath('userData'), updateProfile);
     assert.equal(filePath, expected);
     assert.equal(crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex'), sha256);
     assert.deepEqual(args, ['/S', '/SHITUUPDATE']);
