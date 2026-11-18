@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const test = require('node:test');
+const sharp = require('sharp');
 const { Library } = require('../src/library.cjs');
 const { createBundleRepair } = require('../src/bundle-repair.cjs');
 
@@ -54,7 +55,9 @@ test('model repair confirms path-specific matches, preserves metadata, and expor
   assert.notEqual(updated.hash, previous.hash);
   assert.deepEqual(updated.modelBundle.missing, ['Tint.png', 'unavailable.png']);
   assert.deepEqual(await fs.readFile(file), originalBytes);
-  const output = (await library.exportAssets([id], path.join(directory, 'export'))).files[0];
+  const thumbnailPath = path.join(directory, 'export-preview.jpg');
+  await sharp({ create: { width: 12, height: 8, channels: 3, background: '#357f70' } }).jpeg().toFile(thumbnailPath);
+  const output = (await library.exportAssets([id], path.join(directory, 'export'), { thumbnailPaths: new Map([[id, thumbnailPath]]) })).files[0];
   assert.deepEqual(await fs.readFile(path.join(output, 'model.gltf')), originalBytes);
   assert.equal(await fs.readFile(path.join(output, 'Textures', 'front 2.png'), 'utf8'), 'chosen front texture');
   assert.equal((await fs.readdir(library.root)).some(name => name.startsWith('.pending-repair-')), false);

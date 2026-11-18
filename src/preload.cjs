@@ -122,7 +122,13 @@ contextBridge.exposeInMainWorld('shitu', Object.freeze({
   setFolderIconColor: (id, color, expectedRoot) => call('set-folder-icon-color', id, color, expectedRoot),
   chooseFolderIcon: (id, expectedRoot) => call('choose-folder-icon', id, expectedRoot),
   deleteFolder: id => call('delete-folder', id),
-  exportAssets: ids => call('export-assets', ids),
+  exportAssets: (ids, expectedRoot) => call('export-assets', ids, expectedRoot),
+  exportFolder: (id, expectedRoot) => call('export-folder', id, expectedRoot),
+  onExportProgress: callback => {
+    const listener = (_event, detail) => callback(detail);
+    ipcRenderer.on('shitu:export-progress', listener);
+    return () => ipcRenderer.removeListener('shitu:export-progress', listener);
+  },
   backup: () => call('backup'),
   revealAsset: id => call('reveal-asset', id),
   openAsset: id => call('open-asset', id),

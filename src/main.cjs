@@ -9,6 +9,7 @@ const { LibraryManager } = require('./library-manager.cjs');
 const { createCollector } = require('./collector.cjs');
 const { mediaResponse } = require('./media-response.cjs');
 const FolderIconFiles = require('./folder-icons.cjs');
+const { createAssetExportService } = require('./asset-export-service.cjs');
 const { resolveAssetFiles, createDragIcon } = require('./asset-actions.cjs');
 const { assetMenuTemplate } = require('./asset-menu.cjs');
 const sharp = require('sharp');
@@ -82,6 +83,7 @@ let aeProjects;
 let aePreviewService;
 let bundleRepair;
 let bundleRepairBusy = false;
+let assetExporter;
 const videoPreviews = new Map();
 const videoRequests = createVideoPreviewRequests();
 let appUpdater;
@@ -127,7 +129,7 @@ async function saveUserMetadata(method, args, { recordHistory = false, expectedR
   } finally { metadataSaves.delete(save); sendHistory(); }
 }
 function ensureHistoryAvailable() {
-  if (closing || switchingLibrary || importing || draggingAssets || installingUpdate || videoTranscodeService?.busy() || imagePlugins?.busy() || collector?.activeCount())
+  if (closing || switchingLibrary || importing || draggingAssets || installingUpdate || assetExporter?.busy() || videoTranscodeService?.busy() || imagePlugins?.busy() || collector?.activeCount())
     throw new Error('请等待当前导入、转码、处理或拖放完成后再撤销或重做');
 }
 async function replayHistory(direction, expectedRoot, expectedId) {
@@ -217,7 +219,7 @@ function forwardVideoProgress(event, owner) {
     state: event.state, progress: Number.isFinite(event.progress) ? Math.max(0, Math.min(100, event.progress)) : undefined });
 }
 async function switchLibrary(mode) {
-  if(switchingLibrary || importing || draggingAssets || movingAssets || historyBusy || metadataSaves.size || videoTranscodeService?.busy() || imagePlugins?.busy() || collector?.activeCount() || bundleRepairBusy)throw new Error('请等待当前素材操作完成后再切换素材库');
+  if(switchingLibrary || importing || draggingAssets || movingAssets || historyBusy || metadataSaves.size || assetExporter?.busy() || videoTranscodeService?.busy() || imagePlugins?.busy() || collector?.activeCount() || bundleRepairBusy)throw new Error('请等待当前素材操作完成后再切换素材库');
   if(mode==='migrate')requireLibrary();
   switchingLibrary=true;
   try {
@@ -691,13 +693,8 @@ function bindHandlers() {
     return saveUserMetadata('importFolderIcon', [id, choice.filePaths[0]], { recordHistory: true, expectedRoot });
   });
   checkedHandler('delete-folder', id => saveUserMetadata('deleteFolder', [id]));
-  checkedHandler('export-assets', async ids => {
-    requireLibrary();
-    const result = await dialog.showOpenDialog(mainWindow, { title: '选择导出文件夹', properties: ['openDirectory', 'createDirectory'] });
-    if (result.canceled) return { cancelled: true };
-    const exported = await library.exportAssets(ids, result.filePaths[0]);
-    return { cancelled: false, count: exported.exported, path: result.filePaths[0] };
-  });
+  checkedHandler('export-assets', (ids, expectedRoot) => assetExporter.exportAssets(ids, expectedRoot));
+  checkedHandler('export-folder', (id, expectedRoot) => assetExporter.exportFolder(id, expectedRoot));
   checkedHandler('backup', async () => {
     requireLibrary();
     const result = await dialog.showOpenDialog(mainWindow, { title: '选择备份保存位置', properties: ['openDirectory', 'createDirectory'] });
@@ -763,7 +760,7 @@ async function createWindow() {
   mainWindow.on('close', event => {
     if (mayClose) { mayClose=false; closing=false; return; }
     event.preventDefault();
-    if (switchingLibrary || importing || draggingAssets || historyBusy || metadataSaves.size || imagePlugins?.busy() || collector?.activeCount() || bundleRepairBusy) {
+    if (switchingLibrary || importing || draggingAssets || historyBusy || metadataSaves.size || assetExporter?.busy() || imagePlugins?.busy() || collector?.activeCount() || bundleRepairBusy) {
       dialog.showMessageBox(mainWindow, { type: 'info', title: '素材操作进行中', message: '请等待素材操作完成后再关闭 Mosaic。图片处理任务可在插件中心取消。', buttons: ['知道了'] });
       return;
     }
@@ -839,6 +836,15 @@ else {
         tasks.projectPreview(owner, detail, (id, compositionId) =>
           aePreviewService.prepare(owner, id, { expectedRoot: owner.root, compositionId }));
       }
+    });
+    assetExporter = createAssetExportService({
+      getLibrary: () => closing || switchingLibrary ? null : library,
+      tempDirectory: path.join(app.getPath('userData'), 'export-previews'),
+      chooseDirectory: () => dialog.showOpenDialog(mainWindow, { title: '选择导出保存位置', properties: ['openDirectory', 'createDirectory'] }),
+      prepareModel: (owner, asset, destination, options) => modelService.thumbnail(owner.getAssetPath(asset.id, 'original'), destination,
+        { ...options, modelBundle: asset.modelBundle, modelDirectory: owner.getModelBundleDirectory(asset.id) }),
+      prepareProject: (owner, id, options) => aePreviewService.prepare(owner, id, options),
+      onProgress: detail => sendActionEvent('export-progress', detail)
     });
     imagePlugins=createImagePlugins({
       rootDir:path.join(process.env.SHITU_PLUGIN_ROOT || app.getPath('userData'),'plugins'),
@@ -920,6 +926,7 @@ else {
   });
   app.on('window-all-closed', () => app.quit());
   app.on('will-quit', () => {
+    assetExporter?.cancel();
     uiRecovery?.dispose();
     updateScheduler?.dispose(); appUpdater?.dispose();
     videoRequests.abortAll();

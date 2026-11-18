@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const sharp = require('sharp');
 const { Library } = require('../src/library.cjs');
 const { projectBundleHash, validateProjectBundle } = require('../src/project-bundle.cjs');
 const { createAEPreviewService } = require('../src/ae-preview-service.cjs');
@@ -70,8 +71,10 @@ test('AE composition metadata survives storage and preview thumbnail publication
   const reopened = new Library({ root: item.library.root }); await reopened.init();
   assert.deepEqual(reopened.snapshot().assets[0].projectBundle.compositions, [composition, other]);
   assert.equal(reopened.snapshot().assets[0].projectPreview.sourceHash, manifest.hash);
-  const exported = await reopened.exportAssets([item.asset.id], path.join(item.base, 'export'));
-  assert.deepEqual(await fs.readdir(exported.files[0]), [manifest.entry]);
+  const exportThumbnailPath = path.join(item.base, 'export-preview.jpg');
+  await sharp({ create: { width: 12, height: 8, channels: 3, background: '#357f70' } }).jpeg().toFile(exportThumbnailPath);
+  const exported = await reopened.exportAssets([item.asset.id], path.join(item.base, 'export'), { thumbnailPaths: new Map([[item.asset.id, exportThumbnailPath]]) });
+  assert.deepEqual((await fs.readdir(exported.files[0])).sort(), [manifest.entry, path.basename(exported.files[0]) + '.jpg'].sort());
   assert.deepEqual(await fs.readFile(path.join(exported.files[0], manifest.entry)), original);
 });
 

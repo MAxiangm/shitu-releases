@@ -151,13 +151,15 @@ function createModelService({ BrowserWindow, cacheDir, getLibrary, thumbnailTime
     if (image[0] !== 0xff || image[1] !== 0xd8) throw new Error(label + '不是有效的 JPEG');
     return image;
   }
-  function thumbnail(source, destination, { modelBundle, modelDirectory } = {}) {
+  function thumbnail(source, destination, { modelBundle, modelDirectory, signal } = {}) {
     const task = thumbnailQueue.then(async () => {
-      const prepared = await descriptor(source, modelDirectory, modelBundle);
-      const result = await renderInWindow(prepared, { size: 640,
+      signal?.throwIfAborted();
+      const prepared = await descriptor(source, modelDirectory, modelBundle, { signal });
+      const result = await renderInWindow(prepared, { size: 640, signal,
         timeoutMessage: '模型封面生成超时，仍可导入并打开模型预览',
         script: json => `window.renderModelThumbnail(${json})` });
       if (closed) throw cancelled();
+      signal?.throwIfAborted();
       await fs.writeFile(destination, jpegFrame(result?.dataUrl, '模型封面'));
       return { width: 640, height: 640 };
     });

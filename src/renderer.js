@@ -42,6 +42,7 @@ let marquee = null;
 let marqueeFrame = 0;
 let suppressMarqueeClick = false;
 let deletingAssets = false;
+let activeExport = null;
 let videoPreviewSerial = 0;
 let videoPreviewRequestSerial = 0;
 let videoPreviewSession = null;
@@ -169,6 +170,7 @@ async function openFontCompare(ids = [...state.selected]) {
   closePreview(); stopGalleryPreviews(); fontCompareUi.open(assets, root);
 }
 async function openSmartFolderEditor(item = null) {
+  if (activeExport) return;
   const root = state.library.root;
   if (!await waitForMetadata() || root !== state.library.root) return;
   closePreview(); stopGalleryPreviews();
@@ -208,6 +210,7 @@ async function saveFolderAppearance(root, operation) {
   return state.library.root === root ? snapshot : null;
 }
 async function openFolderIconEditor(folder) {
+  if (activeExport) return;
   folderTreeDrag.cancel(); assetFolderDrag.cancel(); closeFolderMenu(); stopGalleryPreviews();
   const root = state.library.root;
   if (!await waitForMetadata() || state.library.root !== root || state.libraryChanging) return;
@@ -622,6 +625,52 @@ function toast(message, error = false, duration = 4500, link) {
 }
 function messageError(error) { toast(error?.message || String(error), true, 8000); }
 async function run(fn) { try { return await fn(); } catch (error) { messageError(error); return null; } }
+function updateExportProgress(detail) {
+  if (!activeExport || state.library.root !== activeExport.root || (detail?.root && detail.root !== activeExport.root)) return;
+  const current = Number.isSafeInteger(detail?.current) && detail.current >= 0 ? detail.current : null;
+  const total = Number.isSafeInteger(detail?.total) && detail.total > 0 ? detail.total : null;
+  const count = current !== null && total !== null ? ` · ${Math.min(current, total)} / ${total}` : '';
+  const phase = detail?.phase === 'preparing' ? '正在准备导出缩略图' : '正在导出文件';
+  const name = typeof detail?.name === 'string' ? detail.name.slice(0, 220) : '';
+  activeExport.label.textContent = `${phase}${count}${name ? `\n${name}` : ''}`;
+  activeExport.progress.hidden = current === null || total === null;
+  if (!activeExport.progress.hidden) { activeExport.progress.max = total; activeExport.progress.value = Math.min(current, total); }
+}
+function renderExportControls() {
+  renderHeader(filteredAssets()); renderLibraryState(); renderSelection(); renderHistory();
+  for (const button of document.querySelectorAll('[data-export-command]')) button.disabled = Boolean(activeExport || state.busy || state.libraryChanging);
+}
+async function exportLibraryItems(kind, value, expectedRoot = state.library.root) {
+  if (!hasLibrary() || state.libraryChanging || closing || expectedRoot !== state.library.root) return null;
+  if (state.busy || activeExport || folderMoveSaving || deletingAssets || historyUi.pending) { toast('当前操作正在进行，请稍候再导出'); return null; }
+  const folder = kind === 'folder' ? state.library.folders.find(item => item.id === value) : null;
+  const ids = kind === 'assets' ? [...value] : null;
+  if ((kind === 'folder' && !folder) || (kind === 'assets' && !ids.length)) return null;
+  if (!await waitForMetadata() || expectedRoot !== state.library.root || state.libraryChanging || state.busy || closing) return null;
+  folderTreeDrag.cancel(); assetFolderDrag.cancel(); closeFolderMenu(); stopGalleryPreviews(); modelWarmup.pause();
+  const notice = el('div', 'toast export-notice'); notice.setAttribute('role', 'status');
+  const label = el('span', '', '请选择导出位置…');
+  const progress = el('progress', 'export-progress'); progress.setAttribute('aria-label', '导出进度'); progress.hidden = true;
+  notice.append(label, progress); $('toastStack').append(notice);
+  const session = { root: expectedRoot, notice, label, progress };
+  activeExport = session; state.busy = true; renderExportControls();
+  try {
+    const result = kind === 'folder' ? await api.exportFolder(folder.id, expectedRoot) : await api.exportAssets(ids, expectedRoot);
+    if (!result || result.cancelled || state.library.root !== expectedRoot) return result;
+    const count = Number.isSafeInteger(result.count) ? result.count : Number.isSafeInteger(result.exported) ? result.exported : 0;
+    const folders = Number.isSafeInteger(result.folders) ? result.folders : Number.isSafeInteger(result.folderCount) ? result.folderCount : null;
+    const title = kind === 'folder' ? `已按层级导出「${folder.name}」` : '素材导出完成';
+    toast(`${title}\n${count} 个素材${kind === 'folder' && folders !== null ? ` · ${folders} 个分类文件夹` : ''}${result.path ? `\n${result.path}` : ''}`, false, 10000);
+    const warnings = Array.isArray(result.warnings) ? result.warnings.map(item => typeof item === 'string' ? item : item?.message).filter(Boolean) : [];
+    if (warnings.length) toast(`导出提醒（${warnings.length} 项）：${warnings.slice(0, 3).join('；')}${warnings.length > 3 ? '；其余提醒请检查导出文件' : ''}`, true, 14000);
+    return result;
+  } catch (error) { messageError(error); return null; }
+  finally {
+    notice.remove();
+    if (activeExport === session) activeExport = null;
+    state.busy = false; renderExportControls(); modelWarmup.schedule();
+  }
+}
 function saveMetadata(operation) {
   const task = metadataQueue.then(async () => {
     try {
@@ -1672,7 +1721,7 @@ async function showAssetContextMenu(id) {
   folderTreeDrag.cancel();
   assetFolderDrag.cancel();
   stopGalleryPreviews();
-  if (!hasLibrary() || state.libraryChanging || draggingAssets) return;
+  if (!hasLibrary() || state.libraryChanging || state.busy || draggingAssets) return;
   const root = state.library.root;
   if (!await waitForMetadata()) return;
   if (state.library.root !== root) throw new Error('素材库已切换，请重新选择素材');
@@ -1725,8 +1774,7 @@ async function showAssetContextMenu(id) {
         return api.updateAssets(ids, result.action === 'favorite' ? { minRating: 4 } : { rating: 0 });
       }); break;
     case 'export': {
-      const exported = await api.exportAssets(ids);
-      if (exported && !exported.cancelled) toast(`已导出 ${exported.count ?? ids.length} 个素材`);
+      await exportLibraryItems('assets', ids, root);
       break;
     }
     case 'trash':
@@ -1880,6 +1928,7 @@ function renderSelection() {
   const count = state.selected.size;
   $('selectionBar').classList.toggle('hidden', !count);
   $('selectedCount').textContent = count.toLocaleString();
+  $('exportSelection').disabled = !count || state.busy || state.libraryChanging || Boolean(activeExport);
   $('trashSelection').classList.toggle('hidden', state.view === 'trash');
   $('restoreSelection').classList.toggle('hidden', state.view !== 'trash');
   $('deleteSelection').classList.toggle('hidden', state.view !== 'trash');
@@ -2101,9 +2150,9 @@ function renderLibraryState() {
   $('libraryOnboarding').classList.toggle('hidden', ready);
   $('setupAppUpdate').classList.toggle('hidden', ready);
   document.querySelector('.app-shell').inert = !ready || state.libraryChanging;
-  $('newFolder').disabled = !ready || state.libraryChanging;
-  $('newSmartFolder').disabled = !ready || state.libraryChanging;
-  $('backupButton').disabled = !ready || state.libraryChanging;
+  $('newFolder').disabled = !ready || state.libraryChanging || Boolean(activeExport);
+  $('newSmartFolder').disabled = !ready || state.libraryChanging || Boolean(activeExport);
+  $('backupButton').disabled = !ready || state.libraryChanging || Boolean(activeExport);
   $('collectorButton').disabled = !ready || state.libraryChanging;
   $('pluginCenterButton').disabled = !ready || state.libraryChanging;
   $('toggleDetails').disabled = !ready || state.libraryChanging;
@@ -2213,7 +2262,7 @@ function resolveModal(value) {
   if (resolve) resolve(value);
 }
 async function createFolder(parentId = currentFolder()) {
-  if (!hasLibrary() || state.libraryChanging) return;
+  if (!hasLibrary() || state.libraryChanging || state.busy) return;
   const root = state.library.root;
   const result = await modal({ title: parentId ? '新建子文件夹' : '新建文件夹', description: '选择上级文件夹，按项目、主题或使用场景收好素材。', parentOptions: folderTree.flatten(state.library.folders), parentId });
   if (!result?.name?.trim() || !await waitForMetadata() || state.library.root !== root || state.libraryChanging) return;
@@ -2229,16 +2278,16 @@ function showFolderMenu(folder, anchor, point) {
   folderTreeDrag.cancel();
   stopGalleryPreviews();
   closeFolderMenu();
-  if (!hasLibrary() || state.libraryChanging || folderMoveSaving) return;
+  if (!hasLibrary() || state.libraryChanging || state.busy || folderMoveSaving) return;
   const root = state.library.root, menu = $('folderContextMenu');
   folderMenuAnchor = anchor;
-  const items = [['create', '新建子文件夹', 'plus'], ['icon', '设置图标…', 'palette'], ['rename', '重命名', 'folder'], ['move', '移动文件夹…', 'arrow'], ['delete', '删除文件夹…', 'trash']];
+  const items = [['create', '新建子文件夹', 'plus'], ['icon', '设置图标…', 'palette'], ['export', '按层级导出…', 'download'], ['rename', '重命名', 'folder'], ['move', '移动文件夹…', 'arrow'], ['delete', '删除文件夹…', 'trash']];
   menu.replaceChildren(...items.map(([kind, label, glyph]) => {
     const button = action(label, kind === 'delete' ? 'is-destructive' : '', () => {
       closeFolderMenu();
       const current = state.library.folders.find(item => item.id === folder.id);
       if (root !== state.library.root || !current) return;
-      if (kind === 'create') createFolder(current.id); else if (kind === 'icon') void run(() => openFolderIconEditor(current)); else manageFolder(current, kind);
+      if (kind === 'create') createFolder(current.id); else if (kind === 'icon') void run(() => openFolderIconEditor(current)); else if (kind === 'export') void exportLibraryItems('folder', current.id, root); else manageFolder(current, kind);
     }, glyph);
     button.dataset.folderAction = kind; button.setAttribute('role', 'menuitem'); return button;
   }));
@@ -2409,11 +2458,9 @@ function displayProjectPreview(asset) {
   const warnings = el('p', 'project-preview-notes hidden');
   const retry = action('重试生成预览', 'secondary-button hidden', () => request(view.compositionId), 'refresh'); retry.id = 'projectPreviewRetry';
   const actions = el('div', 'project-preview-actions');
-  actions.append(action('使用 AE 打开', 'primary-button', () => run(() => api.openAsset(asset.id)), 'external'),
-    action('导出完整文件夹', 'secondary-button', () => run(async () => {
-      const result = await api.exportAssets([asset.id]);
-      if (result && !result.cancelled) toast('已导出 AE 工程与素材文件夹');
-    }), 'download'), retry);
+  const exportButton = action('导出完整文件夹', 'secondary-button', () => exportLibraryItems('assets', [asset.id], expectedRoot), 'download');
+  exportButton.dataset.exportCommand = 'assets'; exportButton.disabled = Boolean(activeExport || state.busy || state.libraryChanging);
+  actions.append(action('使用 AE 打开', 'primary-button', () => run(() => api.openAsset(asset.id)), 'external'), exportButton, retry);
   info.append(el('h2', '', asset.name), label, compositionMeta,
     el('p', '', `${bundle?.files?.length || 1} 个文件 · ${size(asset.size)} · 工程已重新链接包内素材`), warnings, actions);
   layout.append(surface, info); box.replaceChildren(layout);
@@ -3116,7 +3163,7 @@ $('deleteSelection').addEventListener('click', () => run(() => deletePermanently
 $('loadMore').addEventListener('click', () => { state.limit += 240; renderGallery(filteredAssets()); });
 $('toggleDetails').addEventListener('click', () => toggleDetails());
 $('closeDetails').addEventListener('click', () => toggleDetails(false));
-$('exportSelection').addEventListener('click', () => run(async () => { const result = await api.exportAssets([...state.selected]); if (result && !result.cancelled) toast(`已导出 ${result.count ?? result.exported ?? state.selected.size} 个素材`); }));
+$('exportSelection').addEventListener('click', () => exportLibraryItems('assets', [...state.selected], state.library.root));
 $('backupButton').addEventListener('click', () => run(async () => {
   if (!hasLibrary() || state.libraryChanging) return;
   const button = $('backupButton'); button.disabled = true;
@@ -3478,6 +3525,7 @@ api.onProjectPreview?.(detail => {
   if (detail?.id === projectPreviewView?.id && detail.root === projectPreviewView.root) projectPreviewView.updateProgress(detail);
 });
 api.onSimilarImageProgress?.(detail => similarImagesUi.updateProgress(detail));
+api.onExportProgress?.(updateExportProgress);
 window.addEventListener('beforeunload', (event) => {
   folderTreeDrag.cancel();
   assetFolderDrag.cancel();

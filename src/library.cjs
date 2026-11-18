@@ -10,6 +10,7 @@ const FolderTree = require('./folder-tree.js');
 const ColorLabels = require('./color-labels.js');
 const FolderIcons = require('./folder-icons.js');
 const FolderIconFiles = require('./folder-icons.cjs');
+const AssetExport = require('./asset-export.cjs');
 const { MetadataHistory, sameField } = require('./metadata-history.cjs');
 const SmartFolders = require('./smart-folders.js');
 const mediaType = (ext, stored) => PROJECT.has(ext) ? 'project' : MODEL.has(ext) ? 'model'
@@ -127,11 +128,6 @@ const now = () => new Date().toISOString();
 const PENDING_DELETE = /^\.pending-delete-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const PENDING_BUNDLE_REPAIR = /^\.pending-repair-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const bundleRepairValidator = ext => PROJECT.has(ext) ? validateProjectBundle : validateModelBundle;
-const safeName = value => {
-  let result = String(value).replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').replace(/[. ]+$/, '').slice(0, 160) || '未命名';
-  if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(result)) result = `_${result}`;
-  return result;
-};
 
 function text(value, label, limit) {
   if (typeof value !== 'string' || !value.trim()) throw new Error(`${label}不能为空`);
@@ -1313,48 +1309,17 @@ class Library {
     });
   }
 
-  exportAssets(ids, destDir) {
+  exportAssets(ids, destDir, options = {}) {
     return this._mutate(async () => {
       const selected = this._ids(ids);
-      const destination = path.resolve(text(destDir, '导出目录', 32000));
-      if (isWithin(this.root, destination) || isWithin(destination, this.root)) throw new Error('请选择与素材库分开的导出目录');
-      await fs.mkdir(destination, { recursive: true });
-      const files = [];
-      for (const asset of this.data.assets) {
-        if (!selected.has(asset.id)) continue;
-        const basename = safeName(asset.name);
-        let number = 0;
-        if (isBundle(asset.ext)) {
-          const manifest = assetBundle(asset);
-          const source = PROJECT.has(asset.ext) ? this.getProjectBundleDirectory(asset.id) : this.getModelBundleDirectory(asset.id);
-          await this._checkManagedParent(`${bundleRelative(asset.id, asset.ext)}/entry`);
-          await checkBundleTree(source, manifest.files.map(file => file.path));
-          let output;
-          while (true) {
-            output = path.join(destination, `${basename}${number ? ` (${number})` : ''}`);
-            try { await fs.mkdir(output); break; }
-            catch (error) { if (error.code !== 'EEXIST') throw error; number++; }
-          }
-          try {
-            for (const file of manifest.files) {
-              const target = path.join(output, file.path);
-              await fs.mkdir(path.dirname(target), { recursive: true });
-              await fs.copyFile(path.join(source, file.path), target, require('node:fs').constants.COPYFILE_EXCL);
-            }
-          } catch (error) {
-            await removeBundleFiles(output, manifest.files.map(file => file.path)).catch(() => {});
-            throw error;
-          }
-          files.push(output);
-          continue;
-        }
-        while (true) {
-          const output = path.join(destination, `${basename}${number ? ` (${number})` : ''}.${asset.ext}`);
-          try { await fs.copyFile(this.getAssetPath(asset.id), output, require('node:fs').constants.COPYFILE_EXCL); files.push(output); break; }
-          catch (error) { if (error.code !== 'EEXIST') throw error; number++; }
-        }
-      }
-      return { exported: files.length, files };
+      return AssetExport.exportAssets(this, this.data.assets.filter(asset => selected.has(asset.id)), destDir, options);
+    });
+  }
+
+  exportFolder(folderId, destDir, options = {}) {
+    return this._mutate(async () => {
+      this._folder(folderId);
+      return AssetExport.exportFolder(this, folderId, destDir, options);
     });
   }
 

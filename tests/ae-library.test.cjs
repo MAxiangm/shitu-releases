@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const sharp = require('sharp');
 const { Library } = require('../src/library.cjs');
 const { LibraryManager } = require('../src/library-manager.cjs');
 const { resolveAssetFiles } = require('../src/asset-actions.cjs');
@@ -100,12 +101,15 @@ test('a dropped AE project folder becomes one independent relinked package and e
   const managedEntry = JSON.parse(await fs.readFile(reopened.getAssetPath(asset.id), 'utf8'));
   assert.ok(managedEntry.footage.every(reference => reference.startsWith('./Footage/')));
   for (const relative of managedEntry.footage) assert.ok((await fs.stat(path.join(reopened.getProjectBundleDirectory(asset.id), relative))).isFile());
-  const exported = await reopened.exportAssets([asset.id], path.join(base, 'exports'));
+  const thumbnailPath = path.join(base, 'export-preview.jpg');
+  await sharp({ create: { width: 12, height: 8, channels: 3, background: '#357f70' } }).jpeg().toFile(thumbnailPath);
+  const exportOptions = { thumbnailPaths: new Map([[asset.id, thumbnailPath]]) };
+  const exported = await reopened.exportAssets([asset.id], path.join(base, 'exports'), exportOptions);
   assert.equal(exported.exported, 1); assert.ok((await fs.stat(exported.files[0])).isDirectory());
   assert.deepEqual(await fs.readFile(path.join(exported.files[0], asset.projectBundle.entry)), await fs.readFile(reopened.getAssetPath(asset.id)));
   for (const relative of managedEntry.footage) assert.ok((await fs.stat(path.join(exported.files[0], relative))).isFile());
   assert.deepEqual(resolveAssetFiles(reopened, [asset.id], reopened.root).files, [reopened.getProjectBundleDirectory(asset.id)]);
-  const again = await reopened.exportAssets([asset.id], path.join(base, 'exports'));
+  const again = await reopened.exportAssets([asset.id], path.join(base, 'exports'), exportOptions);
   assert.notEqual(again.files[0], exported.files[0]);
 });
 
