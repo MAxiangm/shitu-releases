@@ -90,6 +90,15 @@ test('Vimeo playback combines a complete video and separate audio without encodi
     assert.equal(options.headers.Cookie, undefined);
     hosts.push(url.pathname);
     const request = new EventEmitter();
+    if (url.pathname === '/denied.mp4') {
+      queueMicrotask(() => {
+        const response = Readable.from(['Forbidden']);
+        response.statusCode = 403;
+        response.headers = {};
+        responseReady(response);
+      });
+      return request;
+    }
     fs.readFile(path.join(media, path.posix.basename(url.pathname))).then(bytes => {
       const response = Readable.from([bytes]);
       response.statusCode = 200;
@@ -126,6 +135,85 @@ test('Vimeo playback combines a complete video and separate audio without encodi
   assert.equal(direct.imported, 1, direct.error);
   const directFile = setup.library.getAssetPath(direct.assetIds[0], 'original');
   assert.deepEqual(await fs.readFile(directFile), await fs.readFile(path.join(media, 'original.mp4')));
+
+  // Exercise the same parser/mux/import flow with all media bytes relayed from
+  // the browser. The local HTTPS downloader must not be used in this mode.
+  const beforeRelay = hosts.length;
+  let relaySerial = 0;
+  async function relayCapture(playback, filename, existingRequestId) {
+    const requestId = existingRequestId || `1700000000000-${++relaySerial}`;
+    const reads = [];
+    let settled = false;
+    const result = setup.capture({ kind: 'video', playback, pageUrl, name: `browser-${filename}`,
+      url: `https://capture-test.vimeocdn.com/${filename}?ephemeral=browser-fixture`, requestId, browserRead: true });
+    result.finally(() => { settled = true; });
+    const deadline = Date.now() + 10000;
+    while (!settled) {
+      assert.ok(Date.now() < deadline, 'browser relay capture completes');
+      const { body: polling } = await setup.request('/v1/capture-browser-read', { requestId });
+      assert.equal(polling.ok, true, polling.error);
+      const read = polling.read;
+      if (!read) { await delay(2); continue; }
+      reads.push(read);
+      const pathname = new URL(read.url).pathname;
+      let bytes = await fs.readFile(path.join(media, path.posix.basename(pathname)));
+      const fullLength = bytes.length;
+      if (read.range) bytes = bytes.subarray(read.range.start, read.range.end + 1);
+      const send = async (sequence, fields) => {
+        const { status, body } = await setup.request('/v1/capture-browser-data', { requestId, readId: read.readId, sequence, ...fields });
+        assert.equal(status, 200, body.error);
+        assert.equal(body.ok, true, body.error);
+      };
+      await send(0, { head: { status: read.range ? 206 : 200, url: read.url, contentType: 'application/octet-stream',
+        contentLength: bytes.length, ...(read.range ? { contentRange: `bytes ${read.range.start}-${read.range.end}/${fullLength}` } : {}) } });
+      let sequence = 1;
+      for (let offset = 0; offset < bytes.length; offset += 256 * 1024) {
+        await send(sequence++, { dataBase64: bytes.subarray(offset, offset + 256 * 1024).toString('base64') });
+      }
+      await send(sequence, { done: true });
+    }
+    const { body } = await result;
+    assert.equal(body.ok, true, body.error);
+    assert.equal(body.imported + body.duplicates, 1);
+    const assetId = body.assetIds[0] || body.existingAssets[0].id;
+    return { saved: setup.library.getAssetPath(assetId, 'original'), reads, requestId };
+  }
+  const browserHls = await relayCapture('hls', 'master.m3u8');
+  assert.ok(browserHls.reads.some(read => read.url.includes('picture.m3u8')));
+  assert.ok(browserHls.reads.some(read => read.url.includes('sound.m3u8')));
+  assert.deepEqual(packetHashes(browserHls.saved, 'v'), packetHashes('picture.m3u8', 'v'));
+  assert.deepEqual(packetHashes(browserHls.saved, 'a'), packetHashes('sound.m3u8', 'a'));
+
+  run(ffmpeg, ['-v', 'error', '-i', 'original.mp4', '-map', '0:v', '-map', '0:a', '-c', 'copy', '-f', 'dash',
+    '-seg_duration', '1', '-init_seg_name', 'dash-init-$RepresentationID$.mp4',
+    '-media_seg_name', 'dash-media-$RepresentationID$-$Number$.m4s', 'browser.mpd']);
+  const browserDash = await relayCapture('dash', 'browser.mpd');
+  assert.ok(browserDash.reads.some(read => read.url.includes('dash-init-0')));
+  assert.ok(browserDash.reads.some(read => read.url.includes('dash-init-1')));
+  const dashProbe = await engine.probe(browserDash.saved);
+  assert.equal(dashProbe.codec, 'h264');
+  assert.equal(dashProbe.audioCodec, 'aac');
+  assert.ok(dashProbe.duration >= 1.99);
+
+  const originalBytes = await fs.readFile(path.join(media, 'original.mp4'));
+  const padding = Buffer.alloc(21 * 1024 * 1024);
+  padding.writeUInt32BE(padding.length, 0); padding.write('free', 4);
+  const largeFile = Buffer.concat([originalBytes, padding]);
+  await fs.writeFile(path.join(media, 'large.mp4'), largeFile);
+  const browserFile = await relayCapture('file', 'large.mp4');
+  assert.deepEqual(await fs.readFile(browserFile.saved), largeFile);
+  assert.equal(hosts.length, beforeRelay, 'the desktop does not request CDN bytes for browser relay captures');
+  assert.equal((await setup.request('/v1/capture-browser-read', { requestId: browserFile.requestId })).body.done, true);
+
+  const rejectedId = '1700000000000-401';
+  const denied = (await setup.capture({ requestId: rejectedId, kind: 'video', playback: 'file', pageUrl,
+    url: 'https://capture-test.vimeocdn.com/denied.mp4' })).body;
+  assert.equal(denied.code, 'VIMEO_BROWSER_READ');
+  assert.deepEqual((await setup.request('/v1/capture-browser-read', { requestId: rejectedId })).body,
+    { ok: true, read: null, done: false }, 'the original native failure does not prematurely finish a pending browser retry');
+  await fs.copyFile(path.join(media, 'original.mp4'), path.join(media, 'denied.mp4'));
+  const retried = await relayCapture('file', 'denied.mp4', rejectedId);
+  assert.deepEqual(await fs.readFile(retried.saved), originalBytes);
 });
 
 test('HTTP inline image bytes import without local DNS or download and retain the original source URL', async t => {
@@ -408,4 +496,104 @@ test('the web video retry signal is reserved for browser-readable authorization 
   const imageResult = await setup.capture({ kind: 'image', url: server.url + '/session.mp4' });
   assert.equal(imageResult.body.code, undefined);
   assert.equal(setup.library.snapshot().stats.total, 0);
+});
+
+test('browser relay endpoints retain authentication and expire incomplete captures without importing bytes', async t => {
+  const setup = await fixture(t, { playbackTimeout: 50 });
+  assert.equal((await setup.request('/v1/ping', {})).body.vimeoBrowserRead, true);
+  const requestId = '1700000000000-901';
+  for (const route of ['/v1/capture-browser-read', '/v1/capture-browser-data', '/v1/capture-browser-cancel']) {
+    assert.equal((await setup.request(route, { requestId }, { headers: { 'X-Shitu-Token': '0'.repeat(64) } })).status, 401);
+    assert.equal((await setup.request(route, { requestId }, { headers: { Origin: 'https://unrelated.example' } })).status, 403);
+    assert.equal((await setup.request(route, { requestId: 'invalid' })).status, 400);
+  }
+  assert.deepEqual((await setup.request('/v1/capture-browser-read', { requestId })).body, { ok: true, read: null, done: false });
+  assert.equal((await setup.request('/v1/capture-browser-data', { requestId, readId: 'absent', sequence: 0, done: true })).status, 400);
+  for (const body of [image({ browserRead: true, requestId }),
+    { kind: 'video', url: 'https://capture-test.vimeocdn.com/video.mp4', browserRead: true, requestId },
+    { kind: 'video', url: 'https://capture-test.vimeocdn.com/video.mp4', playback: 'file', pageUrl: 'https://vimeo.com/123', browserRead: true }]) {
+    const result = (await setup.capture(body)).body;
+    assert.equal(result.ok, false);
+    assert.match(result.error, /浏览器视频读取请求无效/);
+  }
+  const expired = (await setup.capture({ kind: 'video', url: 'https://capture-test.vimeocdn.com/video.mp4',
+    playback: 'file', pageUrl: 'https://vimeo.com/123', browserRead: true, requestId })).body;
+  assert.equal(expired.ok, false);
+  assert.match(expired.error, /超时/);
+  assert.equal(setup.service.activeCount(), 0);
+  assert.equal(setup.library.snapshot().stats.total, 0);
+  assert.deepEqual((await setup.request('/v1/capture-browser-read', { requestId })).body, { ok: true, read: null, done: true });
+});
+
+test('browser cancellation stops waiting reads and muxing but cannot cancel native or committed imports', async t => {
+  const setup = await fixture(t, { playbackTimeout: 5000, timeout: 100, allowPrivate: true });
+  const input = requestId => ({ requestId, kind: 'video', playback: 'file', browserRead: true,
+    pageUrl: 'https://vimeo.com/123', url: 'https://capture-test.vimeocdn.com/video.mp4' });
+  const waitForRead = async (target, requestId) => {
+    for (let i = 0; i < 100; i++) {
+      const value = (await target.request('/v1/capture-browser-read', { requestId })).body.read;
+      if (value) return value;
+      await delay(5);
+    }
+    assert.fail('expected a pending browser read');
+  };
+  const sendRead = async (target, requestId, bytes) => {
+    const read = await waitForRead(target, requestId);
+    for (const [sequence, fields] of [
+      { head: { status: 200, url: read.url, contentType: 'application/octet-stream', contentLength: bytes.length } },
+      { dataBase64: bytes.toString('base64') }, { done: true }
+    ].entries()) {
+      const response = await target.request('/v1/capture-browser-data', { requestId, readId: read.readId, sequence, ...fields });
+      assert.equal(response.body.ok, true, response.body.error);
+    }
+  };
+  const requestId = '1700000000000-902';
+  const pending = setup.capture(input(requestId));
+  await waitForRead(setup, requestId);
+  assert.equal((await setup.request('/v1/capture-browser-cancel', { requestId })).body.cancelled, true);
+  assert.equal((await pending).body.code, 'CAPTURE_CANCELLED');
+  assert.equal(setup.service.activeCount(), 0);
+  assert.equal(setup.library.snapshot().stats.total, 0);
+  assert.equal((await setup.request('/v1/capture-browser-cancel', { requestId })).body.cancelled, false);
+  assert.equal((await setup.request('/v1/capture-browser-cancel', { requestId: '1700000000000-999' })).body.cancelled, false);
+
+  const nativeSource = await sourceServer(t, () => {});
+  const nativeId = '1700000000000-903';
+  const native = setup.capture({ kind: 'video', url: nativeSource.url + '/video.mp4', requestId: nativeId });
+  await delay(5);
+  assert.equal((await setup.request('/v1/capture-browser-cancel', { requestId: nativeId })).body.cancelled, false);
+  assert.notEqual((await native).body.code, 'CAPTURE_CANCELLED');
+
+  let enteredMux;
+  const muxEntered = new Promise(resolve => { enteredMux = resolve; });
+  const muxSetup = await fixture(t, { playbackTimeout: 5000, muxVimeoPlayback: async (_media, _output, { signal }) => {
+    enteredMux();
+    await new Promise((_resolve, reject) => {
+      signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+    });
+  } });
+  const muxId = '1700000000000-904';
+  const muxCapture = muxSetup.capture({ ...input(muxId), playback: 'hls', url: 'https://capture-test.vimeocdn.com/video.m3u8' });
+  await sendRead(muxSetup, muxId, Buffer.from('#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\nsegment.ts\n#EXT-X-ENDLIST\n'));
+  const segment = Buffer.alloc(377); segment[0] = segment[188] = segment[376] = 0x47;
+  await sendRead(muxSetup, muxId, segment);
+  await muxEntered;
+  assert.equal((await muxSetup.request('/v1/capture-browser-cancel', { requestId: muxId })).body.cancelled, true);
+  assert.equal((await muxCapture).body.code, 'CAPTURE_CANCELLED');
+
+  let importing, releaseImport;
+  const importEntered = new Promise(resolve => { importing = resolve; });
+  const importGate = new Promise(resolve => { releaseImport = resolve; });
+  t.after(() => releaseImport());
+  const importSetup = await fixture(t, { library: { root: 'fake-library', importPaths: async () => {
+    importing(); await importGate; return { imported: 1, duplicates: 0, errors: [], assetIds: ['saved'] };
+  }, snapshot: () => ({ assets: [] }) } });
+  const importId = '1700000000000-905';
+  const committed = importSetup.capture(input(importId));
+  const mp4 = Buffer.from([0, 0, 0, 16, ...Buffer.from('ftypisom'), 0, 0, 0, 0]);
+  await sendRead(importSetup, importId, mp4);
+  await importEntered;
+  assert.equal((await importSetup.request('/v1/capture-browser-cancel', { requestId: importId })).body.cancelled, false);
+  releaseImport();
+  assert.equal((await committed).body.ok, true);
 });

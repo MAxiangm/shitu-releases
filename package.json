@@ -1,7 +1,7 @@
 {
   "name": "shitu",
   "productName": "Mosaic",
-  "version": "0.29.13",
+  "version": "0.29.14",
   "description": "A local-first creative asset library for Windows",
   "main": "src/main.cjs",
   "private": true,

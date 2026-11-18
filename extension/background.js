@@ -4,7 +4,7 @@ const CONFIG_KEY = 'shituConnection';
 const LAST_KEY = 'shituLastCapture';
 const DESTINATIONS_KEY = 'shituCaptureDestinations';
 // A running worker can read an updated manifest without having loaded new code.
-const WORKER_VERSION = '0.11.19';
+const WORKER_VERSION = '0.11.20';
 const CAPTURE_TIMEOUT = 280000;
 const PAGE_READ_TIMEOUT = 22000;
 const PROGRESS_INTERVAL = 1000;
@@ -12,6 +12,7 @@ const MAX_DATA_LENGTH = 28 * 1024 * 1024;
 const MENU_ID = 'shitu-save-media';
 const pending = new Map();
 const locateReceipts = new Map();
+const vimeoBrowserCaptures = new Map();
 let requestSerial = 0;
 let activeStatusId = null;
 let statusWrites = Promise.resolve();
@@ -55,7 +56,7 @@ async function requestLocal(port, route, body, token, timeout) {
       throw issue('Mosaic 返回了无效响应，请更新软件和扩展。', 'INVALID_RESPONSE');
     }
     if (!response.ok || !result?.ok) {
-      const captureCodes = ['VIDEO_BROWSER_READ', 'CAPTURE_LIBRARY_CHANGED', 'CAPTURE_FOLDER_MISSING', 'CAPTURE_PENDING'];
+      const captureCodes = ['VIDEO_BROWSER_READ', 'VIMEO_BROWSER_READ', 'CAPTURE_LIBRARY_CHANGED', 'CAPTURE_FOLDER_MISSING', 'CAPTURE_PENDING'];
       const code = route === '/v1/capture' && captureCodes.includes(result?.code) ? result.code : 'SERVER_ERROR';
       throw issue(result?.error || `请求失败（${response.status}）`, code);
     }
@@ -75,7 +76,8 @@ function appStatus(result) {
   const libraryId = exactId(result.libraryId);
   return { ok: true, app: '拾图', version: result.version, ready: result.ready,
     ...(libraryId ? { libraryId } : {}), ...(result.captureProgress === true ? { captureProgress: true } : {}),
-    ...(result.vimeoPlayback === true ? { vimeoPlayback: true } : {}) };
+    ...(result.vimeoPlayback === true ? { vimeoPlayback: true } : {}),
+    ...(result.vimeoBrowserRead === true ? { vimeoBrowserRead: true } : {}) };
 }
 
 async function discoverAt(port) {
@@ -320,6 +322,99 @@ async function readVideoFromPage(body, sender, clientCaptureId) {
   return checkedMedia({ ...body, dataBase64: media.dataBase64, mimeType: media.mimeType });
 }
 
+function sameCaptureDocument(expected, actual) {
+  return expected.tab?.id === actual.tab?.id &&
+    (expected.documentId ? expected.documentId === actual.documentId
+      : (expected.frameId || 0) === (actual.frameId || 0) && expected.url === actual.url);
+}
+
+async function receiveVimeoBrowserData(message, sender) {
+  const job = vimeoBrowserCaptures.get(message.requestId);
+  if (!job || job.stopped || job.readId !== message.readId || !sameCaptureDocument(job.sender, sender)) {
+    throw new Error('Vimeo 浏览器读取任务已结束或网页已变化。');
+  }
+  if (!Number.isSafeInteger(message.sequence) || message.sequence !== job.sequence) {
+    throw new Error('Vimeo 浏览器数据顺序无效。');
+  }
+  const result = await localRequest('/v1/capture-browser-data', {
+    requestId: message.requestId, readId: message.readId, sequence: message.sequence,
+    ...(message.head ? { head: message.head } : {}),
+    ...(typeof message.dataBase64 === 'string' ? { dataBase64: message.dataBase64 } : {}),
+    ...(message.done === true ? { done: true } : {}),
+    ...(typeof message.error === 'string' ? { error: safeText(message.error, 300) } : {})
+  }, job.config, 15000);
+  job.sequence++;
+  return result;
+}
+
+function startVimeoBrowserRead(requestId, config, sender) {
+  const job = { sender, config, stopped: false, readId: null, sequence: 0 };
+  vimeoBrowserCaptures.set(requestId, job);
+  const pause = () => new Promise(resolve => setTimeout(resolve, 100));
+  let rejectFailure;
+  const failure = new Promise((_resolve, reject) => { rejectFailure = reject; });
+  failure.catch(() => {});
+  async function pump() {
+    // Let the capture request register its job before the first poll.
+    await pause();
+    let pollFailures = 0;
+    while (!job.stopped) {
+      let response;
+      try {
+        response = await localRequest('/v1/capture-browser-read', { requestId }, config, 4000);
+        pollFailures = 0;
+      } catch (error) {
+        if (job.stopped) return;
+        if (++pollFailures >= 3) throw error;
+        await pause();
+        continue;
+      }
+      if (job.stopped || response.done === true) return;
+      const read = response.read;
+      if (!read) { await pause(); continue; }
+      if (typeof read.readId !== 'string' || typeof read.url !== 'string' || !Number.isSafeInteger(read.limit)) {
+        throw new Error('桌面返回了无效的 Vimeo 浏览器读取请求。');
+      }
+      job.readId = read.readId;
+      job.sequence = 0;
+      let failure;
+      try {
+        const reply = await chrome.tabs.sendMessage(sender.tab.id, { type: 'shitu:vimeo-browser-read',
+          requestId, readId: read.readId, url: read.url, limit: read.limit,
+          ...(read.range ? { range: read.range } : {}) }, pageTarget(sender));
+        if (!reply?.ok) failure = reply?.error || '浏览器未完成 Vimeo 视频读取。';
+      } catch { failure = '当前网页已关闭或更新，请刷新页面后重试。'; }
+      if (failure && !job.stopped) {
+        // The content script normally reports its own failure. This also closes
+        // a pending desktop read if the tab disappeared before it could reply.
+        await localRequest('/v1/capture-browser-data', { requestId, readId: read.readId,
+          sequence: job.sequence, error: safeText(failure, 300) }, config, 4000).catch(() => {});
+      }
+      job.readId = null;
+    }
+  }
+  void pump().catch(async () => {
+    if (job.stopped) return;
+    try {
+      const result = await localRequest('/v1/capture-browser-cancel', { requestId }, config, 4000);
+      // If importing has already begun, only the original capture response can
+      // tell us whether saving committed. Do not turn a saved asset into failure.
+      if (!result.cancelled) return;
+      rejectFailure(issue('Vimeo 浏览器传输中断，采集已停止，请重试。', 'BROWSER_READ_FAILED'));
+    } catch {
+      rejectFailure(issue('浏览器传输未收到最终确认，请先在 Mosaic 检查结果，避免重复采集。', 'TIMEOUT'));
+    }
+  });
+  function stop() {
+    job.stopped = true;
+    if (job.readId) void chrome.tabs.sendMessage(sender.tab.id, {
+      type: 'shitu:vimeo-browser-cancel', requestId, readId: job.readId
+    }, pageTarget(sender)).catch(() => {});
+    if (vimeoBrowserCaptures.get(requestId) === job) vimeoBrowserCaptures.delete(requestId);
+  }
+  return { stop, failure };
+}
+
 function captureProgress(value) {
   if (!['receiving', 'downloading', 'muxing', 'importing', 'complete'].includes(value?.phase)) return null;
   const receivedBytes = Number.isSafeInteger(value.receivedBytes) && value.receivedBytes >= 0 ? value.receivedBytes : 0;
@@ -423,11 +518,15 @@ async function capture(input, sender, clientCaptureId) {
       const payload = { ...media, requestId, ...(destination ? { destination } : {}) };
       async function attempt() {
         if (media.playback && !connection.status.vimeoPlayback) throw issue('请将桌面 Mosaic 更新到支持 Vimeo 播放采集的版本。', 'INCOMPATIBLE_APP');
+        if (media.browserRead && !connection.status.vimeoBrowserRead) throw issue('请更新桌面 Mosaic 后重试 Vimeo 浏览器采集。', 'INCOMPATIBLE_APP');
         await publish(media.dataBase64 ? 'receiving' : 'downloading',
           media.dataBase64 ? '正在把素材交给桌面…' : '正在下载素材…');
         const stop = connection.status.captureProgress ? watchProgress(requestId, connection.config, publish) : null;
-        try { return await localRequest('/v1/capture', payload, connection.config, CAPTURE_TIMEOUT); }
-        finally { stop?.(); }
+        const browserRead = media.browserRead ? startVimeoBrowserRead(requestId, connection.config, sender) : null;
+        try {
+          const response = localRequest('/v1/capture', payload, connection.config, CAPTURE_TIMEOUT);
+          return await (browserRead ? Promise.race([response, browserRead.failure]) : response);
+        } finally { browserRead?.stop(); stop?.(); }
       }
       try { return await attempt(); }
       catch (error) {
@@ -441,11 +540,16 @@ async function capture(input, sender, clientCaptureId) {
     let result;
     try { result = await submit(body); }
     catch (error) {
-      if (body.playback || error.code !== 'VIDEO_BROWSER_READ') throw error;
-      await publish('reading', '正在从当前网页读取视频，尚未保存…');
-      const browserVideo = await readVideoFromPage(body, sender, job.clientCaptureId);
-      if (!browserVideo) throw error;
-      result = await submit(browserVideo);
+      if (body.playback && error.code === 'VIMEO_BROWSER_READ' && connection.status.vimeoBrowserRead) {
+        await publish('reading', '正在通过当前浏览器读取 Vimeo 视频，尚未保存…');
+        result = await submit({ ...body, browserRead: true });
+      } else {
+        if (body.playback || error.code !== 'VIDEO_BROWSER_READ') throw error;
+        await publish('reading', '正在从当前网页读取视频，尚未保存…');
+        const browserVideo = await readVideoFromPage(body, sender, job.clientCaptureId);
+        if (!browserVideo) throw error;
+        result = await submit(browserVideo);
+      }
     }
     const confirmed = captureResult(result);
     const location = savedLocation(result, confirmed);
@@ -466,6 +570,7 @@ async function capture(input, sender, clientCaptureId) {
 
 async function handleMessage(message, sender) {
   if (sender.id !== chrome.runtime.id) throw new Error('请求来源无效。');
+  if (message?.type === 'shitu:vimeo-browser-data') return receiveVimeoBrowserData(message, sender);
   if (message?.type === 'shitu:capture') {
     if (!sender.tab || !/^https?:/i.test(sender.url || '')) throw new Error('请在普通网页中采集素材。');
     const clientCaptureId = typeof message.clientCaptureId === 'string' && /^\d{13}-\d{1,10}$/.test(message.clientCaptureId) ? message.clientCaptureId : undefined;

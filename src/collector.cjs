@@ -11,6 +11,7 @@ const { pipeline } = require('node:stream/promises');
 const { Transform } = require('node:stream');
 const { stageVimeoHls, vimeoPlaybackUrl } = require('./vimeo-playback-source.cjs');
 const { stageVimeoDash } = require('./vimeo-dash-source.cjs');
+const { createBrowserMediaRelay, MESSAGE_LIMIT: BROWSER_MESSAGE_LIMIT } = require('./browser-media-relay.cjs');
 
 const DEFAULT_ORIGIN = 'chrome-extension://mdleapcbplpefdgchdklofdnpjgokdhh';
 const INLINE_LIMIT = 20 * 1024 * 1024;
@@ -79,6 +80,7 @@ function createCollector({ library, configPath, onImported = () => {}, onLocate,
   let server, token, listeningPort, active = 0, disabledError, lastCapture;
   const sockets = new Set();
   const captures = new Map();
+  const browserRelay = createBrowserMediaRelay();
   const progress = (job, status, extra = {}) => {
     Object.assign(job, { status, at: Date.now() }, extra);
   };
@@ -101,7 +103,7 @@ function createCollector({ library, configPath, onImported = () => {}, onLocate,
   function readyStatus() {
     const ready = Boolean(isReady());
     const id = ready ? libraryId(getLibraryRoot()) : null;
-    return { ready, captureProgress: true, ...(muxVimeoPlayback ? { vimeoPlayback: true } : {}), ...(id ? { libraryId: id } : {}) };
+    return { ready, captureProgress: true, vimeoBrowserRead: true, ...(muxVimeoPlayback ? { vimeoPlayback: true } : {}), ...(id ? { libraryId: id } : {}) };
   }
   function currentDestination(destination, id) {
     if (destination === undefined) return null;
@@ -166,9 +168,11 @@ function createCollector({ library, configPath, onImported = () => {}, onLocate,
     await pipeline(response, limiter, createWriteStream(destination, {flags:'wx'}), {signal});
   }
   function vimeoReadError(status) {
-    return new Error([401, 403].includes(status)
+    const error = new Error([401, 403].includes(status)
       ? `Vimeo 返回 HTTP ${status}，当前播放源无法读取，未保存视频。`
       : `Vimeo 媒体请求返回 HTTP ${status}，未保存视频。`);
+    if ([401, 403].includes(status)) error.code = 'VIMEO_BROWSER_READ';
+    return error;
   }
   async function readVimeo(source, { destination, limit = maxDownloadBytes, range } = {}, signal, job) {
     const budget = Math.min(limit, maxDownloadBytes - job.receivedBytes);
@@ -206,9 +210,9 @@ function createCollector({ library, configPath, onImported = () => {}, onLocate,
     if (!bytes || (range && bytes !== range.end - range.start + 1)) throw new Error('Vimeo 播放分段不完整，未保存视频');
     return destination ? undefined : { body: Buffer.concat(chunks, bytes), url };
   }
-  async function capture(body, job) {
+  async function capture(body, job, cancellationSignal) {
     lastCapture = job;
-    let temporary;
+    let temporary, browserSession, operationSignal;
     try {
       if (!body || !['image','video'].includes(body.kind)) throw new Error('只支持图片和视频素材');
       const currentId = libraryId(getLibraryRoot());
@@ -226,6 +230,9 @@ function createCollector({ library, configPath, onImported = () => {}, onLocate,
       const pageUrl = body.pageUrl ? webUrl(body.pageUrl,'来源页面').href : undefined;
       const playback = body.playback;
       const stagePlayback = playback === 'hls' ? stageVimeoHls : playback === 'dash' ? stageVimeoDash : null;
+      if (body.browserRead !== undefined && (body.browserRead !== true || !playback || !validCaptureRequestId(body.requestId))) {
+        throw new Error('浏览器视频读取请求无效');
+      }
       if (playback !== undefined) {
         if ((playback !== 'file' && !stagePlayback) || body.kind !== 'video' || !source || inline ||
             !/^https:\/\/vimeo\.com\/\d{1,20}\/?$/.test(pageUrl || '')) throw new Error('Vimeo 播放源采集请求无效');
@@ -252,13 +259,33 @@ function createCollector({ library, configPath, onImported = () => {}, onLocate,
       }
       else {
         progress(job, 'downloading');
+        const deadline = AbortSignal.timeout(playback ? playbackTimeout : timeout);
+        const signal = cancellationSignal ? AbortSignal.any([deadline, cancellationSignal]) : deadline;
+        operationSignal = signal;
+        if (body.browserRead) browserSession = browserRelay.createSession(body.requestId, { signal });
+        const read = async (url, options = {}) => {
+          if (!browserSession) return readVimeo(url, options, signal, job);
+          let target = vimeoPlaybackUrl(url);
+          // Only the existing, address-checked downloader follows Vimeo's
+          // progressive redirect. Browser fetches receive terminal CDN URLs.
+          if (target.hostname === 'player.vimeo.com') {
+            const resolved = await openMedia(target, { signal, vimeo: true, range: options.range });
+            resolved.response.destroy();
+            target = resolved.url;
+            if (target.hostname === 'player.vimeo.com') throw new Error('Vimeo 未提供可由浏览器读取的媒体地址');
+          }
+          const limit = Math.min(options.limit ?? maxDownloadBytes, maxDownloadBytes - job.receivedBytes);
+          return browserSession.read(target, { ...options, limit,
+            onBytes: bytes => progress(job, 'downloading', { receivedBytes: job.receivedBytes + bytes }),
+            onHead: head => { if (playback === 'file' && Number.isSafeInteger(head.contentLength)) progress(job, 'downloading', { totalBytes: head.contentLength }); } });
+        };
         if (stagePlayback) {
-          const signal = AbortSignal.timeout(playbackTimeout);
           const media = await stagePlayback({ url: source, directory: temporary, signal,
-            read: (url, options) => readVimeo(url, options, signal, job) });
+            read });
           progress(job, 'muxing');
           await muxVimeoPlayback(media, original, { signal });
-        } else await download(source,original,pageUrl,AbortSignal.timeout(playback ? playbackTimeout : timeout),job,Boolean(playback));
+        } else if (browserSession) await read(source, { destination: original });
+        else await download(source,original,pageUrl,signal,job,Boolean(playback));
       }
       const handle = await fs.open(original,'r');
       const head = Buffer.alloc(4096); let bytesRead;
@@ -273,6 +300,7 @@ function createCollector({ library, configPath, onImported = () => {}, onLocate,
       const typed = path.join(temporary,`media.${format.ext}`);
       await fs.rename(original,typed);
       if (body.destination !== undefined) currentDestination(body.destination, libraryId(getLibraryRoot()));
+      operationSignal?.throwIfAborted();
       progress(job, 'importing', { name });
       const sourceUrl = playback ? pageUrl : source?.href;
       const report = await library.importPaths([typed], { folderId, metadata:{name,...(sourceUrl ? {sourceUrl} : {}),...(pageUrl ? {pageUrl} : {})} });
@@ -302,10 +330,13 @@ function createCollector({ library, configPath, onImported = () => {}, onLocate,
     } catch (error) {
       progress(job, 'error', { error: error.name === 'TimeoutError' || error.name === 'AbortError' ? '素材下载超时，请检查网络后重试' : error.message });
       const failure = new Error(job.error);
-      if (['CAPTURE_LIBRARY_CHANGED', 'CAPTURE_FOLDER_MISSING'].includes(error.code) ||
-          (body?.kind === 'video' && error.code === 'VIDEO_BROWSER_READ')) failure.code = error.code;
+      if (['CAPTURE_LIBRARY_CHANGED', 'CAPTURE_FOLDER_MISSING', 'CAPTURE_CANCELLED'].includes(error.code) ||
+          (body?.kind === 'video' && ['VIDEO_BROWSER_READ', 'VIMEO_BROWSER_READ'].includes(error.code))) failure.code = error.code;
       throw failure;
-    } finally { if (temporary) await fs.rm(temporary,{recursive:true,force:true}).catch(() => {}); }
+    } finally {
+      await browserSession?.close();
+      if (temporary) await fs.rm(temporary,{recursive:true,force:true}).catch(() => {});
+    }
   }
   async function handler(request,response) {
     const origin = request.headers.origin;
@@ -330,14 +361,28 @@ function createCollector({ library, configPath, onImported = () => {}, onLocate,
     }
     const supplied = request.headers['x-shitu-token'];
     if (typeof supplied !== 'string' || !/^[a-f0-9]{64}$/.test(supplied) || !crypto.timingSafeEqual(Buffer.from(supplied),Buffer.from(token))) return json(401,{ok:false,error:'连接已失效，采集助手需要自动重新连接'});
-    if (request.method !== 'POST' || !['/v1/ping','/v1/capture','/v1/capture-progress','/v1/folders','/v1/locate'].includes(request.url)) return json(404,{ok:false,error:'接口不存在'});
+    if (request.method !== 'POST' || !['/v1/ping','/v1/capture','/v1/capture-progress','/v1/capture-browser-read','/v1/capture-browser-data','/v1/capture-browser-cancel','/v1/folders','/v1/locate'].includes(request.url)) return json(404,{ok:false,error:'接口不存在'});
     if (!String(request.headers['content-type']).startsWith('application/json')) {
       if (request.url === '/v1/capture') rejectedCapture(new Error('只支持 JSON 请求'));
       return json(415,{ok:false,error:'只支持 JSON 请求'});
     }
     try {
-      const body = await readJSON(request, request.url === '/v1/capture' ? 28*1024*1024+32768 : 4096);
+      const body = await readJSON(request, request.url === '/v1/capture' ? 28*1024*1024+32768 : request.url === '/v1/capture-browser-data' ? BROWSER_MESSAGE_LIMIT : 4096);
       if (request.url === '/v1/ping') return json(200,{ok:true,app:'拾图',version:appVersion,...readyStatus()});
+      if (['/v1/capture-browser-read', '/v1/capture-browser-data', '/v1/capture-browser-cancel'].includes(request.url)) {
+        if (!validCaptureRequestId(body?.requestId)) return json(400,{ok:false,error:'采集任务编号无效'});
+        const record = captures.get(body.requestId);
+        if (request.url === '/v1/capture-browser-cancel') {
+          // Once importing starts, cancellation cannot revoke the library's
+          // commit. Report uncertainty instead of promising an absent file.
+          const cancellable = Boolean(record?.browserRead && !record.finishedAt && record.cancelController &&
+            !['importing', 'complete'].includes(record.job.status));
+          if (cancellable) record.cancelController.abort(captureError('CAPTURE_CANCELLED', '浏览器视频读取已取消，未保存视频'));
+          return json(200,{ok:true,cancelled:cancellable});
+        }
+        if (request.url === '/v1/capture-browser-read') return json(200,{ok:true,read:browserRelay.poll(body.requestId),done:Boolean(record?.browserRead && record.finishedAt)});
+        return json(200,await browserRelay.accept(body));
+      }
       if (request.url === '/v1/capture-progress') {
         if (!validCaptureRequestId(body?.requestId)) return json(400,{ok:false,error:'采集任务编号无效'});
         return json(200,{ok:true,progress:captureProgress(body.requestId)});
@@ -374,7 +419,8 @@ function createCollector({ library, configPath, onImported = () => {}, onLocate,
       }
       const job = { status:'receiving', at:Date.now(), receivedBytes:0, name:typeof body?.name === 'string' ? body.name.slice(0,240) : '',
         kind:['image','video'].includes(body?.kind) ? body.kind : undefined };
-      const record = { job };
+      const record = { job, browserRead: body?.browserRead === true,
+        ...(body?.browserRead === true ? { cancelController: new AbortController() } : {}) };
       if (id !== undefined) {
         captures.delete(id);
         captures.set(id, record);
@@ -383,7 +429,7 @@ function createCollector({ library, configPath, onImported = () => {}, onLocate,
       active++;
       response.writeHead(200,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store',...cors}); response.write('\n');
       const heartbeat = setInterval(()=>{if (!response.destroyed) response.write(' ');},10000); heartbeat.unref();
-      try { const result = await capture(body, job); if (!response.destroyed) response.end(JSON.stringify(result)); }
+      try { const result = await capture(body, job, record.cancelController?.signal); if (!response.destroyed) response.end(JSON.stringify(result)); }
       catch(error) { if (!response.destroyed) response.end(JSON.stringify({ok:false,error:error.message,...(error.code ? {code:error.code} : {})})); }
       finally { clearInterval(heartbeat); record.finishedAt = Date.now(); active--; }
     } catch(error) {
@@ -406,7 +452,13 @@ function createCollector({ library, configPath, onImported = () => {}, onLocate,
     },
     info() { return {enabled:Boolean(listeningPort),baseUrl:listeningPort?`http://127.0.0.1:${listeningPort}`:null,code:listeningPort?`SHITU1.${listeningPort}.${token}`:null,error:disabledError,lastCapture:lastCapture ? structuredClone(lastCapture) : null}; },
     activeCount: () => active,
-    async close() { for(const socket of sockets)socket.destroy();if(server?.listening)await new Promise(resolve=>server.close(resolve));captures.clear();listeningPort=null; }
+    async close() {
+      for (const record of captures.values()) if (!record.finishedAt) record.cancelController?.abort(captureError('CAPTURE_CANCELLED', '浏览器视频读取已取消，未保存视频'));
+      await browserRelay.close();
+      for(const socket of sockets)socket.destroy();
+      if(server?.listening)await new Promise(resolve=>server.close(resolve));
+      captures.clear();listeningPort=null;
+    }
   };
 }
 module.exports={createCollector,identify,publicAddress,webUrl};

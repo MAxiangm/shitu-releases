@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Mosaic 采集助手",
-  "version": "0.11.19",
+  "version": "0.11.20",
   "description": "按住 Alt 并右键点击网页图片或可下载的视频，将文件保存到本机 Mosaic 素材库。",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAhQ17MPwt3PTniXaak0vQiqAG4PfUAyB+CbZfXbYRfGq6ID98tktRMEf7om3Hl4HyHMVj0Wga/uvYg+7zFT7SJ0b17Q95m8hgxBGqHx88NWZaaTQIzFJRFB5ua4QbAAkB+3owrT+f9XUuZ8OfLPQfe+bA9Fe6L/wY01OoaifpuTh9nj0/V7Iyb01WsZ8X59DAQYvG/btxw5u3LFb3OrzV3L+LGZZfEMJaTpN31CoOZhkpYYeBobGZv3rDhL/LTVHbb34obNcHtm01Vej/sLuUWsTxklAJYP6bFKMQGy7zkZoNmkqmaL6qZ9UgEW/paloRGIfQX0oezInXb631U5K7gwIDAQAB",
   "permissions": ["storage", "contextMenus"],
@@ -21,7 +21,7 @@
     "run_at": "document_start"
   }, {
     "matches": ["http://*/*", "https://*/*"],
-    "js": ["social-instagram.js", "social-x.js", "social-vimeo.js", "social-pinterest.js", "content.js"],
+    "js": ["social-instagram.js", "social-x.js", "social-vimeo.js", "social-pinterest.js", "vimeo-browser-read.js", "content.js"],
     "all_frames": true,
     "match_about_blank": true,
     "run_at": "document_start"
