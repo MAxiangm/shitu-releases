@@ -110,6 +110,43 @@ test('video preview metadata stays optional for legacy libraries and absent from
   } finally { await fs.rm(directory, { recursive: true, force: true }); }
 });
 
+test('a saved video frame survives reopening and a failed replacement restores the prior cover', async () => {
+  const directory = await fs.mkdtemp(path.join(await testRoot(), 'video-cover-'));
+  try {
+    const source = path.join(directory, 'sample.mp4'), original = Buffer.from('video original');
+    await fs.writeFile(source, original);
+    const library = new Library({ root: path.join(directory, 'library'), createThumbnail: async (_source, target) => {
+      await fs.writeFile(target, 'automatic cover');
+      return { width: 640, height: 360, codec: 'h264' };
+    } });
+    await library.init();
+    await library.importPaths([source]);
+    const asset = library.snapshot().assets[0];
+    const cover = Buffer.from('selected frame'), options = { expectedHash: asset.hash, jpeg: cover };
+    const saved = (await library.setVideoThumbnail(asset.id, options)).assets[0];
+    assert.match(saved.videoThumbnailRevision, /^[a-f0-9-]{36}$/);
+    const target = library.getAssetPath(asset.id, 'thumbnail');
+    assert.deepEqual(await fs.readFile(target), cover);
+    await assert.rejects(library.setVideoThumbnail(asset.id, { ...options, expectedHash: '0'.repeat(64) }), /视频已变化/);
+
+    const persist = library._persist;
+    library._persist = async () => { throw new Error('fixture write failure'); };
+    try {
+      await assert.rejects(library.setVideoThumbnail(asset.id, { ...options, jpeg: Buffer.from('another frame') }), /fixture write failure/);
+    } finally { library._persist = persist; }
+    assert.deepEqual(await fs.readFile(target), cover);
+    assert.deepEqual(await fs.readdir(path.dirname(target)), [path.basename(target)]);
+    assert.deepEqual(await fs.readFile(library.getAssetPath(asset.id, 'original')), original);
+    const reopened = new Library({ root: library.root });
+    await reopened.init();
+    assert.equal(reopened.snapshot().assets[0].videoThumbnailRevision, saved.videoThumbnailRevision);
+  } finally {
+    const relative = path.relative(await testRoot(), directory);
+    assert.ok(relative && !relative.startsWith('..') && !path.isAbsolute(relative));
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
 test('video preview metadata rejects malformed values without copying arbitrary probe fields', async () => {
   const directory = await fs.mkdtemp(path.join(await testRoot(), 'preview-validation-'));
   try {

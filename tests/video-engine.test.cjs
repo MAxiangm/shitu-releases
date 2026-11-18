@@ -99,6 +99,20 @@ test('native VP9/Opus WebM is used directly and the cache is not inflated', requ
   await assert.rejects(fs.access(path.join(directory, 'cache')), { code: 'ENOENT' });
 });
 
+test('adjacent preview frames use presentation timestamps and handle variable frame intervals', requireRuntime, async t => {
+  const directory = await fixture(t), instance = engine(t, directory);
+  const source = path.join(directory, 'variable-frames.mkv');
+  command(['-f', 'lavfi', '-i', 'testsrc2=size=96x64:rate=10:duration=1',
+    '-vf', "select='eq(n,0)+eq(n,1)+eq(n,4)+eq(n,5)+eq(n,9)'", '-fps_mode', 'vfr', '-an', '-c:v', 'ffv1', '-threads', '2', '-y', source]);
+  assert.equal((await instance.adjacentFrame(source, .25, 1)).time, .4);
+  assert.equal((await instance.adjacentFrame(source, .4003, -1)).time, .1);
+  const next = await instance.adjacentFrame(source, .5003, 1);
+  assert.equal(next.time, .9);
+  assert.ok(next.seek >= next.time && next.seek < .901);
+  assert.equal(await instance.adjacentFrame(source, .9001, 1), null);
+  assert.equal(await instance.adjacentFrame(source, 0, -1), null);
+});
+
 test('preview is cached, corrupt cache regenerates, and only one job serves concurrent requests', requireRuntime, async t => {
   const directory = await fixture(t);
   const source = await sample(directory, 'mkv', 'ffv1');

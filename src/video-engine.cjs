@@ -34,7 +34,8 @@ function displayMetadata(data) {
   return {
     width: swapped ? finite(video.height) : finite(video.width),
     height: swapped ? finite(video.width) : finite(video.height),
-    duration, codec: String(video.codec_name || ''), pixelFormat: String(video.pix_fmt || ''), profile: String(video.profile || ''),
+    duration, startTime: finite(data.format?.start_time),
+    codec: String(video.codec_name || ''), pixelFormat: String(video.pix_fmt || ''), profile: String(video.profile || ''),
     streamIndex: Number.isInteger(video.index) && video.index >= 0 ? video.index : 0,
     hasAudio: Boolean(data.streams?.some(stream => stream.codec_type === 'audio')),
     audioCodec: String(data.streams?.find(stream => stream.codec_type === 'audio')?.codec_name || ''),
@@ -64,6 +65,7 @@ function createVideoEngine({ runtimeDir = path.join(__dirname, '..', 'video-runt
   const hoverJobs = new Map();
   const hoverMemory = new Map();
   const probeMemory = new Map();
+  const frameMemory = new Map();
   const hashMemory = new Map();
   const fullMemory = new Map();
   const validationMemory = new Map();
@@ -173,6 +175,56 @@ function createVideoEngine({ runtimeDir = path.join(__dirname, '..', 'video-runt
     return metadata;
   }
   function probe(source, { signal } = {}) { return operation(signal, internal => probeSource(source, internal)); }
+
+  function adjacentFrame(source, time, direction) {
+    if (!Number.isFinite(time) || time < 0 || ![-1, 1].includes(direction)) throw new Error('逐帧位置无效');
+    return operation(undefined, async signal => {
+      const { filename, stat } = await sourceFile(source);
+      const stamp = fileStamp(stat);
+      const metadata = await probeSource(filename, signal);
+      const origin = metadata.startTime || 0;
+      const position = metadata.duration > 0 ? Math.min(time, metadata.duration) : time;
+      if (direction < 0 && position <= .0002) return null;
+      const targetFrom = (frames, fromStart) => {
+        if (!frames.length || (position + .0002 < frames[0] && (!fromStart || direction < 0))) return null;
+        const after = frames.findIndex(frame => frame > position + .0002);
+        const index = direction > 0 ? after : (after < 0 ? frames.length : after) - 2;
+        if (index < 0 || index >= frames.length) return null;
+        const frame = frames[index], next = frames[index + 1];
+        // Seek just inside the target's presentation interval to avoid
+        // rounding down into the previous frame on a coarse media timebase.
+        const inset = next === undefined ? .0001 : Math.min(.0003, (next - frame) / 3);
+        return { time: frame, seek: Math.min(frame + inset, metadata.duration || Infinity) };
+      };
+      const cached = frameMemory.get(filename);
+      if (cached?.stamp === stamp && position <= cached.frames.at(-1) + .0004) {
+        const result = targetFrom(cached.frames, cached.fromStart);
+        if (result) return result;
+      }
+      const radii = [1, 8, 45];
+      let previousStart, previousEnd;
+      for (const radius of radii) {
+        const start = Math.max(0, position - radius);
+        const end = Math.min(metadata.duration ? metadata.duration + .1 : Infinity, position + radius);
+        if (start === previousStart && end === previousEnd) break;
+        previousStart = start; previousEnd = end;
+        const interval = `${(Math.max(0, start + origin)).toFixed(6)}%${(end + origin).toFixed(6)}`;
+        const output = await run(ffprobe, ['-v', 'error', '-protocol_whitelist', 'file,pipe', '-format_whitelist', INPUT_FORMATS,
+          '-select_streams', String(metadata.streamIndex), '-read_intervals', interval, '-show_frames',
+          '-show_entries', 'frame=best_effort_timestamp_time', '-of', 'csv=p=0', '-i', filename],
+        { signal, timeoutMs: timeouts.probeMs || 30000 });
+        const times = output.split(/\r?\n/).map(line => line.split(',')[0].trim())
+          .filter(value => /^-?\d+(?:\.\d+)?$/.test(value)).map(value => Number((Number(value) - origin).toFixed(6)));
+        const frames = [...new Set(times.map(frame => Math.max(0, frame)))].sort((a, b) => a - b);
+        if (fileStamp((await sourceFile(filename)).stat) !== stamp) throw new Error('视频已变化，请重新打开预览');
+        if (frames.length) remember(frameMemory, filename, { stamp, frames, fromStart: start === 0 });
+        const result = targetFrom(frames, start === 0);
+        if (result) return result;
+        if (start === 0 && metadata.duration && end >= metadata.duration) break;
+      }
+      return null;
+    });
+  }
 
   function rememberHover(identity, value) {
     remember(hoverMemory, identity, value);
@@ -482,7 +534,7 @@ function createVideoEngine({ runtimeDir = path.join(__dirname, '..', 'video-runt
     for (const controller of controllers) controller.abort();
     await Promise.allSettled([...tasks]);
   }
-  return { probe, thumbnail, preview, getReadyPreview, hoverPreview, busy: () => tasks.size > 0, shutdown };
+  return { probe, adjacentFrame, thumbnail, preview, getReadyPreview, hoverPreview, busy: () => tasks.size > 0, shutdown };
 }
 
 module.exports = { createVideoEngine, VIDEO_EXTENSIONS, PREVIEW_VERSION, HOVER_VERSION, HOVER_SECONDS, displayMetadata };

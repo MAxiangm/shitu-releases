@@ -18,7 +18,7 @@ module.exports = function configureTranscodeSmoke({ root, base }) {
   });
   const transcoderModule = require(path.join(root, 'src', 'video-transcode.cjs'));
   const originalCreate = transcoderModule.createVideoTranscoder;
-  let engine, enteredGate = false, hold = false, finished = false;
+  let engine, enteredGate = false, hold = false, finished = false, launchPresetName;
   const calls = [], network = [], failures = [], menuLabels = [];
   app.commandLine.appendSwitch('disable-backgrounding-occluded-windows'); app.commandLine.appendSwitch('disable-renderer-backgrounding');
   require(path.join(root, 'src', 'collector.cjs')).createCollector = () => ({ start: async () => ({}), info: () => ({ enabled: false }), activeCount: () => 0, close: async () => {} });
@@ -28,7 +28,12 @@ module.exports = function configureTranscodeSmoke({ root, base }) {
   Menu.buildFromTemplate = template => ({ popup(options) {
     const item = template.find(item => item.id === 'video-transcode');
     menuLabels.push({ label: item?.label, enabled: item?.enabled });
-    if (item?.enabled) item.click(); options.callback?.();
+    if (launchPresetName) {
+      const preset = template.find(entry => entry.id === 'video-transcode-presets')?.submenu.find(entry => entry.label === `${launchPresetName}…`);
+      launchPresetName = null;
+      preset?.click();
+    } else if (item?.enabled) item.click();
+    options.callback?.();
   } });
   transcoderModule.createVideoTranscoder = options => {
     engine = originalCreate(options); const transcode = engine.transcode;
@@ -126,6 +131,10 @@ module.exports = function configureTranscodeSmoke({ root, base }) {
         await wait(() => js(`!transcodeSettingsUi.loading`), 'Transcode device settings link did not load');
         await js(`document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));__transcodeSmoke.check(!document.getElementById('videoTranscodeOverlay').classList.contains('hidden'),'Closing device settings did not restore transcode dialog')`);
         await js(`document.getElementById('videoTranscodeBitrate').value='0';document.getElementById('videoTranscodeBitrate').dispatchEvent(new Event('input'));__transcodeSmoke.check(document.getElementById('videoTranscodeStart').disabled,'Invalid bitrate allowed');document.getElementById('videoTranscodeBitrate').value='2.5';document.getElementById('videoTranscodeBitrate').dispatchEvent(new Event('input'))`);
+        await js(`document.getElementById('transcodePresetAdd').click();const presetName=document.getElementById('transcodePresetName');presetName.value='审片自定义';presetName.dispatchEvent(new Event('input'));document.getElementById('transcodePresetSave').click()`);
+        await wait(() => js('Boolean(transcodeUi.presetId) && !transcodeUi.presetPending'), 'Custom MP4 preset not saved');
+        const [mp4Preset] = JSON.parse(await fs.readFile(path.join(base, 'profile', 'transcode-presets.json'), 'utf8')).presets;
+        assert.equal(mp4Preset.bitrateMbps, 2.5);
         const optionsScreenshot = await capture('transcode-options.png');
         await start(); const single = await done(); assert.equal(single.imported, 1); assert.equal(calls[0].bitrateMbps, 2.5);
         await setForm([setup.ids.avi, setup.ids.dxv], 'mp4', 4); await start(); const batch = await done(); assert.equal(batch.imported + batch.duplicates, 2); assert.equal(batch.total, 2);
@@ -135,7 +144,16 @@ module.exports = function configureTranscodeSmoke({ root, base }) {
         await setForm([setup.ids.avi], 'dxv');
         await js(`__transcodeSmoke.check(document.getElementById('videoTranscodeDeviceSummary').textContent.includes('DXV 使用 CPU'),'DXV CPU limitation missing')`);
         await start(); const dxv = await done(); assert.equal(dxv.imported, 1); assert.equal(dxv.executionMode, 'cpu');
-        await setForm([setup.ids.alpha], 'dxv', 2, true); await start(); const alpha = await done(); assert.equal(alpha.imported, 1);
+        await setForm([setup.ids.alpha], 'dxv', 2, true);
+        await js(`document.getElementById('transcodePresetAdd').click();presetName.value='DXV 带通道';presetName.dispatchEvent(new Event('input'));document.getElementById('transcodePresetSave').click()`);
+        await wait(() => js('Boolean(transcodeUi.presetId) && !transcodeUi.presetPending'), 'DXV alpha preset not saved');
+        const storedPresets = await js('api.listTranscodePresets()');
+        assert.deepEqual(storedPresets[1], { id: storedPresets[1].id, name: 'DXV 带通道', format: 'dxv', alpha: true });
+        await js(`document.getElementById('videoTranscodeBackground').click();document.getElementById('videoTranscodeAlpha').checked=false`);
+        launchPresetName = 'DXV 带通道';
+        await js(`(async()=>{state.selected=new Set(['${setup.ids.alpha}']);await showAssetContextMenu('${setup.ids.alpha}')})()`);
+        assert.equal(await js(`$('videoTranscodeFormat').value==='dxv' && $('videoTranscodeAlpha').checked`), true, 'Native menu preset did not restore alpha');
+        await start(); const alpha = await done(); assert.equal(alpha.imported, 1);
         const alphaAsset = await js(`(async()=>{const lib=await api.getLibrary();return lib.assets.find(a=>a.id==='${alpha.results[0].assetIds[0]}')})()`);
         assert.equal(alphaAsset.hasAlpha, true, 'DXV alpha was not retained');
         hold = true; enteredGate = false;

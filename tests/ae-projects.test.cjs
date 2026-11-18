@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const vm = require('node:vm');
+const { createHash } = require('node:crypto');
 const { createAEProjectCollector, sequenceFiles, readBridgeReport, projectYear, launchAfterEffects, listAfterEffectsTools } = require('../src/ae-projects.cjs');
 const testsRoot = path.resolve(__dirname, '..', '.recovery', 'tests');
 async function fixture(t) {
@@ -83,6 +84,35 @@ test('missing AE footage remains explicit and same-name footage in separate fold
   const prepared = await instance.prepareProjectBundle(item.source); t.after(() => prepared.cleanup());
   assert.deepEqual(prepared.manifest.missing, [missing]);
   assert.equal(prepared.manifest.files.filter(file => file.path.endsWith('.png')).length, 2);
+});
+
+test('confirmed AE repairs rewrite the missing source and verify it opens from the rebuilt package', async t => {
+  const item = await fixture(t);
+  const missing = path.join(item.sourceDirectory, 'not-found', path.basename(item.image));
+  const remembered = { itemId: 1, source: missing, role: 'main', isStill: true, missing: true };
+  let relinked;
+  const instance = collector(t, item, async (_exe, _args, settings) => {
+    const job = JSON.parse(await fs.readFile(settings.env.SHITU_AE_JOB, 'utf8'));
+    let record = remembered;
+    if (job.mode === 'collect') {
+      const xml = await fs.readFile(job.source, 'utf8');
+      relinked = /fullpath="([^"]+)"/.exec(xml)[1];
+      assert.notEqual(relinked, missing);
+      assert.deepEqual(await fs.readFile(relinked), await fs.readFile(item.image));
+      record = { ...record, source: relinked, missing: false };
+      await fs.writeFile(job.output, 'RIFX repaired project');
+    }
+    await fs.writeFile(job.reportProject, bridge({ ok: true, version: '17.0.1x52', sources: [record], compositions: [] }, job.token, [record.source]));
+    return { code: 0 };
+  });
+  const bytes = await fs.readFile(item.image);
+  const prepared = await instance.prepareProjectBundle(item.source, {
+    replacements: new Map([[missing, { filename: item.image, size: bytes.length, hash: createHash('sha256').update(bytes).digest('hex') }]])
+  });
+  t.after(() => prepared.cleanup());
+  assert.deepEqual(prepared.manifest.missing, []);
+  assert.ok(prepared.manifest.files.some(file => path.join(prepared.directory, file.path) === relinked));
+  assert.equal(await fs.readFile(item.source, 'utf8'), 'RIFX synthetic project');
 });
 
 test('sequence enumeration collects all matching frames without mistaking numbered movies or unrelated images for a sequence', async t => {

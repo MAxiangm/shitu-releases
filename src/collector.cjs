@@ -60,11 +60,15 @@ function identify(buffer) {
 }
 async function readJSON(request, limit) {
   const chunks = []; let size = 0;
-  for await (const chunk of request) { size += chunk.length; if (size > limit) throw new Error('请求太大，图片数据上限为 20 MB'); chunks.push(chunk); }
+  for await (const chunk of request) { size += chunk.length; if (size > limit) throw new Error('请求太大，浏览器素材数据上限为 20 MB'); chunks.push(chunk); }
   try { return JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { throw new Error('采集请求格式无效'); }
 }
 
-function createCollector({ library, configPath, onImported = () => {}, isReady=()=>true, allowedOrigin = DEFAULT_ORIGIN, port = 38475, allowPrivate = false, maxDownloadBytes = 512 * 1024 * 1024, timeout = 90000,
+function captureError(code, message) { return Object.assign(new Error(message), { code }); }
+
+function createCollector({ library, configPath, onImported = () => {}, onLocate,
+  getLibraryRoot = () => library.root, listFolders = () => library.listFolders(), hasAsset = id => library.hasAsset(id),
+  isReady=()=>true, allowedOrigin = DEFAULT_ORIGIN, port = 38475, allowPrivate = false, maxDownloadBytes = 512 * 1024 * 1024, timeout = 90000,
   appVersion = require('../package.json').version } = {}) {
   let server, token, listeningPort, active = 0, disabledError, lastCapture;
   const sockets = new Set();
@@ -72,6 +76,25 @@ function createCollector({ library, configPath, onImported = () => {}, isReady=(
     Object.assign(job, { status, at: Date.now() }, extra);
   };
   const rejectedCapture = error => { lastCapture = { status: 'error', at: Date.now(), error: error.message || String(error) }; };
+  function libraryId(root) {
+    return typeof root === 'string' && root ? crypto.createHmac('sha256', token).update(`capture-library\0${root}`).digest('hex') : null;
+  }
+  function readyStatus() {
+    const ready = Boolean(isReady());
+    const id = ready ? libraryId(getLibraryRoot()) : null;
+    return { ready, ...(id ? { libraryId: id } : {}) };
+  }
+  function currentDestination(destination, id) {
+    if (destination === undefined) return null;
+    if (!destination || !id || destination.libraryId !== id) {
+      throw captureError('CAPTURE_LIBRARY_CHANGED', '素材库已切换，请在采集助手中重新选择目标文件夹');
+    }
+    const folderId = destination.folderId;
+    if (folderId !== null && (typeof folderId !== 'string' || !listFolders().some(folder => folder.id === folderId))) {
+      throw captureError('CAPTURE_FOLDER_MISSING', '目标文件夹已不存在，请在采集助手中重新选择');
+    }
+    return folderId;
+  }
   async function download(url, destination, pageUrl, signal, redirects = 0) {
     if (redirects > 5) throw new Error('下载重定向次数过多');
     const hostname = url.hostname.replace(/^\[|\]$/g, '');
@@ -92,9 +115,19 @@ function createCollector({ library, configPath, onImported = () => {}, isReady=(
       if (!response.headers.location) throw new Error('下载重定向地址缺失');
       return download(webUrl(new URL(response.headers.location,url).href), destination, pageUrl, signal, redirects+1);
     }
-    if (response.statusCode !== 200) { response.resume(); throw new Error(`网站返回 HTTP ${response.statusCode}，可能需要登录或不允许直接下载`); }
+    if (response.statusCode !== 200) {
+      response.resume();
+      const error = new Error(`网站返回 HTTP ${response.statusCode}，可能需要登录或不允许直接下载`);
+      if ([401, 403].includes(response.statusCode)) error.code = 'VIDEO_BROWSER_READ';
+      throw error;
+    }
     const type = String(response.headers['content-type'] || '');
-    if (/mpegurl|dash\+xml|text\/html/i.test(type)) { response.resume(); throw new Error('该地址是网页或分段视频流，无法直接保存为视频文件'); }
+    if (/mpegurl|dash\+xml|text\/html/i.test(type)) {
+      response.resume();
+      const error = new Error('该地址返回了网页或分段视频流，无法直接保存为视频文件');
+      if (/text\/html/i.test(type)) error.code = 'VIDEO_BROWSER_READ';
+      throw error;
+    }
     if (Number(response.headers['content-length']) > maxDownloadBytes) { response.destroy(); throw new Error('素材超过 512 MB 下载上限'); }
     let bytes = 0;
     const limiter = new Transform({ transform(chunk,_encoding,callback) { bytes += chunk.length; callback(bytes > maxDownloadBytes ? new Error('素材超过 512 MB 下载上限') : null, chunk); } });
@@ -107,6 +140,8 @@ function createCollector({ library, configPath, onImported = () => {}, isReady=(
     let temporary;
     try {
       if (!body || !['image','video'].includes(body.kind)) throw new Error('只支持图片和视频素材');
+      const currentId = libraryId(getLibraryRoot());
+      const folderId = currentDestination(body.destination, currentId);
       const inline = Object.prototype.hasOwnProperty.call(body, 'dataBase64');
       let source;
       if (typeof body.url !== 'string' || body.url.length > 8192 || /[\x00-\x20\x7f]/.test(body.url)) throw new Error('素材地址无效');
@@ -147,8 +182,9 @@ function createCollector({ library, configPath, onImported = () => {}, isReady=(
       name = name.replace(/[<>:"/\\|?*\x00-\x1f]/g,'_').replace(/\.[a-z0-9]{2,5}$/i,'').trim().slice(0,200) || '网页素材';
       const typed = path.join(temporary,`media.${format.ext}`);
       await fs.rename(original,typed);
+      if (body.destination !== undefined) currentDestination(body.destination, libraryId(getLibraryRoot()));
       progress(job, 'importing', { name });
-      const report = await library.importPaths([typed], { metadata:{name,...(source ? {sourceUrl:source.href} : {}),...(pageUrl ? {pageUrl} : {})} });
+      const report = await library.importPaths([typed], { folderId, metadata:{name,...(source ? {sourceUrl:source.href} : {}),...(pageUrl ? {pageUrl} : {})} });
       if (report?.errors?.length) throw new Error(report.errors[0].message || '素材写入素材库失败');
       if (!Number.isSafeInteger(report?.imported) || report.imported < 0 || !Number.isSafeInteger(report?.duplicates) || report.duplicates < 0 || !report.imported && !report.duplicates)
         throw new Error(report?.unsupported?.length ? '素材库不支持此文件格式，未保存素材' : '素材库未保存这份素材，请重试或检查素材库位置');
@@ -163,8 +199,10 @@ function createCollector({ library, configPath, onImported = () => {}, isReady=(
           id: asset.id, name: asset.name, trashedAt: asset.trashedAt || null, folderId: asset.folderId || null
         }));
       }
+      const folderName = folderId ? snapshot?.folders?.find(folder => folder.id === folderId)?.name : undefined;
       const result = {ok:true,imported:report.imported,duplicates:report.duplicates,assetIds:report.assetIds || [],existingAssets,
-        libraryRoot: typeof snapshot?.root === 'string' ? snapshot.root : typeof library.root === 'string' ? library.root : null};
+        libraryRoot: typeof snapshot?.root === 'string' ? snapshot.root : getLibraryRoot() || null,
+        ...(currentId ? { libraryId: currentId, ...(report.imported ? { folderId, ...(folderName ? { folderName } : {}) } : {}) } : {})};
       progress(job, 'complete', result);
       // Saving is already committed. A closed renderer must not turn a saved
       // capture into a failure and prompt the user to download the same file.
@@ -172,7 +210,10 @@ function createCollector({ library, configPath, onImported = () => {}, isReady=(
       return result;
     } catch (error) {
       progress(job, 'error', { error: error.name === 'TimeoutError' || error.name === 'AbortError' ? '素材下载超时，请检查网络后重试' : error.message });
-      throw new Error(job.error);
+      const failure = new Error(job.error);
+      if (['CAPTURE_LIBRARY_CHANGED', 'CAPTURE_FOLDER_MISSING'].includes(error.code) ||
+          (body?.kind === 'video' && error.code === 'VIDEO_BROWSER_READ')) failure.code = error.code;
+      throw failure;
     } finally { if (temporary) await fs.rm(temporary,{recursive:true,force:true}).catch(() => {}); }
   }
   async function handler(request,response) {
@@ -193,22 +234,40 @@ function createCollector({ library, configPath, onImported = () => {}, isReady=(
       try {
         await readJSON(request,4096);
         // Existing v1 clients treat the app field as the protocol identifier.
-        return json(200,{ok:true,app:'拾图',version:appVersion,ready:Boolean(isReady()),connection:{port:listeningPort,token}});
+        return json(200,{ok:true,app:'拾图',version:appVersion,...readyStatus(),connection:{port:listeningPort,token}});
       } catch(error) {return json(400,{ok:false,error:error.message});}
     }
     const supplied = request.headers['x-shitu-token'];
     if (typeof supplied !== 'string' || !/^[a-f0-9]{64}$/.test(supplied) || !crypto.timingSafeEqual(Buffer.from(supplied),Buffer.from(token))) return json(401,{ok:false,error:'连接已失效，采集助手需要自动重新连接'});
-    if (request.method !== 'POST' || !['/v1/ping','/v1/capture'].includes(request.url)) return json(404,{ok:false,error:'接口不存在'});
+    if (request.method !== 'POST' || !['/v1/ping','/v1/capture','/v1/folders','/v1/locate'].includes(request.url)) return json(404,{ok:false,error:'接口不存在'});
     if (!String(request.headers['content-type']).startsWith('application/json')) {
       if (request.url === '/v1/capture') rejectedCapture(new Error('只支持 JSON 请求'));
       return json(415,{ok:false,error:'只支持 JSON 请求'});
     }
     try {
-      const body = await readJSON(request,28*1024*1024+32768);
-      if (request.url === '/v1/ping') return json(200,{ok:true,app:'拾图',version:appVersion,ready:Boolean(isReady())});
+      const body = await readJSON(request, request.url === '/v1/capture' ? 28*1024*1024+32768 : 4096);
+      if (request.url === '/v1/ping') return json(200,{ok:true,app:'拾图',version:appVersion,...readyStatus()});
       if(!isReady()) {
-        rejectedCapture(new Error('请先在 Mosaic 中选择素材库位置，或等待切换完成'));
-        return json(409,{ok:false,error:lastCapture.error});
+        const error = new Error('请先在 Mosaic 中选择素材库位置，或等待切换完成');
+        if (request.url === '/v1/capture') rejectedCapture(error);
+        return json(409,{ok:false,error:error.message});
+      }
+      if (request.url === '/v1/folders') {
+        const id = libraryId(getLibraryRoot());
+        if (!id) return json(409,{ok:false,error:'请先在 Mosaic 中选择素材库'});
+        return json(200,{ok:true,libraryId:id,folders:listFolders()});
+      }
+      if (request.url === '/v1/locate') {
+        const root = getLibraryRoot();
+        const id = libraryId(root);
+        if (!id || id !== body?.libraryId) return json(409,{ok:false,error:'请切换回保存此素材时使用的素材库'});
+        const assetId = body?.assetId;
+        if (typeof assetId !== 'string' || !/^[a-zA-Z0-9-]{1,128}$/.test(assetId) || !hasAsset(assetId)) {
+          return json(404,{ok:false,error:'素材已不存在，无法定位'});
+        }
+        if (!onLocate) return json(409,{ok:false,error:'Mosaic 窗口暂不可用，请稍后重试'});
+        await onLocate({libraryRoot:root,assetIds:[assetId]});
+        return json(200,{ok:true});
       }
       if (active >= 3) {
         rejectedCapture(new Error('当前有多个素材正在采集，请稍候再试'));
@@ -218,7 +277,7 @@ function createCollector({ library, configPath, onImported = () => {}, isReady=(
       response.writeHead(200,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store',...cors}); response.write('\n');
       const heartbeat = setInterval(()=>{if (!response.destroyed) response.write(' ');},10000); heartbeat.unref();
       try { const result = await capture(body); if (!response.destroyed) response.end(JSON.stringify(result)); }
-      catch(error) { if (!response.destroyed) response.end(JSON.stringify({ok:false,error:error.message})); }
+      catch(error) { if (!response.destroyed) response.end(JSON.stringify({ok:false,error:error.message,...(error.code ? {code:error.code} : {})})); }
       finally { clearInterval(heartbeat); active--; }
     } catch(error) {
       if (request.url === '/v1/capture') rejectedCapture(error);

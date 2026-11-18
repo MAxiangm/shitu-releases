@@ -198,6 +198,22 @@ module.exports = function configureVideoSmoke({ root, base }) {
           check(decodeURIComponent(new URL(focused.currentSrc || focused.src).pathname.slice(1)) === mkv.id, 'Stale AVI request replaced the active video');
           closePreview();
           check(focused.paused && !focused.hasAttribute('src') && state.previewId === null, 'Closing preview did not stop video');
+          openPreview(avi.id);
+          const previousFrameButton = document.getElementById('previewFramePrevious'), nextFrameButton = document.getElementById('previewFrameNext');
+          const saveCoverButton = document.getElementById('previewSaveVideoCover');
+          await waitFor(() => state.previewId === avi.id && videoPreviewSession?.phase === 'full' && !previousFrameButton.disabled, 'Video inspection controls did not enable');
+          focused.pause();
+          focused.currentTime = .61;
+          await waitFor(() => !focused.seeking && !previousFrameButton.disabled, 'Playback did not seek to the test position');
+          previousFrameButton.click();
+          await waitFor(() => !focused.seeking && !previousFrameButton.disabled && Math.abs(focused.currentTime - .5) < .003, 'Previous frame did not reach the immediately prior frame');
+          nextFrameButton.click();
+          await waitFor(() => !focused.seeking && !nextFrameButton.disabled && Math.abs(focused.currentTime - .583) < .003, 'Next frame did not return to the display frame');
+          saveCoverButton.click();
+          await waitFor(() => Boolean(state.library.assets.find(asset => asset.id === avi.id)?.videoThumbnailRevision), 'Current-frame cover was not committed');
+          const revisedCover = state.library.assets.find(asset => asset.id === avi.id);
+          check(focused.paused && focused.poster.includes(revisedCover.videoThumbnailRevision), 'Video cover did not refresh in the active preview');
+          closePreview();
           openPreview(dxv.id);
           await waitFor(() => state.previewId === dxv.id && focused.readyState >= 2 && !focused.classList.contains('hidden'), 'DXV UI preview did not load');
           check(focused.controls && focused.muted, 'Video controls and mute were not preserved');
@@ -205,13 +221,25 @@ module.exports = function configureVideoSmoke({ root, base }) {
           if (focused.duration <= 0.1) {
             await waitFor(() => focused.readyState >= 2 && focused.getVideoPlaybackQuality().totalVideoFrames > 0 && !focused.error, 'Single-frame video did not remain visible');
           }
+          const background = document.getElementById('previewVideoBackdrop');
+          await waitFor(() => !background.classList.contains('hidden'), 'DXV alpha background control was hidden');
+          const alphaCanvas = document.createElement('canvas'); alphaCanvas.width = focused.videoWidth; alphaCanvas.height = focused.videoHeight;
+          const alpha = alphaCanvas.getContext('2d'); alpha.drawImage(focused, 0, 0);
+          check(alpha.getImageData(0, 0, alphaCanvas.width, alphaCanvas.height).data.some((byte, index) => index % 4 === 3 && byte < 255), 'DXV preview lost its alpha pixels');
+          for (const [value, color] of [['white', 'rgb(255, 255, 255)'], ['black', 'rgb(0, 0, 0)']]) {
+            background.value = value; background.dispatchEvent(new Event('change'));
+            check(getComputedStyle(focused).backgroundColor === color, 'DXV background did not change: ' + value);
+          }
+          background.value = 'checker'; background.dispatchEvent(new Event('change'));
+          check(getComputedStyle(focused).backgroundImage.includes('conic-gradient'), 'DXV checkerboard did not return');
           await Promise.race([
             new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))),
             new Promise(resolve => setTimeout(resolve, 250))
           ]);
           return { imported: imported.report.imported, thumbnailsLoaded: assets.length, decoded, galleryUsesThumbnails: true,
             stalePreviewIgnored: true, closeStopsPlayback: true, dxvUserInterface: true, controls: focused.controls,
-            concurrentDxvRequests: true, coldDxvReopen: true, coldDxvSwitchBack: true,
+            concurrentDxvRequests: true, coldDxvReopen: true, coldDxvSwitchBack: true, adjacentFramesVerified: true, alphaBackgroundsVerified: true,
+            videoCover: { path: revisedCover.thumbnail, revision: revisedCover.videoThumbnailRevision },
             library: snapshot.root, managedOriginals: assets.map(asset => ({ path: asset.filename, sha256: asset.hash })) };
         })()`);
         assert.deepEqual(failures, []);

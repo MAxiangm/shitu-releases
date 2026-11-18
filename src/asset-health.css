@@ -32,3 +32,8 @@
 .asset-health-details ul { margin:6px 0 0; padding-left:16px; overflow-wrap:anywhere; }
 .asset-health-details li + li { margin-top:5px; }
 .asset-health-more { margin-top:8px; }
+.asset-repair { display:flex; flex-wrap:wrap; align-items:center; gap:6px; margin-top:10px; }
+.asset-repair > p, .asset-repair-results { flex-basis:100%; }
+.asset-repair > p:empty { display:none; }
+.asset-repair-results { max-height:220px; overflow:auto; }
+.asset-repair-results [data-match="matched"] { color:var(--skin-text, #eee); }

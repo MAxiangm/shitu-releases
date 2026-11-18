@@ -4,7 +4,7 @@ const ColorLabels = require('./color-labels.js');
 const { VIDEO, FONT } = require('./media-formats.cjs');
 const { isSearchableImage } = require('./similar-image-service.cjs');
 
-function assetMenuTemplate(assets, folders, choose) {
+function assetMenuTemplate(assets, folders, choose, transcodePresets = []) {
   const one = assets.length === 1;
   const first = assets[0];
   const allTrashed = assets.every(asset => Boolean(asset.trashedAt));
@@ -13,6 +13,7 @@ function assetMenuTemplate(assets, folders, choose) {
   const colorValues = assets.map(asset => ColorLabels.normalize(asset.colorLabel));
   const commonColor = colorValues.length && colorValues.every(value => value === colorValues[0]) ? colorValues[0] : null;
   const customColor = commonColor && ColorLabels.get(commonColor)?.custom ? ColorLabels.get(commonColor) : null;
+  const canTranscode = assets.length > 0 && !anyTrashed && assets.every(asset => asset.mediaType === 'video' || VIDEO.has(asset.ext));
   const item = (id, label, enabled = true) => ({ id, label, enabled, click: () => choose(id) });
   return [
     item('preview', '预览', one),
@@ -36,7 +37,14 @@ function assetMenuTemplate(assets, folders, choose) {
         { id: 'plugin-center', label: '打开插件中心…', click: () => choose('plugin') }
       ]
     },
-    item('video-transcode', one ? '视频转码…' : '批量视频转码…', assets.length > 0 && !anyTrashed && assets.every(asset => asset.mediaType === 'video' || VIDEO.has(asset.ext))),
+    item('video-transcode', one ? '视频转码…' : '批量视频转码…', canTranscode),
+    ...(canTranscode && transcodePresets.length ? [{
+      id: 'video-transcode-presets', label: '套用转码预设',
+      submenu: transcodePresets.map(preset => ({
+        id: `transcode-preset-${preset.id}`, label: preset.name.replaceAll('&', '&&') + '…',
+        click: () => choose('video-transcode', { preset })
+      }))
+    }] : []),
     { type: 'separator' },
     item(one ? 'rename' : 'batch-rename', one ? '重命名' : '批量重命名…', !anyTrashed),
     item('tags', one ? '编辑标签' : '批量添加标签', !anyTrashed),

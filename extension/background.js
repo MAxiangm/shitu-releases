@@ -2,15 +2,18 @@
 
 const CONFIG_KEY = 'shituConnection';
 const LAST_KEY = 'shituLastCapture';
+const DESTINATIONS_KEY = 'shituCaptureDestinations';
 // A running worker can read an updated manifest without having loaded new code.
-const WORKER_VERSION = '0.11.2';
+const WORKER_VERSION = '0.11.5';
 const CAPTURE_TIMEOUT = 280000;
 const MAX_DATA_LENGTH = 28 * 1024 * 1024;
 const MENU_ID = 'shitu-save-media';
 const pending = new Map();
+const locateReceipts = new Map();
 let requestSerial = 0;
 let activeStatusId = null;
 let statusWrites = Promise.resolve();
+let destinationWrites = Promise.resolve();
 let connecting = null;
 let connectingForced = false;
 // The page's content script does not need access to the local pairing secret.
@@ -49,7 +52,11 @@ async function requestLocal(port, route, body, token, timeout) {
       if (error.name === 'AbortError') throw issue('采集尚未收到确认，桌面可能仍在处理。请先在 Mosaic 检查结果，避免重复操作。', 'TIMEOUT');
       throw issue('Mosaic 返回了无效响应，请更新软件和扩展。', 'INVALID_RESPONSE');
     }
-    if (!response.ok || !result?.ok) throw issue(result?.error || `请求失败（${response.status}）`, 'SERVER_ERROR');
+    if (!response.ok || !result?.ok) {
+      const captureCodes = ['VIDEO_BROWSER_READ', 'CAPTURE_LIBRARY_CHANGED', 'CAPTURE_FOLDER_MISSING'];
+      const code = route === '/v1/capture' && captureCodes.includes(result?.code) ? result.code : 'SERVER_ERROR';
+      throw issue(result?.error || `请求失败（${response.status}）`, code);
+    }
     return result;
   } finally { clearTimeout(timer); clearInterval(keepalive); }
 }
@@ -63,7 +70,8 @@ function appStatus(result) {
   const version = typeof result?.version === 'string' && /^(\d+)\.(\d+)\.(\d+)$/.exec(result.version);
   // The v1 app field identifies the collector protocol across desktop releases.
   if (result?.app !== '拾图' || !version || (Number(version[1]) === 0 && Number(version[2]) < 4) || typeof result.ready !== 'boolean') throw issue('请将桌面端更新到 0.4 或更新版本。', 'INCOMPATIBLE_APP');
-  return { ok: true, app: '拾图', version: result.version, ready: result.ready };
+  const libraryId = exactId(result.libraryId);
+  return { ok: true, app: '拾图', version: result.version, ready: result.ready, ...(libraryId ? { libraryId } : {}) };
 }
 
 async function discoverAt(port) {
@@ -109,6 +117,80 @@ function ensureConnection(force = false) {
 }
 
 function safeText(value, limit) { return typeof value === 'string' ? value.slice(0, limit) : ''; }
+function exactId(value) { return typeof value === 'string' && value.length > 0 && value.length <= 128 ? value : null; }
+
+async function destinationPreferences() {
+  const { [DESTINATIONS_KEY]: stored } = await chrome.storage.local.get(DESTINATIONS_KEY);
+  return Array.isArray(stored) ? stored.filter(entry => exactId(entry?.libraryId) && (entry.folderId === null || exactId(entry.folderId))) : [];
+}
+
+async function listFolders() {
+  const connection = await ensureConnection();
+  const { libraryId, ready } = connection.status;
+  if (!ready || !libraryId) return { ok: true, supported: false };
+  const result = await localRequest('/v1/folders', {}, connection.config, 4000);
+  if (result.libraryId !== libraryId || !Array.isArray(result.folders)) throw new Error('素材库已切换，请刷新文件夹列表。');
+  const folders = result.folders.filter(folder => exactId(folder?.id) && typeof folder.name === 'string')
+    .map(folder => ({ id: folder.id, name: safeText(folder.name, 240), parentId: exactId(folder.parentId) }));
+  return { ok: true, supported: true, libraryId, folders };
+}
+
+async function captureFolders() {
+  const state = await listFolders();
+  if (!state.supported) return state;
+  await destinationWrites.catch(() => {});
+  const settings = await destinationPreferences();
+  return { ...state, folderId: settings.find(entry => entry.libraryId === state.libraryId)?.folderId ?? null };
+}
+
+function setCaptureFolder(libraryId, folderId) {
+  if (!exactId(libraryId) || (folderId !== null && !exactId(folderId))) throw new Error('保存位置无效。');
+  const write = destinationWrites.catch(() => {}).then(async () => {
+    const state = await listFolders();
+    if (state.libraryId !== libraryId) throw new Error('素材库已切换，请重新选择保存位置。');
+    if (folderId !== null && !state.folders.some(folder => folder.id === folderId)) throw new Error('这个文件夹已不存在，请重新选择保存位置。');
+    const settings = (await destinationPreferences()).filter(entry => entry.libraryId !== libraryId);
+    if (folderId !== null) settings.push({ libraryId, folderId });
+    await chrome.storage.local.set({ [DESTINATIONS_KEY]: settings });
+    return { ok: true, libraryId, folderId };
+  });
+  destinationWrites = write;
+  return write;
+}
+
+async function captureDestination(libraryId) {
+  if (!libraryId) return null;
+  await destinationWrites.catch(() => {});
+  const settings = await destinationPreferences();
+  return { libraryId, folderId: settings.find(entry => entry.libraryId === libraryId)?.folderId ?? null };
+}
+
+function savedLocation(result, confirmed) {
+  const libraryId = exactId(result.libraryId);
+  const existing = confirmed.existingAssets.find(asset => asset.id && !asset.trashedAt) || confirmed.existingAssets.find(asset => asset.id);
+  const assetId = exactId(confirmed.imported ? confirmed.assetIds[0] : existing?.id);
+  return libraryId && assetId ? { libraryId, assetId } : null;
+}
+
+function rememberLocateReceipt(receipt, location, sender) {
+  const now = Date.now();
+  for (const [key, value] of locateReceipts) if (value.expires <= now) locateReceipts.delete(key);
+  locateReceipts.set(receipt, { location, expires: now + 60000, tabId: sender?.tab?.id,
+    frameId: sender?.frameId || 0, documentId: sender?.documentId });
+}
+
+function resolveLocateReceipt(receipt, sender) {
+  const saved = locateReceipts.get(receipt);
+  if (!saved || saved.expires <= Date.now() || saved.tabId !== sender.tab.id || saved.frameId !== (sender.frameId || 0) ||
+      (saved.documentId && saved.documentId !== sender.documentId)) throw new Error('网页采集提示已过期，请在采集助手中打开上次保存的素材。');
+  return saved.location;
+}
+
+async function locateAsset(location) {
+  const connection = await ensureConnection();
+  if (!connection.status.ready || connection.status.libraryId !== location.libraryId) throw new Error('请在 Mosaic 中切回采集时使用的素材库。');
+  return localRequest('/v1/locate', location, connection.config, 6000);
+}
 
 function recordCapture(record) {
   // An older completion or a second click must not erase another active task.
@@ -139,11 +221,11 @@ function captureResult(result) {
     trashedAt: typeof asset?.trashedAt === 'string' ? safeText(asset.trashedAt, 80) : null,
     folderId: typeof asset?.folderId === 'string' ? safeText(asset.folderId, 128) : null
   })) : [];
-  const inTrash = !imported && existingAssets.some(asset => asset.trashedAt);
+  const inTrash = !imported && existingAssets.length > 0 && existingAssets.every(asset => asset.trashedAt);
   const message = imported ? '已保存到素材库，可在“全部素材”或“最近导入”查看。'
     : inTrash ? '这份素材已在回收站，请到 Mosaic 恢复后查看。' : '素材库中已有这份文件，可清除搜索和格式筛选后查看。';
   return { ok: true, imported, duplicates, existingAssets, message, status: inTrash ? 'warning' : 'success',
-    assetIds: Array.isArray(result.assetIds) ? result.assetIds.filter(id => typeof id === 'string').slice(0, 20) : [],
+    assetIds: Array.isArray(result.assetIds) ? result.assetIds.filter(exactId).slice(0, 20) : [],
     ...(typeof result.libraryRoot === 'string' ? { libraryRoot: safeText(result.libraryRoot, 4096) } : {}) };
 }
 
@@ -168,7 +250,6 @@ function checkedMedia(input) {
   const temporary = ['data:', 'blob:'].includes(parsed.protocol);
   const inline = Object.hasOwn(input, 'dataBase64');
   if (temporary || inline) {
-    if (!temporary && input.kind !== 'image') throw new Error('直链视频应由桌面下载，请重新采集。');
     if (typeof input.dataBase64 !== 'string' || !input.dataBase64 || input.dataBase64.length > MAX_DATA_LENGTH || !/^[A-Za-z0-9+/]*={0,2}$/.test(input.dataBase64)) throw new Error('临时素材读取失败或超过 20 MB。');
     const padding = input.dataBase64.endsWith('==') ? 2 : input.dataBase64.endsWith('=') ? 1 : 0;
     if (input.dataBase64.length % 4 || input.dataBase64.length / 4 * 3 - padding > 20 * 1024 * 1024) throw new Error('临时素材读取失败或超过 20 MB。');
@@ -180,18 +261,42 @@ function checkedMedia(input) {
   return body;
 }
 
-async function notifyTab(tabId, frameId, message, status = 'working') {
+async function notifyTab(tabId, frameId, message, status = 'working', locateReceipt) {
   if (typeof tabId !== 'number') return;
-  await chrome.tabs.sendMessage(tabId, { type: 'shitu:status', message, status }, { frameId: frameId || 0 }).catch(() => {});
+  await chrome.tabs.sendMessage(tabId, { type: 'shitu:status', message, status, ...(locateReceipt ? { locateReceipt } : {}) }, { frameId: frameId || 0 }).catch(() => {});
+}
+
+async function readVideoFromPage(body, sender) {
+  if (body.kind !== 'video' || body.dataBase64 || !/^https?:/i.test(body.url) || typeof sender?.tab?.id !== 'number') return null;
+  const target = sender.documentId ? { documentId: sender.documentId } : { frameId: sender.frameId || 0 };
+  const reply = await chrome.tabs.sendMessage(sender.tab.id, {
+    type: 'shitu:resolve-media', media: { ...body, pageUrl: sender.url || body.pageUrl }, browserVideo: true
+  }, target).catch(() => null);
+  const media = reply?.media;
+  if (!reply?.ok || media?.url !== body.url || media.kind !== 'video' || !Object.hasOwn(media, 'dataBase64')) return null;
+  return checkedMedia({ ...body, dataBase64: media.dataBase64, mimeType: media.mimeType });
+}
+
+function acceptedSocialPage(value, frameUrl) {
+  if (typeof value !== 'string' || value.length > 8192) return null;
+  try {
+    const post = new URL(value), frame = new URL(frameUrl);
+    if (post.protocol !== 'https:' || post.origin !== frame.origin || post.username || post.password || post.search || post.hash) return null;
+    if (/^(?:www\.)?instagram\.com$/.test(post.hostname) &&
+        /^\/(?:[a-z0-9_.]+\/)?(?:reels?|p|tv)\/[a-z0-9_-]+(?:\/embed(?:\/captioned)?)?\/?$/i.test(post.pathname)) return post.href;
+    if (/^(?:(?:www|platform)\.)?(?:twitter|x)\.com$/.test(post.hostname) &&
+        /^\/(?:[a-z0-9_]+\/status|i\/(?:web\/)?status)\/\d+\/?$/i.test(post.pathname)) return post.href;
+  } catch {}
+  return null;
 }
 
 async function capture(input, sender) {
   let body, key, requestId, resolveShared, rejectShared;
   try {
     body = checkedMedia(input);
-    if (/^https?:/i.test(sender?.url || '')) body.pageUrl = sender.url;
+    if (/^https?:/i.test(sender?.url || '')) body.pageUrl = (body.kind === 'video' && acceptedSocialPage(input.socialPageUrl, sender.url)) || sender.url;
     else if (!/^https?:/i.test(body.pageUrl || '') && /^https?:/i.test(sender?.tab?.url || '')) body.pageUrl = sender.tab.url;
-    key = `${sender?.tab?.id}:${body.url}`;
+    key = JSON.stringify([sender?.tab?.id, sender?.documentId || sender?.frameId || 0, body.url]);
     if (pending.has(key)) {
       const shared = pending.get(key);
       key = null;
@@ -208,21 +313,42 @@ async function capture(input, sender) {
       message: '正在连接桌面 Mosaic，尚未保存。' });
     let connection = await ensureConnection();
     if (!connection.status.ready) throw issue('请先在桌面 Mosaic 中选择或新建素材库。', 'LIBRARY_NOT_READY');
+    const destination = await captureDestination(connection.status.libraryId);
     const message = body.dataBase64 ? '正在写入素材库，等待保存确认…' : '正在下载并写入素材库，等待保存确认…';
     await recordCapture({ requestId, ok: false, pending: true, status: 'working', phase: 'saving', at: Date.now(), name, message });
     await notifyTab(sender?.tab?.id, sender?.frameId, message);
+    async function submit(media) {
+      const payload = destination ? { ...media, destination } : media;
+      try { return await localRequest('/v1/capture', payload, connection.config, CAPTURE_TIMEOUT); }
+      catch (error) {
+        if (!['UNAUTHORIZED', 'CONNECTION_FAILED'].includes(error.code)) throw error;
+        connection = await ensureConnection(true);
+        if (!connection.status.ready) throw issue('请先在桌面 Mosaic 中选择或新建素材库。', 'LIBRARY_NOT_READY');
+        if (destination && connection.status.libraryId !== destination.libraryId) throw new Error('素材库已切换，请重新采集。');
+        return localRequest('/v1/capture', payload, connection.config, CAPTURE_TIMEOUT);
+      }
+    }
     let result;
-    try { result = await localRequest('/v1/capture', body, connection.config, CAPTURE_TIMEOUT); }
+    try { result = await submit(body); }
     catch (error) {
-      if (!['UNAUTHORIZED', 'CONNECTION_FAILED'].includes(error.code)) throw error;
-      connection = await ensureConnection(true);
-      if (!connection.status.ready) throw issue('请先在桌面 Mosaic 中选择或新建素材库。', 'LIBRARY_NOT_READY');
-      result = await localRequest('/v1/capture', body, connection.config, CAPTURE_TIMEOUT);
+      if (error.code !== 'VIDEO_BROWSER_READ') throw error;
+      const message = '正在尝试从当前网页读取视频，尚未保存…';
+      await recordCapture({ requestId, ok: false, pending: true, status: 'working', phase: 'reading', at: Date.now(), name, message });
+      await notifyTab(sender?.tab?.id, sender?.frameId, message);
+      const browserVideo = await readVideoFromPage(body, sender);
+      if (!browserVideo) throw error;
+      result = await submit(browserVideo);
     }
     const confirmed = captureResult(result);
-    await recordCapture({ ...confirmed, requestId, at: Date.now(), pending: false, status: confirmed.imported ? 'saved' : 'duplicate', name });
-    resolveShared(confirmed);
-    return confirmed;
+    const location = savedLocation(result, confirmed);
+    if (location) rememberLocateReceipt(requestId, location, sender);
+    const folderName = safeText(result.folderName, 240).trim();
+    const popupMessage = confirmed.imported && folderName ? `已保存到「${folderName}」。` : confirmed.message;
+    await recordCapture({ ...confirmed, requestId, at: Date.now(), pending: false, status: confirmed.imported ? 'saved' : 'duplicate', name,
+      message: popupMessage, ...(location ? { location } : {}) });
+    const reply = location ? { ...confirmed, locateReceipt: requestId } : confirmed;
+    resolveShared(reply);
+    return reply;
   } catch (error) {
     await recordFailure(error, { requestId, name: body?.name || input?.name });
     rejectShared?.(error);
@@ -236,14 +362,24 @@ async function handleMessage(message, sender) {
     if (!sender.tab || !/^https?:/i.test(sender.url || '')) throw new Error('请在普通网页中采集素材。');
     return capture(message.media, sender);
   }
-  if (message?.type === 'shitu:capture-failed') {
+  if (message?.type === 'shitu:capture-failed' || message?.type === 'shitu:locate') {
     if (!sender.tab || !/^https?:/i.test(sender.url || '')) throw new Error('请求来源无效。');
+    if (message.type === 'shitu:locate') return locateAsset(resolveLocateReceipt(message.receipt, sender));
     await recordFailure(new Error(safeText(message.error, 1500) || '浏览器未能读取素材。'), { name: safeText(message.name, 240) });
     return { ok: true };
   }
   if (sender.url !== chrome.runtime.getURL('popup.html')) throw new Error('请求来源无效。');
   if (message?.type === 'shitu:extension-info') return { ok: true, protocol: 1, version: WORKER_VERSION, build: WORKER_VERSION };
   if (message?.type === 'shitu:ping' || message?.type === 'shitu:reconnect') return (await ensureConnection(message.type === 'shitu:reconnect')).status;
+  if (message?.type === 'shitu:folders') return captureFolders();
+  if (message?.type === 'shitu:set-folder') return setCaptureFolder(message.libraryId, message.folderId);
+  if (message?.type === 'shitu:locate-recent') {
+    const { [LAST_KEY]: recent } = await chrome.storage.local.get(LAST_KEY);
+    if (!recent?.ok || recent.requestId !== message.requestId || !exactId(recent.location?.libraryId) || !exactId(recent.location.assetId)) {
+      throw new Error('上次采集结果已变化，请重新查看。');
+    }
+    return locateAsset(recent.location);
+  }
   throw new Error('未知请求。');
 }
 
@@ -275,7 +411,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
       else if (resolved || temporary) throw new Error(resolved?.error || '无法读取临时素材。');
     }
     const result = await capture(media, { tab, url: info.frameUrl || info.pageUrl, frameId });
-    await notifyTab(tab.id, frameId, result.message, result.status);
+    await notifyTab(tab.id, frameId, result.message, result.status, result.locateReceipt);
   } catch (error) {
     await recordFailure(error, { name: tab.title });
     await notifyTab(tab.id, frameId, error.message, 'error');

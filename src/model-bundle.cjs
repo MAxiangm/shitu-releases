@@ -137,13 +137,14 @@ async function fbxReferences(filename) {
   } finally { await handle.close(); }
 }
 
-async function collectModelBundle(source, { allowedRoots } = {}) {
+async function collectModelBundle(source, { allowedRoots, repair } = {}) {
   if (typeof source !== 'string' || !path.isAbsolute(source) || !MODEL_EXTENSIONS.has(ext(source))) throw new Error('请选择支持的 3D 模型文件');
   source = path.resolve(source);
   const roots = [...new Set((allowedRoots?.length ? allowedRoots : [path.dirname(source)]).map(root => path.resolve(root)))];
   for (const root of roots) if (!(await fs.lstat(root)).isDirectory() || (await fs.lstat(root)).isSymbolicLink()) throw new Error('模型资源根目录无效');
   const realRoots = await Promise.all(roots.map(root => fs.realpath(root)));
   const files = new Map(), missing = new Set(), warnings = new Set(), parsed = new Set();
+  const repairedFiles = new Map();
   let previewSource;
   async function checked(filename) {
     filename = path.resolve(filename);
@@ -168,6 +169,23 @@ async function collectModelBundle(source, { allowedRoots } = {}) {
     }
     return actual;
   }
+  async function restoredReference(raw, options, from, fallback) {
+    const match = repair?.replacements.get(raw);
+    if (!match) return null;
+    const sourceStem = path.basename(source, path.extname(source));
+    const target = options[0] && within(repair.root, options[0]) ? options[0] :
+      fallback ? path.join(path.dirname(from), `${sourceStem}.fbm`, path.basename(match.filename)) : null;
+    if (!target || !isSafeBundlePath(slash(path.relative(repair.root, target)))) return null;
+    if ((await fs.lstat(match.filename)).isSymbolicLink()) throw new Error('匹配资源在补齐期间发生变化，请重新查找');
+    await fs.mkdir(path.dirname(target), { recursive: true });
+    try { await fs.copyFile(match.filename, target, constants.COPYFILE_EXCL); }
+    catch (error) { if (error.code === 'EEXIST') return null; throw error; }
+    const actual = await add(target);
+    const file = files.get(process.platform === 'win32' ? actual.toLowerCase() : actual);
+    if (file.size !== match.size || file.hash !== match.hash) throw new Error('匹配资源在补齐期间发生变化，请重新查找');
+    repairedFiles.set(actual.toLowerCase(), match.hash);
+    return actual;
+  }
   async function reference(raw, from, kind = 'texture', fallback = false, embedded = false) {
     if (typeof raw !== 'string' || !raw.trim()) return null;
     raw = raw.trim();
@@ -188,11 +206,16 @@ async function collectModelBundle(source, { allowedRoots } = {}) {
     let lastError;
     for (const candidate of [...new Set(options)]) {
       try {
+        const repairedHash = repairedFiles.get(candidate.toLowerCase());
+        const requested = repair?.replacements.get(raw);
+        if (repairedHash && requested && repairedHash !== requested.hash) continue;
         const actual = await add(candidate);
         if (remote || !same(actual, options[0])) warnings.add(`已从模型附近收集贴图：${path.basename(actual)}`);
         return actual;
       } catch (error) { lastError = error; }
     }
+    const restored = await restoredReference(raw, options, from, fallback);
+    if (restored) return restored;
     if (!embedded) missing.add(raw);
     if (lastError && !['ENOENT', 'ENOTDIR'].includes(lastError.code)) warnings.add(`未收集引用 ${raw}：${lastError.message}`);
     return null;
@@ -240,7 +263,10 @@ async function collectModelBundle(source, { allowedRoots } = {}) {
           const data = await fbxReferences(filename);
           for (const item of data.references) await reference(item, filename, 'texture', true, data.embedded);
           if (data.embedded) warnings.add('FBX 含内嵌资源，同时保留找到的外置贴图；混合引用请在预览中核对。');
-        } catch (error) { warnings.add(`FBX 贴图引用未能完整读取：${error.message}`); }
+        } catch (error) {
+          if (repair) throw error;
+          warnings.add(`FBX 贴图引用未能完整读取：${error.message}`);
+        }
       } else warnings.add('原工程的私有依赖无法完整静态解析，已收集附近常用贴图目录；其他外部资源请在原软件中检查。');
       const directory = path.dirname(filename), stem = path.basename(filename, path.extname(filename));
       for (const folder of ['tex', 'Tex', 'textures', 'Textures', 'maps', 'Maps', 'images', 'Images', 'materials', 'Materials', 'sourceimages', 'SourceImages', `${stem}.fbm`]) await resourceFolder(path.join(directory, folder));
@@ -254,7 +280,10 @@ async function collectModelBundle(source, { allowedRoots } = {}) {
           try { await checked(sidecar); } catch { continue; }
           await add(sidecar);
           try { await parse(sidecar); previewSource ||= sidecar; break; }
-          catch (error) { warnings.add(`同名预览文件无法读取：${path.basename(sidecar)}（${error.message}）`); }
+          catch (error) {
+            if (repair) throw error;
+            warnings.add(`同名预览文件无法读取：${path.basename(sidecar)}（${error.message}）`);
+          }
         }
       }
     }

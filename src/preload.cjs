@@ -48,12 +48,17 @@ contextBridge.exposeInMainWorld('shitu', Object.freeze({
     return () => ipcRenderer.removeListener('shitu:history', listener);
   },
   prepareVideo: (id, expectedRoot, requestToken, profile = 'full', requestSerial) => call('prepare-video', id, expectedRoot, requestToken, profile, requestSerial),
+  findVideoFrame: (id, root, key, time, direction) => call('find-video-frame', id, root, key, time, direction),
+  saveVideoThumbnail: (id, root, key, bytes) => call('save-video-thumbnail', id, root, key, bytes),
   onVideoPreview: callback => {
     const listener = (_event, state) => callback(state);
     ipcRenderer.on('shitu:video-preview', listener);
     return () => ipcRenderer.removeListener('shitu:video-preview', listener);
   },
   startVideoTranscode: request => call('video-transcode-start', request),
+  listTranscodePresets: () => call('transcode-presets'),
+  saveTranscodePreset: preset => call('transcode-preset-save', preset),
+  removeTranscodePreset: id => call('transcode-preset-remove', id),
   getTranscodeDevices: refresh => call('transcode-devices', refresh),
   getTranscodeSettings: () => call('transcode-settings'),
   saveTranscodeSettings: settings => call('transcode-settings-save', settings),
@@ -81,6 +86,9 @@ contextBridge.exposeInMainWorld('shitu', Object.freeze({
   prepareFont: (id, expectedRoot, faceIndex = 0) => call('prepare-font', id, expectedRoot, faceIndex),
   prepareProjectPreview: (id, expectedRoot, compositionId) => call('prepare-project-preview', id, expectedRoot, compositionId),
   projectPreviewState: id => call('project-preview-state', id),
+  planBundleRepair: (id, expectedRoot) => call('plan-bundle-repair', id, expectedRoot),
+  applyBundleRepair: (id, token) => call('apply-bundle-repair', id, token),
+  cancelBundleRepair: token => call('cancel-bundle-repair', token),
   onProjectPreview: callback => {
     const listener = (_event, state) => callback(state);
     ipcRenderer.on('shitu:project-preview', listener);
@@ -120,6 +128,11 @@ contextBridge.exposeInMainWorld('shitu', Object.freeze({
     const listener = (_event, result) => callback(result);
     ipcRenderer.on('shitu:web-capture', listener);
     return () => ipcRenderer.removeListener('shitu:web-capture', listener);
+  },
+  onWebCaptureLocate: callback => {
+    const listener = (_event, result) => callback(result);
+    ipcRenderer.on('shitu:web-capture-locate', listener);
+    return () => ipcRenderer.removeListener('shitu:web-capture-locate', listener);
   },
   openExtensionFolder: () => call('open-extension-folder'),
   openSource: id => call('open-source',id),

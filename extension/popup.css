@@ -25,11 +25,17 @@ button { font: inherit; cursor: pointer; }
 #check:hover { color: #000; border-color: #d0d0d0; background: #d0d0d0; }
 #check:focus-visible { outline: 1px solid var(--accent); outline-offset: 3px; }
 button:disabled { opacity: .4; cursor: wait; }
-.gesture { padding: 27px 0 24px; }
+.gesture { padding: 24px 0 19px; }
 .gesture kbd { display: inline-flex; align-items: center; justify-content: center; min-width: 49px; height: 36px; padding: 0 14px; border: 1px solid var(--accent); border-radius: 999px; background: var(--accent); color: #090909; font: 400 16px/1 "Segoe UI", sans-serif; }
 .gesture b { margin: 0 10px; color: #686868; font-size: 13px; font-weight: 300; }
 .gesture > span { color: #efefef; font-size: 17px; font-weight: 400; letter-spacing: -.3px; }
 .gesture p { margin: 15px 0 0; color: #a3a3a3; font-size: 11px; line-height: 1.9; }
+.destination { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 6px 10px; padding: 0 0 17px; }
+.destination label { font-size: 12px; }
+.destination select { width: 100%; min-width: 0; height: 32px; padding: 0 7px; color: #ededed; background: #151515; border: 1px solid #353535; border-radius: 5px; font: inherit; }
+.destination select:disabled { opacity: .6; }
+.destination select:focus-visible, #locateRecent:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
+#folderNote { grid-column: 2; margin: 0; color: #b5b5b5; font-size: 11px; overflow-wrap: anywhere; }
 .automatic { padding-top: 19px; border-top: 1px solid var(--line); }
 .automatic > strong { color: #ededed; font-size: 12px; font-weight: 400; }
 #feedback { min-height: 18px; margin: 7px 0 0; color: var(--muted); font-size: 11px; line-height: 1.8; overflow-wrap: anywhere; }
@@ -40,4 +46,7 @@ button:disabled { opacity: .4; cursor: wait; }
 .recent[data-state="error"],.recent[data-state="unconfirmed"] { border-color:#777; }
 #recentClear { float:right; padding:0; border:0; background:none; color:#aaa; font-size:10px; }
 #recentClear:hover { color:#fff; }
+#locateRecent { margin-top: 9px; padding: 4px 8px; border: 1px solid #515151; border-radius: 5px; background: #1c1c1c; color: #ededed; font-size: 11px; }
+#locateRecent:hover { border-color: #aaa; background: #252525; }
+#locateNote { color: #ddd; }
 footer { margin-top: 22px; padding-top: 16px; border-top: 1px solid var(--line); color: #717171; font-size: 10px; line-height: 1.9; }

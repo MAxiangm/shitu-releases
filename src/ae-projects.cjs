@@ -177,7 +177,7 @@ function createAEProjectCollector({ cacheDir, timeoutMs = 180000, toolLocator = 
       throw error;
     }
   }
-  async function collect(source, signal) {
+  async function collect(source, signal, replacements) {
     check(signal);
     if (closed) throw new Error('AE 工程收集器已关闭');
     if (typeof source !== 'string' || !path.isAbsolute(source) || !['.aep', '.aepx'].includes(path.extname(source).toLowerCase())) throw new Error('请选择有效的 AE 工程绝对路径');
@@ -196,20 +196,24 @@ function createAEProjectCollector({ cacheDir, timeoutMs = 180000, toolLocator = 
       const missing = [], warnings = ['字体、第三方插件、表达式动态引用及部分专用格式内部链接需在原软件中核对。'];
       if (sourceYear && tool.year && tool.year !== sourceYear) warnings.push(`源工程来自 AE ${sourceYear}，本包由 AE ${tool.year} 收集，导出需对应或更新版本打开。`);
       const sources = [source], relocations = new Map(), sequenceDirectories = new Map(), identity = [], copied = new Map();
-      for (const record of scan.report.sources) {
+      const sourceKey = (record, index) => `${record.itemId ?? record.itemIndex ?? index}\0${record.role}`;
+      const restoredSources = new Set();
+      for (const [index, record] of scan.report.sources.entries()) {
         check(signal);
         if (typeof record.source !== 'string' || !path.isAbsolute(record.source)) { missing.push(String(record.source || '未知素材')); continue; }
         const original = path.resolve(record.source);
-        if (record.missing) { missing.push(original); continue; }
+        const replacement = record.missing ? replacements?.get(original) : null;
+        if (record.missing && !replacement) { missing.push(original); continue; }
+        const media = replacement?.filename || original;
         const folderHash = crypto.createHash('sha256').update(normalized(path.dirname(original))).digest('hex').slice(0, 16);
         const relativeFolder = `Footage/${folderHash}`;
         let dependentFiles;
-        try { dependentFiles = await sequenceFiles(record); }
+        try { dependentFiles = await sequenceFiles({ ...record, source: media }); }
         catch (error) { if (error.code === 'ENOENT') { missing.push(original); continue; } throw error; }
         const modelExt = path.extname(original).slice(1).toLowerCase();
         if (MODEL_EXTENSIONS.has(modelExt)) {
           try {
-            const modelPlan = await collectModelBundle(original);
+            const modelPlan = await collectModelBundle(media);
             dependentFiles = modelPlan.files.map(file => file.source);
             for (const message of modelPlan.missing) missing.push(`模型依赖：${message}`);
             warnings.push(...modelPlan.warnings);
@@ -218,9 +222,11 @@ function createAEProjectCollector({ cacheDir, timeoutMs = 180000, toolLocator = 
         for (const originalFile of dependentFiles) {
           const info = await regular(originalFile);
           const hash = await digest(originalFile, signal);
+          if (replacement && normalized(originalFile) === normalized(media) &&
+              (info.size !== replacement.size || hash !== replacement.hash)) throw new Error('匹配的 AE 素材在补齐期间发生变化');
           // Preserve model/sequence relative structure; never flatten two files
           // with identical basenames from different source directories.
-          const childRelative = path.relative(path.dirname(original), originalFile).split(path.sep).join('/');
+          const childRelative = path.relative(path.dirname(media), originalFile).split(path.sep).join('/');
           if (!isSafeBundlePath(childRelative)) throw new Error(`工程引用超出可收集范围：${path.basename(originalFile)}`);
           const relative = `${relativeFolder}/${childRelative}`;
           const destination = path.join(directory, relative);
@@ -233,13 +239,18 @@ function createAEProjectCollector({ cacheDir, timeoutMs = 180000, toolLocator = 
           }
           // A model may include the same image that AE also imports directly.
           // Model-relative texture copies must not steal the AE item's path.
-          if (normalized(originalFile) === normalized(original) || !relocations.has(normalized(originalFile))) relocations.set(normalized(originalFile), destination);
-          if (record.isStill === false && SEQUENCE_IMAGES.has(modelExt) && normalized(originalFile) === normalized(original)) {
+          if (normalized(originalFile) === normalized(media)) {
+            relocations.set(normalized(original), destination);
+            if (replacement) restoredSources.add(sourceKey(record, index));
+          }
+          if (!relocations.has(normalized(originalFile))) relocations.set(normalized(originalFile), destination);
+          if (record.isStill === false && SEQUENCE_IMAGES.has(modelExt) && normalized(originalFile) === normalized(media)) {
             // Only the AE sequence itself can authorize a folder relocation.
             // A model's one shared texture does not contain the other frames.
             sequenceDirectories.set(normalized(path.dirname(original)), path.dirname(destination));
           }
         }
+        if (replacement && !restoredSources.has(sourceKey(record, index))) missing.push(original);
       }
       const entry = safeFilename(path.basename(source));
       const rewritten = scan.xml.replace(/<fileReference\b[^>]*>/g, tag => {
@@ -254,13 +265,12 @@ function createAEProjectCollector({ cacheDir, timeoutMs = 180000, toolLocator = 
       const relinked = path.join(work, 'relinked.aepx'); await fs.writeFile(relinked, rewritten);
       const final = await runBridge(tool, work, control, { token, mode: 'collect', source: relinked, output: path.join(directory, entry), reportProject: path.join(work, 'collected-report.aepx') }, signal);
       if (!Array.isArray(final.report.sources) || final.report.sources.length !== scan.report.sources.length) throw new Error('AE 收集前后素材清单不一致');
-      const sourceKey = (record, index) => `${record.itemId ?? record.itemIndex ?? index}\0${record.role}`;
       const originalSources = new Map(scan.report.sources.map((record, index) => [sourceKey(record, index), record]));
       const expected = new Set(copied.keys());
       for (const [index, record] of final.report.sources.entries()) {
         const originalRecord = originalSources.get(sourceKey(record, index));
         if (!originalRecord) throw new Error('AE 收集前后素材身份不一致');
-        if (record.missing && !originalRecord.missing) throw new Error(`AE 重定位后素材缺失：${path.basename(String(record.source || originalRecord.source))}`);
+        if (record.missing && (!originalRecord.missing || restoredSources.has(sourceKey(record, index)))) throw new Error(`AE 重定位后素材缺失：${path.basename(String(record.source || originalRecord.source))}`);
         if (!record.missing && (typeof record.source !== 'string' || !expected.has(normalized(record.source)))) throw new Error(`AE 工程素材未正确重定位：${path.basename(String(record.source))}`);
       }
       if (await digest(source, signal) !== originalHash) throw new Error('源 AE 工程在收集期间发生变化，请重试');
@@ -276,12 +286,12 @@ function createAEProjectCollector({ cacheDir, timeoutMs = 180000, toolLocator = 
       if (!handedOff) await safeRemove(cacheDir, work).catch(() => {});
     }
   }
-  function prepareProjectBundle(source, { signal } = {}) {
+  function prepareProjectBundle(source, { signal, replacements } = {}) {
     if (closed) return Promise.reject(new Error('AE 工程收集器已关闭'));
     const controller = new AbortController(), cancel = () => controller.abort();
     if (signal?.aborted) controller.abort(); else signal?.addEventListener('abort', cancel, { once: true });
     controllers.add(controller);
-    const task = queue.then(() => collect(source, controller.signal)).finally(() => { controllers.delete(controller); signal?.removeEventListener('abort', cancel); tasks.delete(task); });
+    const task = queue.then(() => collect(source, controller.signal, replacements)).finally(() => { controllers.delete(controller); signal?.removeEventListener('abort', cancel); tasks.delete(task); });
     queue = task.catch(() => {}); tasks.add(task); return task;
   }
   async function shutdown() { closed = true; for (const controller of controllers) controller.abort(); await Promise.allSettled([...tasks]); }

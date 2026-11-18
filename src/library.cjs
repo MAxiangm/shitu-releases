@@ -94,6 +94,8 @@ function mediaMetadata(value = {}, video = false) {
 const clone = value => structuredClone(value);
 const now = () => new Date().toISOString();
 const PENDING_DELETE = /^\.pending-delete-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const PENDING_BUNDLE_REPAIR = /^\.pending-repair-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const bundleRepairValidator = ext => PROJECT.has(ext) ? validateProjectBundle : validateModelBundle;
 const safeName = value => {
   let result = String(value).replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').replace(/[. ]+$/, '').slice(0, 160) || '未命名';
   if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(result)) result = `_${result}`;
@@ -211,13 +213,14 @@ class Library {
       const backupExists = await fs.access(path.join(this.root, 'index.backup.json')).then(() => true, failure => { if (failure.code === 'ENOENT') return false; throw failure; });
       const originalFiles = await fs.readdir(path.join(this.root, 'originals')).catch(failure => { if (failure.code === 'ENOENT') return []; throw failure; });
       const thumbnailFiles = await fs.readdir(path.join(this.root, 'thumbnails')).catch(failure => { if (failure.code === 'ENOENT') return []; throw failure; });
-      const pendingDeletion = (await fs.readdir(this.root)).some(name => PENDING_DELETE.test(name));
+      const pendingDeletion = (await fs.readdir(this.root)).some(name => PENDING_DELETE.test(name) || PENDING_BUNDLE_REPAIR.test(name));
       if (backupExists || originalFiles.length || thumbnailFiles.length || pendingDeletion) throw new Error('素材库索引缺失，但发现已有素材或备份，已保留原文件。请恢复 index.json 后重新打开。');
       const data = { version: 1, assets: [], folders: [] };
       await this._persist(data);
     }
     await fs.mkdir(path.join(this.root, 'originals'), { recursive: true });
     await fs.mkdir(path.join(this.root, 'thumbnails'), { recursive: true });
+    await this._recoverBundleRepairs();
     await this._recoverPendingDeletions();
     return this.snapshot();
   }
@@ -250,6 +253,8 @@ class Library {
         if (path.posix.extname(asset.modelBundle.entry).slice(1).toLowerCase() !== asset.ext || asset.modelBundle.hash !== asset.hash || asset.modelBundle.size !== asset.size || asset.filename !== `${bundleRelative(asset.id)}/${asset.modelBundle.entry}` || 'projectBundle' in asset) throw new Error('模型包索引无效');
       } else if (asset.filename !== `originals/${asset.id}.${asset.ext}` || 'modelBundle' in asset || 'projectBundle' in asset) throw new Error('素材路径无效');
       if (asset.thumbnail !== null && asset.thumbnail !== `thumbnails/${asset.id}.jpg`) throw new Error('缩略图路径无效');
+      if ('videoThumbnailRevision' in asset && (!VIDEO.has(asset.ext) || !asset.thumbnail ||
+          typeof asset.videoThumbnailRevision !== 'string' || !/^[a-f0-9-]{36}$/.test(asset.videoThumbnailRevision))) throw new Error('视频封面记录无效');
       if ('mediaType' in asset && asset.mediaType !== mediaType(asset.ext)) throw new Error('素材媒体类型无效');
       if ('font' in asset) {
         if (!FONT.has(asset.ext)) throw new Error('字体信息素材类型无效');
@@ -321,6 +326,16 @@ class Library {
 
   undo(options = {}) { return this._replayHistory('undo', options); }
   redo(options = {}) { return this._replayHistory('redo', options); }
+
+  listFolders() {
+    this._ready();
+    return this.data.folders.map(({ id, name, parentId = null }) => ({ id, name, parentId }));
+  }
+
+  hasAsset(id) {
+    this._ready();
+    return this.data.assets.some(asset => asset.id === id);
+  }
 
   snapshot() {
     this._ready();
@@ -793,6 +808,7 @@ class Library {
       if (!selected.size) return this.snapshot();
       const assets = this.data.assets.filter(asset => selected.has(asset.id));
       if (assets.some(asset => !asset.trashedAt)) throw new Error('只能永久删除回收站中的素材');
+      await this._recoverBundleRepairs();
       await this._recoverPendingDeletions();
       const manifest = { version: 1, assets: assets.map(asset => ({ id: asset.id, ext: asset.ext, hasThumbnail: Boolean(asset.thumbnail),
         ...(PROJECT.has(asset.ext) ? { projectBundle: asset.projectBundle } : MODEL.has(asset.ext) ? { modelBundle: asset.modelBundle } : {}) })) };
@@ -940,6 +956,109 @@ class Library {
     return path.join(this.root, bundleRelative(asset.id, asset.ext), relative);
   }
 
+  async _recoverBundleRepairs() {
+    for (const name of await fs.readdir(this.root))
+      if (PENDING_BUNDLE_REPAIR.test(name)) await this._recoverBundleRepair(path.join(this.root, name));
+  }
+
+  async _recoverBundleRepair(directory) {
+    if (path.dirname(directory) !== this.root || !PENDING_BUNDLE_REPAIR.test(path.basename(directory))) throw new Error('资源包修复暂存路径无效');
+    const info = await fs.lstat(directory);
+    if (!info.isDirectory() || info.isSymbolicLink()) throw new Error('资源包修复暂存目录无效');
+    const names = await fs.readdir(directory);
+    if (names.some(name => !['manifest.json', 'manifest.json.tmp', 'previous', 'replacement'].includes(name))) throw new Error('修复暂存目录包含未知文件，已保留');
+    const journal = path.join(directory, 'manifest.json');
+    const journalInfo = await fileInfo(journal);
+    const previous = path.join(directory, 'previous'), replacement = path.join(directory, 'replacement');
+    if (journalInfo) {
+      if (!journalInfo.isFile() || journalInfo.isSymbolicLink()) throw new Error('资源包修复清单无效');
+      const { version, id, ext, oldBundle, newBundle } = JSON.parse(await fs.readFile(journal, 'utf8'));
+      if (version !== 1 || typeof id !== 'string' || !/^[a-zA-Z0-9-]+$/.test(id) || !isBundle(ext)) throw new Error('资源包修复清单无效');
+      const validator = bundleRepairValidator(ext);
+      for (const manifest of [oldBundle, newBundle]) {
+        validator(manifest);
+        if (path.posix.extname(manifest.entry).slice(1).toLowerCase() !== ext) throw new Error('修复资源包入口格式不一致');
+      }
+      const asset = this.data.assets.find(item => item.id === id && item.ext === ext);
+      const expectedHash = asset?.hash;
+      if (oldBundle.hash === newBundle.hash || ![oldBundle.hash, newBundle.hash].includes(expectedHash)) throw new Error('当前索引与修复清单不一致，已保留暂存文件');
+      const current = path.join(this.root, bundleRelative(id, ext));
+      await this._checkManagedParent(bundleRelative(id, ext));
+      await checkBundleTree(previous, oldBundle.files.map(file => file.path));
+      await checkBundleTree(replacement, newBundle.files.map(file => file.path));
+      if (expectedHash === newBundle.hash) {
+        if (!(await fileInfo(current))) throw new Error('已修复的资源包未找到，已保留暂存文件');
+        await checkBundleTree(current, newBundle.files.map(file => file.path));
+        // Recovery must use the same bundle revision as the active index.
+        await fs.copyFile(this.indexPath, path.join(this.root, 'index.backup.json'));
+      } else if (await fileInfo(previous)) {
+        if (await fileInfo(current)) {
+          if (await fileInfo(replacement)) throw new Error('恢复资源包时发现目录冲突，已保留暂存文件');
+          await checkBundleTree(current, newBundle.files.map(file => file.path));
+          await fs.rename(current, replacement);
+        }
+        await fs.rename(previous, current);
+      } else if (!(await fileInfo(current))) {
+        throw new Error('原资源包未找到，已保留暂存文件');
+      }
+      await removeBundleFiles(previous, oldBundle.files.map(file => file.path));
+      await removeBundleFiles(replacement, newBundle.files.map(file => file.path));
+    } else if (names.includes('previous') || names.includes('replacement')) {
+      throw new Error('未找到修复清单，资源包暂存文件已保留');
+    }
+    for (const filename of ['manifest.json.tmp', 'manifest.json'])
+      await fs.unlink(path.join(directory, filename)).catch(error => { if (error.code !== 'ENOENT') throw error; });
+    await fs.rmdir(directory);
+  }
+
+  repairBundle(id, { expectedHash, projectPlan, modelPlan } = {}) {
+    return this._mutate(async () => {
+      const asset = this.data.assets.find(item => item.id === id);
+      if (!asset || asset.trashedAt || !isBundle(asset.ext) || asset.hash !== expectedHash) throw new Error('素材包已变化，请重新查找缺失资源');
+      const project = PROJECT.has(asset.ext);
+      const oldBundle = assetBundle(asset);
+      const newBundle = project ? projectPlan?.manifest : modelPlan && {
+        version: 1, entry: modelPlan.entry, files: modelPlan.files.map(({ relative, size, hash }) => ({ path: relative, size, hash })),
+        size: modelPlan.size, hash: modelPlan.hash, missing: modelPlan.missing, warnings: modelPlan.warnings,
+        ...(modelPlan.previewEntry ? { previewEntry: modelPlan.previewEntry } : {})
+      };
+      const validate = bundleRepairValidator(asset.ext);
+      validate(newBundle);
+      if (newBundle.hash === oldBundle.hash || path.posix.extname(newBundle.entry).slice(1).toLowerCase() !== asset.ext) throw new Error('修复未产生有效的资源包');
+      await this._recoverBundleRepairs();
+      const relative = bundleRelative(id, asset.ext), current = path.join(this.root, relative);
+      await this._checkManagedParent(relative);
+      if (!(await fileInfo(current))) throw new Error('原资源包不存在');
+      await checkBundleTree(current, oldBundle.files.map(file => file.path));
+      const staging = path.join(this.root, `.pending-repair-${crypto.randomUUID()}`);
+      await fs.mkdir(staging);
+      try {
+        const temporary = path.join(staging, 'manifest.json.tmp');
+        const handle = await fs.open(temporary, 'wx');
+        try { await handle.writeFile(JSON.stringify({ version: 1, id, ext: asset.ext, oldBundle, newBundle })); await handle.sync(); }
+        finally { await handle.close(); }
+        await fs.rename(temporary, path.join(staging, 'manifest.json'));
+        const replacement = path.join(staging, 'replacement');
+        const manifest = await (project ? copyProjectBundle(projectPlan, replacement) : copyModelBundle(modelPlan, replacement));
+        if (manifest.hash !== newBundle.hash) throw new Error('补齐后的资源包校验值不一致');
+        await fs.rename(current, path.join(staging, 'previous'));
+        await fs.rename(replacement, current);
+        const draft = clone(this.data), next = draft.assets.find(item => item.id === id);
+        Object.assign(next, { filename: `${relative}/${manifest.entry}`, size: manifest.size, hash: manifest.hash, updatedAt: now(),
+          [project ? 'projectBundle' : 'modelBundle']: manifest });
+        delete next.projectPreview;
+        await this._persist(draft);
+      } catch (error) {
+        try { await this._recoverBundleRepair(staging); }
+        catch (recoveryError) { throw new Error(`${error.message}；暂存资源已保留：${recoveryError.message}`); }
+        throw error;
+      }
+      try { await this._recoverBundleRepair(staging); }
+      catch (error) { return { ...this.snapshot(), repairWarning: `资源已补齐，暂存文件会在重新打开素材库时再次清理：${error.message}` }; }
+      return this.snapshot();
+    });
+  }
+
   publishProjectPreview(id, { expectedRoot, expectedHash, thumbnailPath, preview, signal } = {}) {
     return this._mutate(async () => {
       signal?.throwIfAborted();
@@ -978,6 +1097,40 @@ class Library {
     });
   }
 
+  setVideoThumbnail(id, { expectedHash, jpeg }) {
+    return this._mutate(async () => {
+      const current = this.data.assets.find(asset => asset.id === id);
+      if (!current || current.trashedAt || !VIDEO.has(current.ext) || current.hash !== expectedHash) throw new Error('视频已变化，请重新打开预览');
+      const relative = `thumbnails/${id}.jpg`;
+      await this._checkManagedParent(relative);
+      const destination = path.join(this.root, relative);
+      const previous = await fileInfo(destination);
+      if (previous && (!previous.isFile() || previous.isSymbolicLink())) throw new Error('视频封面目标无效');
+      const revision = crypto.randomUUID();
+      const temporary = `${destination}.${revision}.tmp`, backup = `${destination}.${revision}.previous`;
+      let savedPrevious = false, replaced = false, committed = false;
+      try {
+        await fs.writeFile(temporary, jpeg, { flag: 'wx' });
+        if (previous) { await fs.rename(destination, backup); savedPrevious = true; }
+        await fs.rename(temporary, destination);
+        replaced = true;
+        const draft = clone(this.data);
+        const asset = draft.assets.find(item => item.id === id);
+        Object.assign(asset, { thumbnail: relative, videoThumbnailRevision: revision, updatedAt: now() });
+        await this._persist(draft);
+        committed = true;
+        return this.snapshot();
+      } finally {
+        await fs.unlink(temporary).catch(error => { if (error.code !== 'ENOENT') throw error; });
+        if (!committed && replaced) await fs.unlink(destination);
+        if (savedPrevious) {
+          if (committed) await fs.unlink(backup);
+          else await fs.rename(backup, destination);
+        }
+      }
+    });
+  }
+
   refreshVideoMetadata(ids, { signal } = {}) {
     return this._mutate(async () => {
       signal?.throwIfAborted();
@@ -988,7 +1141,7 @@ class Library {
       for (const asset of draft.assets) {
         signal?.throwIfAborted();
         if (!selected.has(asset.id) || !VIDEO.has(asset.ext) || !this.createThumbnail) continue;
-        if (asset.thumbnail && asset.codec && asset.width > 0 && asset.height > 0) continue;
+        if (asset.videoThumbnailRevision || (asset.thumbnail && asset.codec && asset.width > 0 && asset.height > 0)) continue;
         try {
           await this._checkManagedParent(asset.filename);
           const relative = `thumbnails/${asset.id}.jpg`;

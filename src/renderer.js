@@ -86,7 +86,8 @@ const updateUi = {
   snapshot: { status: 'idle', currentVersion: '', latestVersion: '', progress: 0 },
   pending: false, preparingInstall: false, previousFocus: null, notices: new Set(), revision: 0
 };
-const transcodeUi = { snapshot: null, ids: [], root: null, pending: false, error: '', previousFocus: null, notified: new Set() };
+const transcodeUi = { snapshot: null, ids: [], root: null, pending: false, error: '', previousFocus: null, notified: new Set(),
+  presets: [], presetId: '', presetEditing: false, presetPending: false };
 const transcodeSettingsUi = { settings: { mode: 'auto', cpuThreads: 1, gpuId: 'auto' }, draft: null, devices: null, loading: false, saving: false, error: '', previousFocus: null, returnToTranscode: false, revision: 0 };
 const historyUi = { snapshot: null, pending: false, revision: 0, seen: new Set(), warning: '' };
 const skinPickerUi = window.ShituSkinPicker.create({ skins: window.ShituSkins });
@@ -372,6 +373,47 @@ async function saveTranscodeSettings() {
   } catch (error) { ui.error = transcodeMessage(error); }
   finally { ui.saving = false; renderTranscodeSettings(); }
 }
+function transcodeDraft() {
+  const format = $('videoTranscodeFormat').value;
+  if (format === 'dxv') return { format, alpha: $('videoTranscodeAlpha').checked };
+  const bitrateMbps = transcodeBitrate();
+  return format === 'mp4' && bitrateMbps !== null ? { format, bitrateMbps } : null;
+}
+function renderTranscodePresetOptions() {
+  const select = $('transcodePreset');
+  select.replaceChildren(new Option('自定义参数', ''));
+  for (const preset of transcodeUi.presets) select.add(new Option(preset.name, preset.id));
+  select.value = transcodeUi.presetId;
+}
+function applyTranscodePreset(preset) {
+  transcodeUi.presetId = preset?.id || '';
+  if (!preset) return;
+  $('videoTranscodeFormat').value = preset.format;
+  $('videoTranscodeAlpha').checked = Boolean(preset.alpha);
+  if (preset.format === 'mp4') {
+    const value = String(preset.bitrateMbps);
+    $('videoTranscodeBitrate').value = value;
+    $('videoTranscodeBitratePreset').value = ['5', '10', '20', '40', '80'].includes(value) ? value : 'custom';
+  }
+}
+async function changeTranscodePreset(operation) {
+  if (transcodeUi.presetPending || transcodeUi.pending || transcodeUi.snapshot?.id) return;
+  const preset = transcodeDraft(), name = $('transcodePresetName').value.trim();
+  if (operation === 'save' && (!preset || !name)) return;
+  transcodeUi.presetPending = true;
+  transcodeUi.error = '';
+  renderVideoTranscode();
+  try {
+    transcodeUi.presets = operation === 'save'
+      ? await api.saveTranscodePreset({ name, ...preset })
+      : await api.removeTranscodePreset(transcodeUi.presetId);
+    transcodeUi.presetId = operation === 'save' ? transcodeUi.presets.at(-1).id : '';
+    transcodeUi.presetEditing = false;
+    renderTranscodePresetOptions();
+    toast(operation === 'save' ? '转码预设已保存' : '转码预设已删除');
+  } catch (error) { transcodeUi.error = transcodeMessage(error); }
+  finally { transcodeUi.presetPending = false; renderVideoTranscode(); }
+}
 function renderVideoTranscode() {
   const job = transcodeUi.snapshot, active = transcodeActive(job), hasJob = Boolean(job?.id);
   const format = hasJob ? job.format : $('videoTranscodeFormat').value;
@@ -382,12 +424,17 @@ function renderVideoTranscode() {
   $('videoTranscodeExecutionNotice').textContent = job?.executionNotice || (!hasJob && format === 'mp4' && transcodeSettingsUi.settings.mode === 'hybrid' ? '批量视频由 CPU 与 GPU 同时处理；单个视频使用 GPU 编码。' : '');
   $('videoTranscodeSettings').disabled = transcodeUi.pending;
   if (hasJob) { $('videoTranscodeFormat').value = job.format; $('videoTranscodeAlpha').checked = Boolean(job.alpha); if (job.format === 'mp4') $('videoTranscodeBitrate').value = String(job.bitrateMbps); }
-  $('videoTranscodeOptions').disabled = transcodeUi.pending || hasJob;
+  $('videoTranscodeOptions').disabled = transcodeUi.pending || transcodeUi.presetPending || hasJob;
+  $('transcodePreset').value = transcodeUi.presetId;
+  $('transcodePresetAdd').disabled = transcodeUi.presetEditing || !transcodeDraft();
+  $('transcodePresetRemove').classList.toggle('hidden', !transcodeUi.presetId || transcodeUi.presetEditing);
+  $('transcodePresetEditor').classList.toggle('hidden', !transcodeUi.presetEditing || hasJob);
+  $('transcodePresetSave').disabled = !$('transcodePresetName').value.trim() || !transcodeDraft();
   $('videoTranscodeBitrateField').classList.toggle('hidden', format !== 'mp4');
   $('videoTranscodeAlphaField').classList.toggle('hidden', format !== 'dxv');
   $('videoTranscodeBitrate').required = format === 'mp4';
   $('videoTranscodeStart').classList.toggle('hidden', hasJob);
-  $('videoTranscodeStart').disabled = transcodeUi.pending || !total || (format === 'mp4' && transcodeBitrate() === null);
+  $('videoTranscodeStart').disabled = transcodeUi.pending || transcodeUi.presetPending || transcodeUi.presetEditing || !total || !transcodeDraft();
   $('videoTranscodeStart').textContent = transcodeUi.pending ? '正在开始…' : '开始转码';
   $('videoTranscodeCancel').classList.toggle('hidden', !active);
   $('videoTranscodeCancel').disabled = transcodeUi.pending || job?.status === 'cancelling';
@@ -431,13 +478,26 @@ function receiveVideoTranscode(snapshot, notify = true) {
     toast(snapshot.status === 'cancelled' ? '视频转码已取消，已完成的结果保留。' : `${snapshot.status === 'error' ? '视频转码未完成' : '视频转码完成'}，新增 ${snapshot.imported || 0} 个素材${snapshot.failed ? `，失败 ${snapshot.failed} 个` : ''}。`, snapshot.status === 'error' || snapshot.failed > 0, 9000, { text: '查看', run: () => openVideoTranscode() });
   }
 }
-function openVideoTranscode(ids) {
+function openVideoTranscode(ids, preset) {
   assetFolderDrag.cancel(); stopGalleryPreviews(); closeFolderMenu();
   if (state.previewId) closePreview();
   if (ids && !transcodeActive() && !transcodeUi.pending) {
     const assets = ids.map(id => state.library.assets.find(asset => asset.id === id));
     if (!assets.length || assets.some(asset => !asset || !isVideo(asset) || asset.trashedAt)) { toast('请选择有效的视频素材。', true); return; }
     transcodeUi.ids = [...new Set(ids)]; transcodeUi.root = state.library.root; transcodeUi.snapshot = null; transcodeUi.error = '';
+    transcodeUi.presetEditing = false;
+    applyTranscodePreset(preset);
+    if (preset && !transcodeUi.presets.some(item => item.id === preset.id)) transcodeUi.presets.push(preset);
+    renderTranscodePresetOptions();
+    void api.listTranscodePresets().then(presets => {
+      transcodeUi.presets = presets;
+      if (!presets.some(item => item.id === transcodeUi.presetId)) transcodeUi.presetId = '';
+      renderTranscodePresetOptions();
+      renderVideoTranscode();
+    }, error => {
+      transcodeUi.error = transcodeMessage(error);
+      renderVideoTranscode();
+    });
   }
   transcodeUi.previousFocus = document.activeElement;
   renderVideoTranscode();
@@ -449,14 +509,14 @@ function closeVideoTranscode() {
   if (transcodeUi.previousFocus?.isConnected) transcodeUi.previousFocus.focus();
 }
 async function startVideoTranscode() {
-  if (transcodeUi.pending || transcodeUi.snapshot?.id || !transcodeUi.ids.length) return;
-  const format = $('videoTranscodeFormat').value, bitrateMbps = format === 'mp4' ? transcodeBitrate() : undefined;
-  if (!['mp4', 'dxv'].includes(format) || format === 'mp4' && bitrateMbps === null) { renderVideoTranscode(); return; }
+  if (transcodeUi.pending || transcodeUi.presetPending || transcodeUi.presetEditing || transcodeUi.snapshot?.id || !transcodeUi.ids.length) return;
+  const options = transcodeDraft();
+  if (!options) { renderVideoTranscode(); return; }
   const ids = [...transcodeUi.ids], expectedRoot = transcodeUi.root;
   transcodeUi.pending = true; transcodeUi.error = ''; renderVideoTranscode();
   try {
     if (!await waitForMetadata() || state.library.root !== expectedRoot || state.libraryChanging) throw new Error('素材库已切换，请重新选择视频');
-    const snapshot = await api.startVideoTranscode({ ids, expectedRoot, format, ...(format === 'mp4' ? { bitrateMbps } : { alpha: $('videoTranscodeAlpha').checked }) });
+    const snapshot = await api.startVideoTranscode({ ids, expectedRoot, ...options });
     receiveVideoTranscode(snapshot, false);
   } catch (error) { transcodeUi.error = transcodeMessage(error); toast(transcodeUi.error, true); }
   finally { transcodeUi.pending = false; renderVideoTranscode(); }
@@ -1110,6 +1170,7 @@ function imageFor(asset, kind, className = '', videoThumbnail = false) {
   img.draggable = false;
   img.src = api.assetUrl(asset.id, kind);
   if (isProject(asset) && asset.projectPreview?.generatedAt) img.src += `&v=${encodeURIComponent(asset.projectPreview.generatedAt)}`;
+  if (kind !== 'original' && asset.videoThumbnailRevision) img.src += `&v=${encodeURIComponent(asset.videoThumbnailRevision)}`;
   img.alt = asset.name;
   img.loading = 'lazy';
   img.decoding = 'async';
@@ -1416,7 +1477,7 @@ async function showAssetContextMenu(id) {
     case 'batch-rename': await openBatchRename(ids); break;
     case 'font-compare': await openFontCompare(ids); break;
     case 'similar-images': closePreview(); similarImagesUi.open(first, root); break;
-    case 'video-transcode': openVideoTranscode(ids); break;
+    case 'video-transcode': openVideoTranscode(ids, result.preset); break;
     case 'plugin': await openPluginCenter(result.pluginId, ids); break;
     case 'preview': openPreview(first.id); break;
     case 'open': await api.openAsset(first.id); break;
@@ -1757,7 +1818,24 @@ function renderDetails() {
   }
   metadata.forEach(([key, value]) => { const row = el('div', 'metadata-row'); row.append(el('span', '', key), el('span', '', value)); box.append(row); });
   const health = one ? assetHealth.summary(asset) : null;
-  if (health) box.append(assetHealth.details(health));
+  if (health) {
+    const root = state.library.root;
+    const repair = asset.trashedAt ? null : {
+      key: `${root}\0${asset.id}\0${asset.hash}`,
+      choose: () => api.planBundleRepair(asset.id, root),
+      cancel: token => api.cancelBundleRepair(token),
+      message: error => String(error?.message || error).replace(/^Error invoking remote method '[^']+': Error: /, ''),
+      apply: async token => {
+        stopGalleryPreviews();
+        const result = await api.applyBundleRepair(asset.id, token);
+        if (state.library.root !== root) return;
+        applyLibrary(result.snapshot);
+        toast(`已补齐 ${result.repaired} 项资源${result.missing ? `，仍缺 ${result.missing} 项` : ''}`);
+        if (result.snapshot.repairWarning) messageError(result.snapshot.repairWarning);
+      }
+    };
+    box.append(assetHealth.details(health, repair));
+  }
   if (one && (asset.pageUrl || asset.sourceUrl)) {
     const sources = el('div', 'source-links');
     sources.append(el('span', 'detail-label', '网页来源'));
@@ -2162,6 +2240,81 @@ function previewUrl(prepared, assetId) {
     throw new Error('视频预览地址无效，请重新打开素材');
   return url.href;
 }
+function renderVideoTools(session = videoPreviewSession) {
+  const video = $('previewVideo'), prepared = session?.prepared;
+  const usable = prepared && videoSessionCurrent(session) && !video.error && !video.classList.contains('hidden');
+  const full = usable && !prepared.previewOnly && !session.switchingSource;
+  const alpha = usable && prepared.hasAlpha === true;
+  $('previewVideoTools').classList.toggle('hidden', !full && !alpha);
+  $('previewVideoBackdrop').classList.toggle('hidden', !alpha);
+  if (alpha) video.dataset.videoBackdrop = $('previewVideoBackdrop').value;
+  else delete video.dataset.videoBackdrop;
+  for (const id of ['previewFramePrevious', 'previewFrameNext', 'previewSaveVideoCover'])
+    $(id).disabled = !full || session.inspectBusy || video.seeking || video.readyState < 2;
+}
+async function inspectVideoFrame(action) {
+  const session = videoPreviewSession, video = $('previewVideo');
+  if (!session?.prepared || session.prepared.previewOnly || session.switchingSource || session.inspectBusy ||
+      !videoSessionCurrent(session) || video.readyState < 2 || video.seeking || video.error) return;
+  const source = previewUrl(session.prepared, session.asset.id);
+  if (video.currentSrc !== source) return;
+  const key = new URL(source).searchParams.get('key');
+  video.pause();
+  session.inspectBusy = true;
+  renderVideoTools(session);
+  try { await action({ session, video, key }); }
+  catch (error) { if (videoSessionCurrent(session)) toast(transcodeMessage(error), true); }
+  finally {
+    session.inspectBusy = false;
+    if (videoSessionCurrent(session)) renderVideoTools(session);
+  }
+}
+function stepVideoFrame(direction) {
+  return inspectVideoFrame(async ({ session, video, key }) => {
+    const time = video.currentTime;
+    const frame = await api.findVideoFrame(session.asset.id, session.root, key, time, direction);
+    if (!videoSessionCurrent(session) || video.seeking || !video.paused || Math.abs(video.currentTime - time) > .001) return;
+    if (frame && Number.isFinite(frame.seek)) video.currentTime = frame.seek;
+    else toast(direction < 0 ? '已在第一帧' : '已在最后一帧');
+  });
+}
+async function videoCoverBytes(video) {
+  if (!video.videoWidth || !video.videoHeight) throw new Error('当前画面尚未准备好');
+  const canvas = el('canvas');
+  const ratio = Math.min(1, 640 / Math.max(video.videoWidth, video.videoHeight));
+  canvas.width = Math.max(1, Math.round(video.videoWidth * ratio));
+  canvas.height = Math.max(1, Math.round(video.videoHeight * ratio));
+  const context = canvas.getContext('2d'), backdrop = video.dataset.videoBackdrop;
+  context.fillStyle = backdrop === 'white' ? '#fff' : backdrop === 'checker' ? '#e7e7e7' : '#000';
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  if (backdrop === 'checker') {
+    context.fillStyle = '#b6b6b6';
+    for (let y = 0; y < canvas.height; y += 12)
+      for (let x = y % 24; x < canvas.width; x += 24) context.fillRect(x, y, 12, 12);
+  }
+  context.drawImage(video, 0, 0, canvas.width, canvas.height);
+  const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', .9));
+  if (!blob) throw new Error('无法生成当前画面的封面');
+  return new Uint8Array(await blob.arrayBuffer());
+}
+function videoPosterUrl(asset) {
+  const revision = asset.videoThumbnailRevision;
+  return asset.thumbnail ? api.assetUrl(asset.id, 'thumbnail') + (revision ? `&v=${encodeURIComponent(revision)}` : '') : '';
+}
+function setVideoCover() {
+  return inspectVideoFrame(async ({ session, video, key }) => {
+    const bytes = await videoCoverBytes(video);
+    if (!videoSessionCurrent(session)) return;
+    const snapshot = await api.saveVideoThumbnail(session.asset.id, session.root, key, bytes);
+    if (snapshot.root !== state.library.root) return;
+    applyLibrary(snapshot);
+    if (videoSessionCurrent(session)) {
+      session.asset = snapshot.assets.find(asset => asset.id === session.asset.id);
+      video.poster = videoPosterUrl(session.asset);
+    }
+    toast('已将当前画面设为封面');
+  });
+}
 function renderVideoPreviewStatus(session = videoPreviewSession) {
   const current = session && videoSessionCurrent(session), visible = current && session.phase !== 'full';
   $('previewVideoStatus').classList.toggle('hidden', !visible);
@@ -2208,6 +2361,7 @@ function freezeVideoFrame(video, session) {
   if (!session.quickReady || !video.videoWidth || !video.videoHeight || !video.parentElement) return null;
   try {
     const cover = el('canvas', 'preview-video-cover');
+    if (video.dataset.videoBackdrop) cover.dataset.videoBackdrop = video.dataset.videoBackdrop;
     cover.width = video.videoWidth; cover.height = video.videoHeight;
     cover.getContext('2d').drawImage(video, 0, 0); video.parentElement.append(cover); session.cover = cover; return cover;
   } catch { return null; }
@@ -2224,6 +2378,7 @@ async function showCompleteVideo(session, prepared) {
     freezeVideoFrame(video, session);
     video.dataset.previewSerial = String(session.serial); video.dataset.previewProfile = 'full'; video.dataset.previewOnly = 'false';
     session.switchingSource = true;
+    renderVideoTools(session);
     video.controls = true; video.src = url; video.load(); video.classList.remove('hidden');
     await videoReady(video, session);
     if (!videoSessionCurrent(session)) return;
@@ -2232,6 +2387,7 @@ async function showCompleteVideo(session, prepared) {
     // Chromium can remain seeking forever when looping a one-frame stream.
     video.loop = !Number.isFinite(video.duration) || video.duration > 0.1;
     session.phase = 'full'; session.error = ''; session.fullPending = false;
+    session.prepared = prepared;
     videoPreviewMetadata(session, prepared); $('previewFallback').classList.add('hidden'); renderVideoPreviewStatus(session);
     if (resume) await video.play().catch(() => {});
   } catch (error) {
@@ -2246,6 +2402,7 @@ async function showCompleteVideo(session, prepared) {
     staging.pause(); staging.removeAttribute('src'); staging.load();
     if (session.staging === staging) session.staging = null;
     session.cover?.remove(); session.cover = null;
+    if (videoSessionCurrent(session)) renderVideoTools(session);
   }
 }
 async function requestCompleteVideo(session) {
@@ -2267,7 +2424,7 @@ async function startQuickVideoPreview(asset) {
   const session = { asset, root: state.library.root, serial: videoPreviewSerial, controller: new AbortController(), requests: {}, phase: 'quick', quickReady: false, quickPending: true, fullPending: false, progress: null, error: '' };
   videoPreviewSession = session;
   video.setAttribute('aria-label', asset.name); video.controls = false; video.preload = 'auto'; video.playsInline = true; video.muted = true; video.loop = true;
-  video.poster = asset.thumbnail ? api.assetUrl(asset.id, 'thumbnail') : '';
+  video.poster = videoPosterUrl(asset);
   $('previewFallback').textContent = '正在准备视频预览…'; $('previewFallback').classList.remove('hidden');
   session.requests.quick = ++videoPreviewRequestSerial; renderVideoPreviewStatus(session);
   try {
@@ -2279,6 +2436,8 @@ async function startQuickVideoPreview(asset) {
     if (!videoSessionCurrent(session)) return;
     videoPreviewMetadata(session, prepared); $('previewFallback').classList.add('hidden');
     session.quickReady = Boolean(prepared.previewOnly); session.phase = prepared.previewOnly ? 'quick' : 'full';
+    session.prepared = prepared;
+    renderVideoTools(session);
     if (!session.quickReady) video.loop = !Number.isFinite(video.duration) || video.duration > 0.1;
     if (session.quickReady) session.quickPrepared = prepared;
     await video.play().catch(() => {});
@@ -2434,6 +2593,7 @@ function resetPreviewMedia() {
     Promise.resolve(api.releaseVideoViewer(session.asset.id, session.root)).catch(() => {});
   }
   videoPreviewSession = null; $('previewVideoStatus').classList.add('hidden');
+  renderVideoTools();
   videoPreviewSerial++;
   projectPreviewView = null;
   $('previewProject').replaceChildren();
@@ -2467,23 +2627,26 @@ let refreshingCollector = false;
 let collectorRefreshTimer;
 async function showCapturedAssets(result) {
   if (!await waitForMetadata()) return;
-  if (result.libraryRoot && state.library.root !== result.libraryRoot) throw new Error('采集保存到了其他素材库，请切换到采集时的素材库查看');
   const snapshot = await api.getLibrary();
-  if (snapshot.root !== state.library.root) return;
   if (result.libraryRoot && snapshot.root !== result.libraryRoot) throw new Error('素材库已切换，请回到采集时的素材库查看');
+  if (state.library.root && snapshot.root !== state.library.root) return;
+  if (!state.library.root) applyLibrary(snapshot, false);
   const ids = [...(result.assetIds || []), ...(result.existingAssets || []).map(asset => asset.id)];
   const asset = snapshot.assets.find(item => ids.includes(item.id));
-  showAssetInOverview(asset, snapshot);
+  if (!asset) throw new Error('素材已不存在，无法定位');
+  showAssetInOverview(asset, snapshot, { inFolder: true });
   if (!$('collectorOverlay').classList.contains('hidden')) closeCollector();
 }
-function showAssetInOverview(asset, snapshot) {
+function showAssetInOverview(asset, snapshot, { inFolder = false } = {}) {
   closePreview();
   state.view = asset?.trashedAt ? 'trash' : 'all';
-  state.folder = null; state.smartFolder = null; state.tag = null; state.search = ''; state.format = 'all'; state.missingResources = false; state.sort = 'newest';
+  state.folder = inFolder && !asset?.trashedAt ? asset?.folderId || null : null;
+  state.smartFolder = null; state.tag = null; state.search = ''; state.format = 'all'; state.missingResources = false; state.sort = 'newest';
   $('searchInput').value = ''; $('formatFilter').value = 'all'; $('sortSelect').value = 'newest';
   applyLibrary(snapshot, false);
   if (asset) {
     state.selected = new Set([asset.id]);
+    state.anchor = asset.id;
     state.limit = Math.max(240, filteredAssets().findIndex(item => item.id === asset.id) + 1);
     render();
     requestAnimationFrame(() => document.querySelector(`.asset-card[data-asset-id="${CSS.escape(asset.id)}"]`)?.scrollIntoView({ block: 'center' }));
@@ -2768,16 +2931,47 @@ $('videoTranscodeBackground').addEventListener('click', closeVideoTranscode);
 $('videoTranscodeOverlay').addEventListener('click', event => { if (event.target === $('videoTranscodeOverlay')) closeVideoTranscode(); });
 $('videoTranscodeCancel').addEventListener('click', () => { void cancelVideoTranscode(); });
 $('videoTranscodeForm').addEventListener('submit', event => { event.preventDefault(); void startVideoTranscode(); });
-$('videoTranscodeFormat').addEventListener('change', () => { transcodeUi.error = ''; renderVideoTranscode(); });
+function transcodeOptionsChanged() {
+  transcodeUi.presetId = '';
+  transcodeUi.error = '';
+  renderVideoTranscode();
+}
+$('transcodePreset').addEventListener('change', event => {
+  applyTranscodePreset(transcodeUi.presets.find(preset => preset.id === event.target.value));
+  transcodeUi.error = '';
+  renderVideoTranscode();
+});
+$('transcodePresetAdd').addEventListener('click', () => {
+  transcodeUi.presetEditing = true;
+  $('transcodePresetName').value = '';
+  renderVideoTranscode();
+  $('transcodePresetName').focus();
+});
+$('transcodePresetCancel').addEventListener('click', () => {
+  transcodeUi.presetEditing = false;
+  transcodeUi.error = '';
+  renderVideoTranscode();
+  $('transcodePresetAdd').focus();
+});
+$('transcodePresetName').addEventListener('input', renderVideoTranscode);
+$('transcodePresetName').addEventListener('keydown', event => {
+  if (event.key !== 'Enter' || event.isComposing) return;
+  event.preventDefault();
+  void changeTranscodePreset('save');
+});
+$('transcodePresetSave').addEventListener('click', () => { void changeTranscodePreset('save'); });
+$('transcodePresetRemove').addEventListener('click', () => { void changeTranscodePreset('remove'); });
+$('videoTranscodeFormat').addEventListener('change', transcodeOptionsChanged);
+$('videoTranscodeAlpha').addEventListener('change', transcodeOptionsChanged);
 $('videoTranscodeBitratePreset').addEventListener('change', event => {
   if (event.target.value !== 'custom') $('videoTranscodeBitrate').value = event.target.value;
   else $('videoTranscodeBitrate').focus();
-  transcodeUi.error = ''; renderVideoTranscode();
+  transcodeOptionsChanged();
 });
 $('videoTranscodeBitrate').addEventListener('input', () => {
   const value = $('videoTranscodeBitrate').value;
   $('videoTranscodeBitratePreset').value = ['5', '10', '20', '40', '80'].includes(value) ? value : 'custom';
-  transcodeUi.error = ''; renderVideoTranscode();
+  transcodeOptionsChanged();
 });
 $('appUpdateCheck').addEventListener('click', () => runUpdateAction(() => api.checkUpdate()));
 $('appUpdateOpenRelease').addEventListener('click', async () => {
@@ -2875,6 +3069,12 @@ $('previewVideo').addEventListener('loadeddata', () => {
   if (asset && isVideo(asset) && $('previewVideo').dataset.previewSerial === String(videoPreviewSerial)) { $('previewVideo').classList.remove('hidden'); $('previewFallback').classList.add('hidden'); }
 });
 $('previewVideoRetry').addEventListener('click', () => { if (videoPreviewSession) void requestCompleteVideo(videoPreviewSession); });
+$('previewFramePrevious').addEventListener('click', () => { void stepVideoFrame(-1); });
+$('previewFrameNext').addEventListener('click', () => { void stepVideoFrame(1); });
+$('previewVideoBackdrop').addEventListener('change', () => renderVideoTools());
+$('previewSaveVideoCover').addEventListener('click', () => { void setVideoCover(); });
+for (const event of ['seeking', 'seeked', 'loadeddata', 'error'])
+  $('previewVideo').addEventListener(event, () => renderVideoTools());
 window.addEventListener('pagehide', resetPreviewMedia);
 window.addEventListener('pagehide', () => { batchRenameUi.close(true); fontCompareUi.close(); smartFoldersUi.close(); skinPickerUi.close(); });
 $('batchRenameSelection').addEventListener('click', () => run(() => openBatchRename()));
@@ -2999,6 +3199,7 @@ api.onWebCapture?.(result => {
   notice.dataset.webCapture = 'true';
   renderCaptureResult({ ...result, status: 'complete' });
 });
+api.onWebCaptureLocate?.(result => run(() => showCapturedAssets(result)));
 api.onLibraryChanged?.(() => run(async () => {
   const serial = ++libraryRefreshSerial;
   const snapshot = await api.getLibrary();

@@ -20,6 +20,7 @@ const { createVideoTranscoder } = require('./video-transcode.cjs');
 const { createVideoTranscodeService } = require('./video-transcode-service.cjs');
 const { createTranscodeDeviceManager } = require('./transcode-devices.cjs');
 const { createTranscodeSettings, executionPlan } = require('./transcode-settings.cjs');
+const { createTranscodePresets } = require('./transcode-presets.cjs');
 const { createUiRecovery } = require('./ui-recovery.cjs');
 const { createWindowCorners } = require('./window-corners.cjs');
 const { createVideoPreviewRequests } = require('./video-preview-requests.cjs');
@@ -28,6 +29,7 @@ const { createSimilarImageService } = require('./similar-image-service.cjs');
 const { createTaskCenter } = require('./task-center.cjs');
 const { createFontService } = require('./font-service.cjs');
 const { createAEProjectCollector } = require('./ae-projects.cjs');
+const { createBundleRepair } = require('./bundle-repair.cjs');
 const { createAEPreviewEngine } = require('./ae-preview.cjs');
 const { createAEPreviewService } = require('./ae-preview-service.cjs');
 const { VIDEO, MODEL, PROJECT, FONT, SUPPORTED } = require('./media-formats.cjs');
@@ -65,6 +67,7 @@ let videoTranscoder;
 let videoTranscodeService;
 let transcodeDevices;
 let transcodeSettings;
+let transcodePresets;
 let uiRecovery;
 let uiDiagnosticWrite = Promise.resolve();
 let modelService;
@@ -72,6 +75,8 @@ let similarImages;
 let fontService;
 let aeProjects;
 let aePreviewService;
+let bundleRepair;
+let bundleRepairBusy = false;
 const videoPreviews = new Map();
 const videoRequests = createVideoPreviewRequests();
 let appUpdater;
@@ -168,12 +173,38 @@ async function prepareVideo(id, expectedRoot, requestToken, profile = 'full', re
     if (library !== current || current.getAssetPath(id, 'original') !== source) throw new Error('素材库已切换，请重新选择视频');
     const previewStat = await fs.stat(result.path);
     const key = crypto.createHash('sha256').update(`${current.root}\0${id}\0${asset.hash}\0${profile}\0${previewStat.size}:${previewStat.mtimeMs}:${previewStat.ctimeMs}`).digest('hex');
-    videoPreviews.set(key, { id, root: current.root, source, path: result.path });
+    const previewOnly = profile === 'quick' && !ready && !result.direct;
+    videoPreviews.set(key, { id, root: current.root, source, path: result.path, hash: asset.hash, inspect: profile !== 'hover' && !previewOnly });
     return { url: `shitu://asset/${encodeURIComponent(id)}?kind=preview&key=${key}`, width: result.width,
       height: result.height, duration: result.duration, sourceDuration: result.sourceDuration || result.duration,
-      profile, previewOnly: profile === 'quick' && !ready && !result.direct,
+      profile, previewOnly, hasAlpha: result.hasAlpha === true,
       codec: result.sourceCodec || asset.codec || result.codec, mimeType: result.mimeType };
   }, event => forwardVideoProgress(event, owner));
+}
+function inspectedVideo(id, expectedRoot, key) {
+  const current = requireLibrary();
+  const preview = typeof key === 'string' && videoPreviews.get(key);
+  if (current.root !== expectedRoot || !preview?.inspect || preview.id !== id || preview.root !== current.root ||
+      current.getAssetPath(id, 'original') !== preview.source) throw new Error('视频预览已变化，请重新打开后再试');
+  return { current, preview };
+}
+async function findVideoFrame(id, expectedRoot, key, time, direction) {
+  const { current, preview } = inspectedVideo(id, expectedRoot, key);
+  const result = await videoEngine.adjacentFrame(preview.path, time, direction);
+  if (library !== current) throw new Error('素材库已切换，请重新打开视频');
+  return result;
+}
+async function saveVideoThumbnail(id, expectedRoot, key, bytes) {
+  const { current, preview } = inspectedVideo(id, expectedRoot, key);
+  if (!(bytes instanceof Uint8Array) || bytes.byteLength === 0 || bytes.byteLength > 2 * 1024 * 1024) throw new Error('视频封面文件无效');
+  const jpeg = Buffer.from(bytes);
+  const metadata = await sharp(jpeg, { limitInputPixels: 640 * 640 }).metadata();
+  if (metadata.format !== 'jpeg' || !metadata.width || !metadata.height || metadata.width > 640 || metadata.height > 640)
+    throw new Error('视频封面必须是有效的 640 像素内 JPEG');
+  if (library !== current || switchingLibrary || closing) throw new Error('素材库已切换或正在关闭');
+  const snapshot = await current.setVideoThumbnail(id, { expectedHash: preview.hash, jpeg });
+  if (library === current) sendActionEvent('library-changed');
+  return snapshot;
 }
 function forwardVideoProgress(event, owner) {
   if (!owner || owner.current !== library) return;
@@ -181,7 +212,7 @@ function forwardVideoProgress(event, owner) {
     state: event.state, progress: Number.isFinite(event.progress) ? Math.max(0, Math.min(100, event.progress)) : undefined });
 }
 async function switchLibrary(mode) {
-  if(switchingLibrary || importing || draggingAssets || movingAssets || historyBusy || metadataSaves.size || videoTranscodeService?.busy() || imagePlugins?.busy() || collector?.activeCount())throw new Error('请等待当前导入、采集、转码、图片处理或保存完成后再切换素材库');
+  if(switchingLibrary || importing || draggingAssets || movingAssets || historyBusy || metadataSaves.size || videoTranscodeService?.busy() || imagePlugins?.busy() || collector?.activeCount() || bundleRepairBusy)throw new Error('请等待当前素材操作完成后再切换素材库');
   if(mode==='migrate')requireLibrary();
   switchingLibrary=true;
   try {
@@ -241,7 +272,7 @@ function checkedHandler(channel, handler) {
   ipcMain.handle(`shitu:${channel}`, async (event, ...args) => {
     assertTrustedSender(event);
     if (installingUpdate && channel !== 'update-state') throw new Error('正在安装更新，请稍候');
-    if (channel.startsWith('update-') || ['prepare-video', 'cancel-video', 'release-video-viewer', 'prepare-model', 'prepare-model-hover',
+    if (channel.startsWith('update-') || ['prepare-video', 'cancel-video', 'release-video-viewer', 'find-video-frame', 'prepare-model', 'prepare-model-hover',
       'cancel-model-hover', 'warm-model-hover', 'cancel-model-warmup', 'prepare-font', 'prepare-project-preview',
       'project-preview-state', 'find-similar-images', 'cancel-similar-images'].includes(channel)) return handler(...args);
     activeOperations++;
@@ -467,7 +498,18 @@ function bindHandlers() {
   checkedHandler('video-transcode-state', () => videoTranscodeService.state());
   checkedHandler('video-transcode-start', startVideoTranscode);
   checkedHandler('video-transcode-cancel', id => videoTranscodeService.cancel(id));
+  checkedHandler('transcode-presets', () => transcodePresets.list());
+  checkedHandler('transcode-preset-save', preset => {
+    if (closing) throw new Error('软件正在关闭，请稍后再保存设置');
+    return transcodePresets.save(preset);
+  });
+  checkedHandler('transcode-preset-remove', id => {
+    if (closing) throw new Error('软件正在关闭，请稍后再保存设置');
+    return transcodePresets.remove(id);
+  });
   checkedHandler('prepare-video', prepareVideo);
+  checkedHandler('find-video-frame', findVideoFrame);
+  checkedHandler('save-video-thumbnail', saveVideoThumbnail);
   checkedHandler('cancel-video', (id, expectedRoot, requestToken) => videoRequests.cancel(id, expectedRoot, requestToken));
   checkedHandler('release-video-viewer', (id, expectedRoot) => videoRequests.releaseViewer(id, expectedRoot));
   checkedHandler('prepare-model', (id, expectedRoot) => modelService.prepare(requireLibrary(), id, expectedRoot));
@@ -483,6 +525,25 @@ function bindHandlers() {
   checkedHandler('prepare-font', (id, expectedRoot, faceIndex = 0) => fontService.prepare(requireLibrary(), id, expectedRoot, faceIndex));
   checkedHandler('prepare-project-preview', (id, expectedRoot, compositionId) => aePreviewService.prepare(requireLibrary(), id, { expectedRoot, compositionId }));
   checkedHandler('project-preview-state', id => aePreviewService.state(requireLibrary(), id));
+  checkedHandler('plan-bundle-repair', async (id, expectedRoot) => {
+    const owner = requireLibrary();
+    if (owner.root !== expectedRoot) throw new Error('素材库已切换，请重新查找');
+    const choice = await dialog.showOpenDialog(mainWindow, { title: '选择缺失资源所在的文件夹', properties: ['openDirectory'] });
+    if (choice.canceled || !choice.filePaths[0]) return null;
+    return bundleRepair.plan(owner, id, choice.filePaths[0]);
+  });
+  checkedHandler('apply-bundle-repair', async (id, token) => {
+    if (bundleRepairBusy || closing) throw new Error('请等待当前资源补齐任务完成');
+    const owner = requireLibrary();
+    bundleRepairBusy = true;
+    try {
+      const result = await bundleRepair.apply(owner, id, token);
+      if (result.snapshot.assets.find(asset => asset.id === id)?.modelBundle) modelService.invalidate();
+      else aePreviewService.scheduleLibrary(owner);
+      return result;
+    } finally { bundleRepairBusy = false; }
+  });
+  checkedHandler('cancel-bundle-repair', token => bundleRepair.cancel(token));
   checkedHandler('update-state', () => appUpdater.state());
   checkedHandler('update-open-release', async () => {
     const repository = updateConfig.repository;
@@ -509,7 +570,7 @@ function bindHandlers() {
   });
   checkedHandler('copy-asset-image', copyAssetImage);
   checkedHandler('copy-asset-paths', copyAssetPaths);
-  checkedHandler('asset-menu', (ids, expectedRoot) => {
+  checkedHandler('asset-menu', async (ids, expectedRoot) => {
     const current = requireLibrary();
     if (typeof expectedRoot !== 'string' || expectedRoot !== current.root) throw new Error('素材库已切换，请重新选择素材');
     if (!Array.isArray(ids) || !ids.length || ids.length > 256 || ids.some(id => typeof id !== 'string')) throw new Error('请选择有效素材');
@@ -517,12 +578,14 @@ function bindHandlers() {
     const snapshot = current.snapshot();
     const assets = assetIds.map(id => snapshot.assets.find(asset => asset.id === id));
     if (assets.some(asset => !asset)) throw new Error('所选素材不存在，请重新选择');
+    const presets = assets.every(asset => !asset.trashedAt && VIDEO.has(asset.ext)) ? await transcodePresets.list().catch(() => []) : [];
+    if (library !== current || switchingLibrary) return null;
     return new Promise(resolve => {
       const choose = (action, extra = {}) => {
         if (library !== current || library.root !== expectedRoot) return resolve(null);
         resolve({ action, assetIds, libraryRoot: expectedRoot, ...extra });
       };
-      const menu = Menu.buildFromTemplate(assetMenuTemplate(assets, snapshot.folders, choose));
+      const menu = Menu.buildFromTemplate(assetMenuTemplate(assets, snapshot.folders, choose, presets));
       menu.popup({ window: mainWindow, callback: () => resolve(null) });
     });
   });
@@ -654,14 +717,14 @@ async function createWindow() {
   mainWindow.on('close', event => {
     if (mayClose) { mayClose=false; closing=false; return; }
     event.preventDefault();
-    if (switchingLibrary || importing || draggingAssets || historyBusy || metadataSaves.size || imagePlugins?.busy() || collector?.activeCount()) {
+    if (switchingLibrary || importing || draggingAssets || historyBusy || metadataSaves.size || imagePlugins?.busy() || collector?.activeCount() || bundleRepairBusy) {
       dialog.showMessageBox(mainWindow, { type: 'info', title: '素材操作进行中', message: '请等待素材操作完成后再关闭 Mosaic。图片处理任务可在插件中心取消。', buttons: ['知道了'] });
       return;
     }
     if (closing) return;
     closing = true;
     similarImages?.invalidate();
-    Promise.resolve(videoTranscodeService?.shutdown()).then(() => transcodeSettings?.flush()).then(() => library?.flush()).then(() => Promise.allSettled([transcodeDevices?.shutdown?.(), videoTranscoder?.shutdown(), modelService?.shutdown(), fontService?.shutdown(), aeProjects?.shutdown(), aePreviewService?.shutdown()])).then(() => { mayClose = true; mainWindow.close(); }).catch(error => {
+    Promise.resolve(videoTranscodeService?.shutdown()).then(() => Promise.all([transcodeSettings?.flush(), transcodePresets?.flush()])).then(() => library?.flush()).then(() => Promise.allSettled([transcodeDevices?.shutdown?.(), videoTranscoder?.shutdown(), modelService?.shutdown(), fontService?.shutdown(), aeProjects?.shutdown(), aePreviewService?.shutdown()])).then(() => { mayClose = true; mainWindow.close(); }).catch(error => {
       closing = false;
       dialog.showErrorBox('保存未完成', error.message);
     });
@@ -678,6 +741,7 @@ else {
     transcodeDevices = createTranscodeDeviceManager({ runtimeDir: path.join(__dirname, '..', 'video-runtime') });
     videoTranscoder = createVideoTranscoder({ runtimeDir: path.join(__dirname, '..', 'video-runtime'), deviceManager: transcodeDevices });
     transcodeSettings = createTranscodeSettings({ filePath: path.join(app.getPath('userData'), 'transcode-settings.json') });
+    transcodePresets = createTranscodePresets(path.join(app.getPath('userData'), 'transcode-presets.json'));
     videoTranscodeService = createVideoTranscodeService({ engine: videoTranscoder, getLibrary: () => library,
       workDir: path.join(app.getPath('userData'), 'video-transcodes'),
       onEvent: state => {
@@ -696,6 +760,11 @@ else {
       onProgress: detail => sendActionEvent('similar-image-progress', detail) });
     fontService = createFontService({ BrowserWindow, cacheDir: path.join(app.getPath('userData'), 'font-previews'), getLibrary: () => library });
     aeProjects = createAEProjectCollector({ cacheDir: path.join(app.getPath('userData'), 'ae-projects') });
+    bundleRepair = createBundleRepair({
+      cacheDir: path.join(app.getPath('userData'), 'bundle-repair'),
+      currentLibrary: () => switchingLibrary ? null : library,
+      prepareProject: (source, replacements) => aeProjects.prepareProjectBundle(source, { replacements })
+    });
     libraryManager=new LibraryManager({configPath:path.join(app.getPath('userData'),'library-location.json'),legacyRoot,createThumbnail,
       prepareProjectBundle:(source, options)=>{
         const progress = { current: 0, total: 1, name: `正在收集 AE 工程与素材：${path.basename(source)}` };
@@ -732,7 +801,18 @@ else {
       if (installingUpdate) throw new Error('正在安装更新，暂时无法采集');
       if (historyBusy || closing) throw new Error('正在保存撤销或重做，暂时无法采集');
       return requireLibrary().importPaths(...args);
-    }},appVersion:app.getVersion(),isReady:()=>Boolean(library)&&!switchingLibrary&&!installingUpdate&&!historyBusy&&!closing,configPath:path.join(app.getPath('userData'),'collector.json'),allowPrivate:!app.isPackaged && process.env.SHITU_TEST_ALLOW_PRIVATE==='1',onImported:result=>{
+    }},getLibraryRoot:()=>library?.root,
+    listFolders:()=>requireLibrary().listFolders(),hasAsset:id=>requireLibrary().hasAsset(id),
+    onLocate:result=>{
+      if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed() ||
+          mainWindow.webContents.isLoadingMainFrame() || mainWindow.webContents.isCrashed()) {
+        throw new Error('Mosaic 界面正在加载，请稍后重新定位');
+      }
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      if (!mainWindow.isVisible()) mainWindow.show();
+      mainWindow.focus();
+      sendActionEvent('web-capture-locate', result);
+    },appVersion:app.getVersion(),isReady:()=>Boolean(library)&&!switchingLibrary&&!installingUpdate&&!historyBusy&&!closing,configPath:path.join(app.getPath('userData'),'collector.json'),allowPrivate:!app.isPackaged && process.env.SHITU_TEST_ALLOW_PRIVATE==='1',onImported:result=>{
       if(mainWindow&&!mainWindow.isDestroyed())mainWindow.webContents.send('shitu:library-changed');
       sendHistory();
       sendActionEvent('web-capture', result);
@@ -753,7 +833,9 @@ else {
           const preview = videoPreviews.get(url.searchParams.get('key'));
           if (!preview || preview.id !== id || preview.root !== library.root ||
               library.getAssetPath(id, 'original') !== preview.source) return new Response(null, { status: 404 });
-          return mediaResponse(preview.path, request);
+          const response = await mediaResponse(preview.path, request);
+          response.headers.set('Access-Control-Allow-Origin', '*');
+          return response;
         }
         if(url.searchParams.get('kind') === 'editing') {
           const asset = library.snapshot().assets.find(item => item.id === id);
