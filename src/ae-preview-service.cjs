@@ -33,7 +33,7 @@ function createAEPreviewService({ engine, getLibrary, onChanged, onProgress } = 
     if (!entries) { entries = new Map(); states.set(owner.library, entries); }
     const value = { id: owner.id, root: owner.root, ...update };
     entries.set(owner.id, value);
-    try { onProgress?.(owner.library, structuredClone(value)); } catch {}
+    try { onProgress?.(owner.library, structuredClone({ ...value, requestedCompositionId: owner.compositionId ?? null })); } catch {}
   }
   function identify(library, id, { expectedRoot = library?.root, compositionId } = {}) {
     if (closed) throw cancelled();

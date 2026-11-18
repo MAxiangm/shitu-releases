@@ -1059,7 +1059,7 @@ class Library {
       if (isWithin(this.root, destination) || isWithin(destination, this.root)) throw new Error('备份目录与素材库不能互相包含');
       // A fresh child directory prevents overwriting an earlier backup or unrelated files.
       await fs.mkdir(destination, { recursive: true });
-      const folder = path.join(destination, `拾图备份-${now().replace(/[:.]/g, '-')}-${crypto.randomUUID().slice(0, 8)}`);
+      const folder = path.join(destination, `Mosaic 备份-${now().replace(/[:.]/g, '-')}-${crypto.randomUUID().slice(0, 8)}`);
       await fs.cp(this.root, folder, { recursive: true, errorOnExist: true, force: false, dereference: false, filter: source => !source.endsWith('.tmp') });
       return { path: folder };
     });

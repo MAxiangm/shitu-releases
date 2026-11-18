@@ -7,6 +7,9 @@ const path = require('node:path');
 const root = path.resolve(__dirname, '..');
 const dist = path.join(root, 'dist');
 const recoveredRuntime = path.join(root, '.recovery', 'extracted-0.10.7');
+// Existing installations, pinned Windows shortcuts and the in-app updater
+// address this filename. Use productName for the brand shown to users.
+const installedExecutable = '拾图.exe';
 
 function inside(parent, target) {
   const relative = path.relative(parent, target);
@@ -69,4 +72,4 @@ function installerPath(project) {
   return path.join(dist, `${project.productName}-${project.version}-Setup.exe`);
 }
 
-module.exports = { root, dist, recoveredRuntime, inside, exists, readProject, assertNoLinks, resetDistDirectory, copyTree, packagePath, installerPath };
+module.exports = { root, dist, recoveredRuntime, installedExecutable, inside, exists, readProject, assertNoLinks, resetDistDirectory, copyTree, packagePath, installerPath };

@@ -2,6 +2,7 @@
 const FolderTree = require('./folder-tree.js');
 const ColorLabels = require('./color-labels.js');
 const { VIDEO, FONT } = require('./media-formats.cjs');
+const { isSearchableImage } = require('./similar-image-service.cjs');
 
 function assetMenuTemplate(assets, folders, choose) {
   const one = assets.length === 1;
@@ -15,6 +16,7 @@ function assetMenuTemplate(assets, folders, choose) {
   const item = (id, label, enabled = true) => ({ id, label, enabled, click: () => choose(id) });
   return [
     item('preview', '预览', one),
+    ...(one && isSearchableImage(first) ? [item('similar-images', '查找相似图片…')] : []),
     item('font-compare', '对比所选字体…', assets.length >= 2 && !anyTrashed && assets.every(asset => asset.mediaType === 'font' || FONT.has(asset.ext))),
     item('open', '使用系统应用打开', one),
     item('reveal', '在资源管理器中显示', one),

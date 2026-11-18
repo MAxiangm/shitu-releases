@@ -39,13 +39,7 @@ body.is-preview-open .app-shell { visibility:hidden; }
 .library-switch>.icon { width:14px; height:14px; color:#777; }
 .library-switch:hover strong { color:#fff; }
 .brand { display:flex; justify-content:center; align-items:center; gap:9px; }
-.brand>div:nth-child(2) { display:none; }
-.brand strong { font-size:19px; letter-spacing:3px; font-weight:400; color:#eee; }
-.brand>div:nth-child(2)>span,.beta-badge { display:none; }
-.brand-mark { width:24px; height:24px; display:grid; grid-template-columns:1fr 1fr; gap:3px; transform:rotate(-7deg); flex:none; }
-.brand-mark span { background:#eee; border-radius:1px; display:block; }
-.brand-mark span:nth-child(2) { transform:translateY(-2px); opacity:.82; }
-.brand-mark span:nth-child(3) { opacity:.5; }
+.brand-mark { width:24px; height:24px; display:block; flex:none; }
 .header-actions { justify-self:end; display:flex; align-items:center; gap:18px; }
 .backup-button,.header-button { display:flex; align-items:center; justify-content:center; gap:7px; min-height:36px; padding:8px 0; background:transparent; color:#aaa; font-size:11px; white-space:nowrap; }
 .backup-button:hover,.header-button:hover { color:#eee; }
@@ -231,7 +225,10 @@ h1 { font-size:34px; line-height:1.35; font-weight:300; letter-spacing:-.5px; ma
 .asset-thumb .asset-hover-video { position:absolute; inset:0; opacity:0; }
 .asset-thumb[data-video-hover-state="playing"] .asset-hover-video { opacity:1; }
 .asset-thumb[data-video-hover-state="playing"]>img,.asset-thumb[data-video-hover-state="playing"]>.asset-fallback { visibility:hidden; }
-.asset-thumb[data-video-hover-state="preparing"]::after { content:"正在准备预览…"; position:absolute; top:10px; right:10px; padding:4px 6px; border-radius:3px; background:#0a0a0abf; color:#ccc; font-size:10px; pointer-events:none; }
+.asset-thumb .asset-hover-model { position:absolute; inset:0; opacity:0; pointer-events:none; }
+.asset-thumb[data-model-hover-state="playing"] .asset-hover-model { opacity:1; }
+.asset-thumb[data-model-hover-state="playing"]>img:not(.asset-hover-model),.asset-thumb[data-model-hover-state="playing"]>.asset-fallback { visibility:hidden; }
+.asset-thumb:is([data-video-hover-state="preparing"],[data-model-hover-state="preparing"])::after { content:"正在准备预览…"; position:absolute; top:10px; right:10px; padding:4px 6px; border-radius:3px; background:#0a0a0abf; color:#ccc; font-size:10px; pointer-events:none; }
 .asset-card:hover img { transform:scale(1.012); }
 .asset-card.selected .asset-thumb { outline:1px solid #d5d5d5; outline-offset:-1px; }
 .asset-card:focus-visible .asset-thumb { outline:2px solid #eee; outline-offset:3px; }
@@ -651,9 +648,9 @@ h1 { font-size:34px; line-height:1.35; font-weight:300; letter-spacing:-.5px; ma
 .library-onboarding { position:fixed; inset:0; z-index:40; display:flex; align-items:center; justify-content:center; padding:35px; background:#0a0a0a88; overflow-y:auto; isolation:isolate; }
 .library-onboarding::before { content:""; position:fixed; inset:0; z-index:-1; background:url('../assets/grain.svg') repeat; opacity:.12; pointer-events:none; }
 .setup-shell { width:100%; max-width:720px; padding:15px 0; text-align:center; }
-.setup-brand { display:flex; align-items:center; justify-content:center; gap:11px; margin-bottom:48px; }
-.setup-brand>span { display:flex; align-items:center; gap:14px; font-size:22px; letter-spacing:3px; color:#ddd; }
-.setup-brand small { padding-left:14px; border-left:1px solid #444; color:#777; font-size:9px; letter-spacing:2px; font-family:inherit; }
+.setup-brand { display:flex; align-items:center; justify-content:center; gap:11px; margin-bottom:48px; color:#ddd; }
+.setup-brand>span { display:flex; align-items:center; gap:14px; font-size:22px; letter-spacing:-.025em; font-weight:700; }
+.setup-brand small { padding-left:14px; border-left:1px solid #444; color:#aaa; font-family:inherit; font-size:11px; letter-spacing:.15em; font-weight:400; }
 .setup-eyebrow { color:#777; font-size:9px; letter-spacing:1.7px; margin-bottom:17px; }
 .setup-shell h1 { margin:0 0 22px; color:#ddd; font-size:33px; font-weight:300; line-height:1.5; letter-spacing:-.3px; }
 .setup-description { margin:0 0 35px; color:#929292; font-size:12px; line-height:2; }

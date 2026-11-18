@@ -2,10 +2,16 @@
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const sharp = require('sharp');
 const { MODEL, MODEL_NATIVE } = require('./media-formats.cjs');
 const { validateModelBundle } = require('./model-bundle.cjs');
 const { createNativeModelConverter } = require('./native-models.cjs');
 const { mediaResponse } = require('./media-response.cjs');
+const { createModelHoverService } = require('./model-hover-service.cjs');
+
+const HOVER_SIZE = 384;
+const HOVER_FRAMES = 32;
+const HOVER_FRAME_MS = 110;
 
 function within(root, filename) {
   const relative = path.relative(root, filename);
@@ -13,7 +19,8 @@ function within(root, filename) {
 }
 function cancelled() { return Object.assign(new Error('模型预览已取消'), { name: 'AbortError' }); }
 
-function createModelService({ BrowserWindow, cacheDir, getLibrary, thumbnailTimeoutMs = 90000 }) {
+function createModelService({ BrowserWindow, cacheDir, getLibrary, thumbnailTimeoutMs = 90000,
+  onHoverTask }) {
   const sessions = new Map();
   const windows = new Set();
   const tasks = new Set();
@@ -38,7 +45,7 @@ function createModelService({ BrowserWindow, cacheDir, getLibrary, thumbnailTime
     try { return await Promise.race([promise, stopped]); }
     finally { stop.signal.removeEventListener('abort', abort); }
   }
-  async function descriptor(source, modelDirectory, manifest) {
+  async function descriptor(source, modelDirectory, manifest, { signal, allowConvert = true } = {}) {
     if (closed) throw cancelled();
     validateModelBundle(manifest);
     if (typeof source !== 'string' || !path.isAbsolute(source) || typeof modelDirectory !== 'string' || !path.isAbsolute(modelDirectory)) throw new Error('模型托管路径无效');
@@ -49,7 +56,7 @@ function createModelService({ BrowserWindow, cacheDir, getLibrary, thumbnailTime
     if (path.resolve(source) !== path.join(directory, manifest.entry)) throw new Error('模型入口不在托管包中');
     const files = [];
     for (const file of manifest.files) {
-      if (closed) throw cancelled();
+      if (closed || signal?.aborted) throw cancelled();
       const filename = path.resolve(directory, file.path);
       if (!within(directory, filename)) throw new Error('模型资源路径无效');
       const resolved = await fs.realpath(filename);
@@ -66,6 +73,7 @@ function createModelService({ BrowserWindow, cacheDir, getLibrary, thumbnailTime
         previewFormat = path.extname(entry).slice(1).toLowerCase();
         warnings.push('使用随模型打包的兼容文件预览，导出仍保留原始工程。');
       } else {
+        if (!allowConvert) throw new Error('模型需要先准备兼容预览');
         const converted = await untilStopped(converter.preview({ source, format, bundleDirectory: directory, manifest }));
         return { ...converted, warnings: [...warnings, ...(converted.warnings || [])], missing: manifest.missing || [] };
       }
@@ -105,42 +113,72 @@ function createModelService({ BrowserWindow, cacheDir, getLibrary, thumbnailTime
     pending.set(identity, record);
     return task;
   }
+  async function renderInWindow(prepared, { size, signal, script, timeoutMessage }) {
+    if (signal?.aborted) throw cancelled();
+    const { token, options } = issue(prepared, null);
+    let window, timer, abort;
+    try {
+      window = new BrowserWindow({ width: size, height: size, useContentSize: true, show: false, skipTaskbar: true,
+        backgroundColor: '#11151c', webPreferences: { sandbox: true, contextIsolation: true,
+          nodeIntegration: false, backgroundThrottling: false } });
+      windows.add(window);
+      window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+      window.webContents.on('will-navigate', event => event.preventDefault());
+      const deadline = new Promise((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(timeoutMessage)), thumbnailTimeoutMs);
+        timer.unref();
+        abort = () => reject(cancelled());
+        signal?.addEventListener('abort', abort, { once: true });
+        if (signal?.aborted) abort();
+      });
+      const render = (async () => {
+        await window.loadFile(path.join(__dirname, 'model-viewer.html'));
+        return window.webContents.executeJavaScript(script(JSON.stringify(options)));
+      })();
+      return await untilStopped(Promise.race([render, deadline]));
+    } finally {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', abort);
+      sessions.delete(token);
+      if (window) { windows.delete(window); if (!window.isDestroyed()) window.destroy(); }
+    }
+  }
+  function jpegFrame(data, label) {
+    const prefix = 'data:image/jpeg;base64,';
+    if (typeof data !== 'string' || !data.startsWith(prefix) || data.length > 8 * 1024 * 1024)
+      throw new Error(label + '数据无效');
+    const image = Buffer.from(data.slice(prefix.length), 'base64');
+    if (image[0] !== 0xff || image[1] !== 0xd8) throw new Error(label + '不是有效的 JPEG');
+    return image;
+  }
   function thumbnail(source, destination, { modelBundle, modelDirectory } = {}) {
     const task = thumbnailQueue.then(async () => {
       const prepared = await descriptor(source, modelDirectory, modelBundle);
-      const { token, options } = issue(prepared, null);
-      let window, timer;
-      try {
-        window = new BrowserWindow({ width: 640, height: 640, useContentSize: true, show: false, skipTaskbar: true,
-          backgroundColor: '#11151c', webPreferences: { sandbox: true, contextIsolation: true,
-            nodeIntegration: false, backgroundThrottling: false } });
-        windows.add(window);
-        window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
-        window.webContents.on('will-navigate', event => event.preventDefault());
-        const render = (async () => {
-          await window.loadFile(path.join(__dirname, 'model-viewer.html'));
-          return window.webContents.executeJavaScript(`window.renderModelThumbnail(${JSON.stringify(options)})`);
-        })();
-        const result = await untilStopped(Promise.race([render, new Promise((_resolve, reject) => {
-          timer = setTimeout(() => reject(new Error('模型封面生成超时，仍可导入并打开模型预览')), thumbnailTimeoutMs);
-          timer.unref();
-        })]));
-        if (closed) throw cancelled();
-        if (typeof result?.dataUrl !== 'string' || !result.dataUrl.startsWith('data:image/jpeg;base64,') || result.dataUrl.length > 8 * 1024 * 1024)
-          throw new Error('模型封面数据无效');
-        const image = Buffer.from(result.dataUrl.slice('data:image/jpeg;base64,'.length), 'base64');
-        if (image[0] !== 0xff || image[1] !== 0xd8) throw new Error('模型封面不是有效的 JPEG');
-        await fs.writeFile(destination, image);
-        return { width: 640, height: 640 };
-      } finally {
-        clearTimeout(timer);
-        sessions.delete(token);
-        if (window) { windows.delete(window); if (!window.isDestroyed()) window.destroy(); }
-      }
+      const result = await renderInWindow(prepared, { size: 640,
+        timeoutMessage: '模型封面生成超时，仍可导入并打开模型预览',
+        script: json => `window.renderModelThumbnail(${json})` });
+      if (closed) throw cancelled();
+      await fs.writeFile(destination, jpegFrame(result?.dataUrl, '模型封面'));
+      return { width: 640, height: 640 };
     });
     thumbnailQueue = task.catch(() => {});
     return track(task);
   }
+  async function renderHover(library, asset, { signal }) {
+    const { id, modelBundle } = asset;
+    const prepared = await descriptor(library.getAssetPath(id, 'original'), library.getModelBundleDirectory(id),
+      modelBundle, { signal, allowConvert: false });
+    const frames = await renderInWindow(prepared, { size: HOVER_SIZE, signal,
+      timeoutMessage: '模型旋转预览生成超时',
+      script: json => `window.renderModelTurntable(${json}, ${HOVER_FRAMES})` });
+    if (signal.aborted || closed) throw cancelled();
+    if (!Array.isArray(frames) || frames.length !== HOVER_FRAMES) throw new Error('模型旋转帧不完整');
+    return sharp(frames.map(frame => jpegFrame(frame, '模型旋转帧')), { join: { animated: true } })
+      .webp({ loop: 0, delay: Array(HOVER_FRAMES).fill(HOVER_FRAME_MS), quality: 80, effort: 2 }).toBuffer();
+  }
+  const hover = createModelHoverService({
+    cacheDir: path.join(cacheDir, 'hover'), getLibrary, render: renderHover, runTask: onHoverTask
+  });
   async function response(request) {
     try {
       const url = new URL(request.url);
@@ -162,6 +200,7 @@ function createModelService({ BrowserWindow, cacheDir, getLibrary, thumbnailTime
     } catch { return new Response(null, { status: 404 }); }
   }
   function invalidate() {
+    hover.invalidate();
     for (const [token, session] of sessions) if (session.owner) sessions.delete(token);
   }
   function shutdown() {
@@ -171,11 +210,13 @@ function createModelService({ BrowserWindow, cacheDir, getLibrary, thumbnailTime
     sessions.clear();
     for (const window of windows) if (!window.isDestroyed()) window.destroy();
     shutdownTask = (async () => {
-      await converter.shutdown();
+      await Promise.all([converter.shutdown(), hover.shutdown()]);
       await Promise.allSettled([...tasks]);
     })();
     return shutdownTask;
   }
-  return { prepare, thumbnail, response, invalidate, shutdown, busy: () => tasks.size > 0 };
+  return { prepare, thumbnail, response, invalidate, shutdown, busy: () => tasks.size > 0,
+    prepareHover: hover.prepare, cancelHover: hover.cancel, warmHover: hover.warm, cancelWarmHover: hover.cancelWarm,
+    hoverResponse: hover.response };
 }
 module.exports = { createModelService };

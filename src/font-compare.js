@@ -7,7 +7,7 @@
   'use strict';
   const MAX_ASSETS = 16;
   const FONT_FORMATS = new Set(['ttf', 'otf', 'woff', 'woff2', 'ttc', 'otc']);
-  const DEFAULT_TEXT = '拾图 · 字体对比\nThe quick brown fox\n0123456789';
+  const DEFAULT_TEXT = 'Mosaic · 字体对比\nThe quick brown fox\n0123456789';
   let familySerial = 0;
   const clamp = (value, low, high, fallback) => Number.isFinite(Number(value)) ? Math.min(high, Math.max(low, Number(value))) : fallback;
   function normalizeAssets(assets) {

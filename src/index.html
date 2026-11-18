@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' shitu: data: blob:; media-src 'self' shitu:; font-src 'self' shitu:; style-src 'self'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self' shitu: data: blob:; worker-src 'self' blob:; object-src 'none'; base-uri 'none'">
-  <title>拾图</title>
+  <title>Mosaic</title>
   <script src="./skins.js"></script>
   <link rel="stylesheet" href="./styles.css">
   <link rel="stylesheet" href="./font-preview.css">
@@ -17,10 +17,14 @@
   <link rel="stylesheet" href="./skins-consoles.css">
   <link rel="stylesheet" href="./skin-picker.css">
   <link rel="stylesheet" href="./window-header.css">
+  <link rel="stylesheet" href="./asset-health.css">
+  <link rel="stylesheet" href="./similar-images.css">
+  <link rel="stylesheet" href="./task-center.css">
 </head>
 <body>
   <canvas id="ambientParticles" aria-hidden="true"></canvas>
   <svg class="icon-definitions" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><defs>
+    <symbol id="i-mosaic-mark" viewBox="0 0 136 136" fill="currentColor" stroke="none"><path d="M0 64A64 64 0 0 1 64 0V64Z"/><circle cx="104" cy="32" r="32"/><path d="M0 72 64 104 0 136Z"/><rect x="72" y="72" width="64" height="64"/></symbol>
     <symbol id="i-grid" viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="6" height="6" rx="1.5"/><rect x="14.5" y="3.5" width="6" height="6" rx="1.5"/><rect x="3.5" y="14.5" width="6" height="6" rx="1.5"/><rect x="14.5" y="14.5" width="6" height="6" rx="1.5"/></symbol>
     <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 7v5l3 2"/></symbol>
     <symbol id="i-star" viewBox="0 0 24 24"><path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-3-5.6 3 1.1-6.2L3 9.6l6.2-.9Z"/></symbol>
@@ -56,7 +60,7 @@
   </defs></svg>
   <header class="app-header">
     <div class="header-identity">
-      <div class="brand"><div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span><span></span></div><div><strong>拾图</strong></div></div>
+      <div class="brand"><svg class="brand-mark" aria-hidden="true"><use href="#i-mosaic-mark"/></svg><strong>Mosaic</strong></div>
       <button class="library-switch" id="libraryInfo" type="button" aria-label="管理素材库" title="管理素材库位置">
         <span class="library-icon"><svg class="icon" aria-hidden="true"><use href="#i-folder"/></svg></span>
         <span><strong id="libraryDisplayName">我的素材库</strong><small id="libraryDisplayStatus">本地存储 · 随时灵感</small></span>
@@ -64,7 +68,7 @@
       </button>
     </div>
     <div class="header-drag-space" aria-hidden="true"></div>
-    <div id="headerActions" class="header-actions" aria-label="拾图工具">
+    <div id="headerActions" class="header-actions" aria-label="Mosaic 工具">
       <button id="videoTranscodeButton" class="header-button hidden" type="button" aria-haspopup="dialog" title="查看视频转码任务"><svg class="icon" aria-hidden="true"><use href="#i-video"/></svg><span id="videoTranscodeLabel">视频转码</span></button>
       <button id="skinButton" class="header-button" type="button" aria-haspopup="dialog" title="更换界面皮肤" aria-label="更换界面皮肤"><svg class="icon" aria-hidden="true"><use href="#i-palette"/></svg><span>皮肤</span></button>
       <button id="collectorButton" class="header-button collector-button" type="button" title="浏览器采集"><svg class="icon" aria-hidden="true"><use href="#i-browser"/></svg><span>浏览器采集</span></button>
@@ -72,8 +76,9 @@
       <div class="header-more">
         <button id="headerMoreButton" class="icon-button header-more-button" type="button" aria-label="更多工具" title="更多工具" aria-controls="headerMenu" aria-expanded="false"><svg class="icon" aria-hidden="true"><use href="#i-more"/></svg></button>
         <div id="headerMenu" class="header-menu hidden" role="group" aria-label="更多工具">
+          <button id="taskCenterButton" class="header-button" type="button" aria-controls="progressPanel" aria-expanded="false"><svg class="icon" aria-hidden="true"><use href="#i-clock"/></svg><span>后台任务</span></button>
           <button id="settingsButton" class="header-button" type="button" aria-haspopup="dialog" title="设置转码设备"><svg class="icon" aria-hidden="true"><use href="#i-settings"/></svg><span>转码设备设置</span></button>
-          <button id="appUpdateButton" class="header-button update-button" type="button" title="检查拾图更新" aria-haspopup="dialog"><svg class="icon" aria-hidden="true"><use href="#i-download"/></svg><span id="appUpdateLabel">更新</span></button>
+          <button id="appUpdateButton" class="header-button update-button" type="button" title="检查 Mosaic 更新" aria-haspopup="dialog"><svg class="icon" aria-hidden="true"><use href="#i-download"/></svg><span id="appUpdateLabel">更新</span></button>
           <button id="pluginCenterButton" class="header-button" type="button" title="插件中心"><svg class="icon" aria-hidden="true"><use href="#i-image"/></svg><span>插件中心</span></button>
           <button id="backupButton" class="header-button" type="button" title="备份素材库"><svg class="icon" aria-hidden="true"><use href="#i-shield"/></svg><span>备份素材库</span></button>
           <button id="backgroundMotionButton" class="header-button" type="button" aria-pressed="true" title="开启或暂停背景动画"><svg class="icon" aria-hidden="true"><use href="#i-motion"/></svg><span id="backgroundMotionLabel">动效：开</span></button>
@@ -110,14 +115,14 @@
         <button id="createFolderHere" class="secondary-button folder-create-button" type="button" disabled><svg class="icon" aria-hidden="true"><use href="#i-folder-plus"/></svg><span>新建文件夹</span></button>
       </div>
       <div id="activeFilter" class="active-filter hidden"></div>
-      <div class="content-meta"><span id="resultCount">0 个素材</span><span id="selectionHint">Ctrl＋滚轮缩放 · 空格预览 · Ctrl 多选</span></div>
+      <div class="content-meta"><span class="asset-health-meta"><span id="resultCount">0 个素材</span><button id="missingResourcesFilter" class="asset-health-filter hidden" type="button" aria-pressed="false" aria-controls="gallery">缺失资源</button></span><span id="selectionHint">Ctrl＋滚轮缩放 · 空格预览 · Ctrl 多选</span></div>
       <section id="galleryScroller" class="gallery-scroller" aria-label="文件夹与素材"><section id="folderChildren" class="folder-children hidden" aria-labelledby="folderChildrenTitle"><h2 id="folderChildrenTitle" class="gallery-section-title">文件夹</h2><div id="folderGallery" class="folder-gallery" role="list"></div></section><h2 id="assetSectionTitle" class="gallery-section-title hidden">素材</h2><div id="gallery" class="gallery" role="list"></div><div id="emptyState" class="empty-state hidden"></div><button id="loadMore" class="secondary-button load-more hidden">加载更多素材</button><div id="selectionMarquee" class="selection-marquee hidden" aria-hidden="true"></div></section>
       <div id="selectionBar" class="selection-bar hidden"><span class="selection-badge" id="selectedCount">0</span><strong>个素材已选择</strong><button id="clearSelection" class="text-button">取消选择</button><span class="selection-spacer"></span><button id="batchRenameSelection" class="selection-action hidden" type="button">批量重命名</button><button id="compareFontsSelection" class="selection-action hidden" type="button">字体对比</button><button id="exportSelection" class="selection-action"><svg class="icon"><use href="#i-download"/></svg>导出</button><button id="restoreSelection" class="selection-action hidden"><svg class="icon"><use href="#i-restore"/></svg>恢复</button><button id="deleteSelection" class="selection-action hidden"><svg class="icon"><use href="#i-trash"/></svg>永久删除</button><button id="trashSelection" class="selection-action"><svg class="icon"><use href="#i-trash"/></svg>移入回收站</button></div>
       <footer class="workspace-footer"><div class="breadcrumb">我的素材库 <span>/</span> <span id="breadcrumbCurrent">全部素材</span></div><div class="storage-status"><span class="status-dot"></span><span id="storageLabel">正在打开素材库…</span></div><span>保留原文件 · 本地收藏</span></footer>
     </main>
     <aside id="detailsPanel" class="details-panel hidden" aria-label="素材详情"><div class="details-top"><span>素材详情</span><button id="closeDetails" class="icon-button" title="收起详情" aria-label="收起详情"><svg class="icon"><use href="#i-close"/></svg></button></div><div id="detailsContent" class="details-content"></div><div class="details-footer"><svg class="icon"><use href="#i-shield"/></svg>原文件保留，整理更安心</div></aside>
   </div>
-  <section id="libraryOnboarding" class="library-onboarding hidden" aria-labelledby="setupTitle"><div class="setup-shell"><div class="setup-brand"><div class="brand-mark"><span></span><span></span><span></span><span></span></div><span>拾图 <small>SHITU LIBRARY</small></span></div><div class="setup-eyebrow">A HOME FOR YOUR INSPIRATION</div><h1 id="setupTitle">选择你的素材库位置<span class="title-dot">.</span></h1><p class="setup-description">图片、视频、标签与整理信息，都保存在你选择的素材库文件夹。<br>选一个空间充足、方便备份的位置，再开始收集灵感。</p><p id="setupError" class="setup-error hidden" role="alert"></p><div class="setup-options"><button id="setupCreateLibrary" class="setup-option"><span class="setup-option-icon"><svg class="icon"><use href="#i-plus"/></svg></span><strong>新建素材库</strong><span>选择保存位置，创建独立的素材库文件夹</span><svg class="icon setup-arrow"><use href="#i-arrow"/></svg></button><button id="setupOpenLibrary" class="setup-option"><span class="setup-option-icon"><svg class="icon"><use href="#i-folder"/></svg></span><strong>打开已有素材库</strong><span>选择之前使用的拾图素材库文件夹</span><svg class="icon setup-arrow"><use href="#i-arrow"/></svg></button></div><div id="setupLegacy" class="setup-legacy hidden"><span>检测到之前的素材库</span><code id="setupLegacyPath"></code><button id="setupUseLegacy" class="secondary-button">继续使用原素材库<svg class="icon"><use href="#i-arrow"/></svg></button></div><p id="setupOperationStatus" class="library-operation-status hidden" role="status"></p><div class="setup-footnote"><svg class="icon"><use href="#i-shield"/></svg><span>位置由你选择。导入会复制素材，保留来源文件。</span></div></div></section>
+  <section id="libraryOnboarding" class="library-onboarding hidden" aria-labelledby="setupTitle"><div class="setup-shell"><div class="setup-brand"><svg class="brand-mark" aria-hidden="true"><use href="#i-mosaic-mark"/></svg><span>Mosaic <small>万象 · 数字资产库</small></span></div><div class="setup-eyebrow">A HOME FOR YOUR INSPIRATION</div><h1 id="setupTitle">选择你的素材库位置<span class="title-dot">.</span></h1><p class="setup-description">图片、视频、标签与整理信息，都保存在你选择的素材库文件夹。<br>选一个空间充足、方便备份的位置，再开始收集灵感。</p><p id="setupError" class="setup-error hidden" role="alert"></p><div class="setup-options"><button id="setupCreateLibrary" class="setup-option"><span class="setup-option-icon"><svg class="icon"><use href="#i-plus"/></svg></span><strong>新建素材库</strong><span>选择保存位置，创建独立的素材库文件夹</span><svg class="icon setup-arrow"><use href="#i-arrow"/></svg></button><button id="setupOpenLibrary" class="setup-option"><span class="setup-option-icon"><svg class="icon"><use href="#i-folder"/></svg></span><strong>打开已有素材库</strong><span>选择已有素材库文件夹</span><svg class="icon setup-arrow"><use href="#i-arrow"/></svg></button></div><div id="setupLegacy" class="setup-legacy hidden"><span>检测到之前的素材库</span><code id="setupLegacyPath"></code><button id="setupUseLegacy" class="secondary-button">继续使用原素材库<svg class="icon"><use href="#i-arrow"/></svg></button></div><p id="setupOperationStatus" class="library-operation-status hidden" role="status"></p><div class="setup-footnote"><svg class="icon"><use href="#i-shield"/></svg><span>位置由你选择。导入会复制素材，保留来源文件。</span></div></div></section>
   <div id="dropOverlay" class="drop-overlay hidden"><div><svg class="icon"><use href="#i-upload"/></svg><h2>让灵感在这里落脚</h2><p>松开鼠标，导入图片、视频、字体、3D 模型、AE 工程或整个文件夹</p><span>模型和 AE 工程会收集依赖素材；原始文件保留在原处</span></div></div>
   <button id="setupAppUpdate" class="setup-update-button hidden" type="button" aria-haspopup="dialog"><svg class="icon"><use href="#i-download"/></svg>软件更新</button>
   <div id="preview" class="preview hidden" role="dialog" aria-modal="true" aria-label="圆柱素材预览">
@@ -162,8 +167,8 @@
       <div class="modal-actions"><button type="button" id="modalCancel" class="secondary-button">取消</button><button type="submit" id="modalConfirm" class="primary-button">确定</button></div>
     </form>
   </div>
-  <div id="collectorOverlay" class="modal-overlay hidden"><section class="modal collector-modal" role="dialog" aria-modal="true" aria-labelledby="collectorTitle"><div class="collector-heading"><div class="modal-icon"><svg class="icon"><use href="#i-browser"/></svg></div><button id="collectorClose" class="icon-button" aria-label="关闭浏览器采集设置"><svg class="icon"><use href="#i-close"/></svg></button></div><h2 id="collectorTitle">从网页，拾取灵感</h2><p>使用拾图的 Chrome 扩展，把网页上的图片和直链视频存入本地素材库。</p><div id="collectorStatus" class="collector-status">正在检查本地接收服务…</div><div id="collectorLastCapture" class="collector-last-capture hidden" role="status"></div><p class="collector-automatic">扩展安装后自动连接本机，无需输入连接码。</p><ol class="collector-steps"><li><strong>找到扩展目录</strong><span>点击下方「打开扩展目录」，记下文件夹位置。</span></li><li><strong>在 Chrome 加载扩展</strong><span>打开 chrome://extensions，开启「开发者模式」，选择「加载已解压的扩展程序」，然后选中刚才的扩展文件夹。首次加载完成即可使用。</span></li><li><strong>直接采集到素材库</strong><span>保持拾图打开。在网页图片或直链视频上，按住 Alt 再点鼠标右键即可导入。播放器分段流或受保护内容不支持直接采集。</span></li></ol><p id="collectorPath" class="collector-path"></p><div class="collector-actions"><button id="openExtensionFolder" class="secondary-button"><svg class="icon"><use href="#i-folder"/></svg>打开扩展目录</button><button id="refreshCollector" class="primary-button">刷新状态</button></div></section></div>
-  <div id="libraryManagerOverlay" class="modal-overlay hidden"><section class="modal library-manager" role="dialog" aria-modal="true" aria-labelledby="managerTitle"><div class="collector-heading"><div class="modal-icon"><svg class="icon"><use href="#i-folder"/></svg></div><button id="managerCloseLibrary" class="icon-button" aria-label="关闭素材库管理"><svg class="icon"><use href="#i-close"/></svg></button></div><h2 id="managerTitle">管理素材库</h2><p>选择工作中的素材库，或把整库复制到新位置。</p><div class="manager-current"><span class="detail-label">当前素材库位置</span><code id="managerLibraryPath"></code><button id="managerRevealLibrary" class="text-button">在资源管理器中打开<svg class="icon"><use href="#i-external"/></svg></button></div><div class="manager-choices"><button id="managerOpenLibrary" class="manager-choice"><svg class="icon"><use href="#i-folder"/></svg><span><strong>打开其他素材库</strong><small>切换到已有的拾图素材库文件夹</small></span><svg class="icon"><use href="#i-chevron"/></svg></button><button id="managerCreateLibrary" class="manager-choice"><svg class="icon"><use href="#i-plus"/></svg><span><strong>新建素材库</strong><small>选择保存位置，创建一个独立的新库</small></span><svg class="icon"><use href="#i-chevron"/></svg></button></div><div class="manager-migrate"><strong>迁移当前素材库</strong><p>将整库复制到你选择的新位置，复制成功后切换。原位置的素材库完整保留。</p><button id="managerMigrateLibrary" class="secondary-button"><svg class="icon"><use href="#i-arrow"/></svg>选择迁移位置</button></div><p id="managerOperationStatus" class="library-operation-status hidden" role="status"></p></section></div>
+  <div id="collectorOverlay" class="modal-overlay hidden"><section class="modal collector-modal" role="dialog" aria-modal="true" aria-labelledby="collectorTitle"><div class="collector-heading"><div class="modal-icon"><svg class="icon"><use href="#i-browser"/></svg></div><button id="collectorClose" class="icon-button" aria-label="关闭浏览器采集设置"><svg class="icon"><use href="#i-close"/></svg></button></div><h2 id="collectorTitle">从网页，拾取灵感</h2><p>使用 Mosaic 的 Chrome 扩展，把网页上的图片和直链视频存入本地素材库。</p><div id="collectorStatus" class="collector-status">正在检查本地接收服务…</div><div id="collectorLastCapture" class="collector-last-capture hidden" role="status"></div><p class="collector-automatic">扩展安装后自动连接本机，无需输入连接码。</p><ol class="collector-steps"><li><strong>找到扩展目录</strong><span>点击下方「打开扩展目录」，记下文件夹位置。</span></li><li><strong>在 Chrome 加载扩展</strong><span>打开 chrome://extensions，开启「开发者模式」，选择「加载已解压的扩展程序」，然后选中刚才的扩展文件夹。首次加载完成即可使用。</span></li><li><strong>直接采集到素材库</strong><span>保持 Mosaic 打开。在网页图片或直链视频上，按住 Alt 再点鼠标右键即可导入。播放器分段流或受保护内容不支持直接采集。</span></li></ol><p id="collectorPath" class="collector-path"></p><div class="collector-actions"><button id="openExtensionFolder" class="secondary-button"><svg class="icon"><use href="#i-folder"/></svg>打开扩展目录</button><button id="refreshCollector" class="primary-button">刷新状态</button></div></section></div>
+  <div id="libraryManagerOverlay" class="modal-overlay hidden"><section class="modal library-manager" role="dialog" aria-modal="true" aria-labelledby="managerTitle"><div class="collector-heading"><div class="modal-icon"><svg class="icon"><use href="#i-folder"/></svg></div><button id="managerCloseLibrary" class="icon-button" aria-label="关闭素材库管理"><svg class="icon"><use href="#i-close"/></svg></button></div><h2 id="managerTitle">管理素材库</h2><p>选择工作中的素材库，或把整库复制到新位置。</p><div class="manager-current"><span class="detail-label">当前素材库位置</span><code id="managerLibraryPath"></code><button id="managerRevealLibrary" class="text-button">在资源管理器中打开<svg class="icon"><use href="#i-external"/></svg></button></div><div class="manager-choices"><button id="managerOpenLibrary" class="manager-choice"><svg class="icon"><use href="#i-folder"/></svg><span><strong>打开其他素材库</strong><small>切换到已有的素材库文件夹</small></span><svg class="icon"><use href="#i-chevron"/></svg></button><button id="managerCreateLibrary" class="manager-choice"><svg class="icon"><use href="#i-plus"/></svg><span><strong>新建素材库</strong><small>选择保存位置，创建一个独立的新库</small></span><svg class="icon"><use href="#i-chevron"/></svg></button></div><div class="manager-migrate"><strong>迁移当前素材库</strong><p>将整库复制到你选择的新位置，复制成功后切换。原位置的素材库完整保留。</p><button id="managerMigrateLibrary" class="secondary-button"><svg class="icon"><use href="#i-arrow"/></svg>选择迁移位置</button></div><p id="managerOperationStatus" class="library-operation-status hidden" role="status"></p></section></div>
   <div id="videoTranscodeOverlay" class="modal-overlay hidden">
     <section id="videoTranscodeDialog" class="modal video-transcode-modal" role="dialog" aria-modal="true" aria-labelledby="videoTranscodeTitle" tabindex="-1">
       <div class="collector-heading"><div class="modal-icon"><svg class="icon"><use href="#i-video"/></svg></div><button id="videoTranscodeClose" class="icon-button" type="button" aria-label="关闭视频转码窗口"><svg class="icon"><use href="#i-close"/></svg></button></div>
@@ -208,11 +213,11 @@
       </form>
     </section>
   </div>
-  <div id="progressPanel" class="progress-panel hidden" role="status"><div class="progress-top"><span class="spinner"></span><strong id="progressTitle">正在导入素材</strong><span id="progressCount"></span></div><div class="progress-track"><div id="progressFill"></div></div><p id="progressFile">正在准备…</p></div>
+  <div id="progressPanel" class="progress-panel hidden"></div>
   <div id="appUpdateOverlay" class="modal-overlay hidden">
     <section id="appUpdateDialog" class="modal update-modal" role="dialog" aria-modal="true" aria-labelledby="appUpdateTitle" aria-describedby="appUpdateStatus" tabindex="-1">
       <div class="collector-heading"><div class="modal-icon"><svg class="icon"><use href="#i-download"/></svg></div><button id="appUpdateClose" class="icon-button" type="button" aria-label="关闭软件更新"><svg class="icon"><use href="#i-close"/></svg></button></div>
-      <h2 id="appUpdateTitle">保持拾图常新</h2>
+      <h2 id="appUpdateTitle">Mosaic 更新</h2>
       <dl class="update-versions"><div><dt>当前版本</dt><dd id="appUpdateCurrent">—</dd></div><div><dt>最新版本</dt><dd id="appUpdateLatest">尚未检查</dd></div></dl>
       <p id="appUpdateStatus" class="update-status" role="status" aria-live="polite">正在读取更新状态…</p>
       <div id="appUpdateProgressArea" class="update-progress-area hidden"><progress id="appUpdateProgress" max="100" value="0" aria-label="更新包下载进度"></progress><span id="appUpdateTransfer"></span></div>
@@ -231,6 +236,8 @@
   <script src="./folder-navigation.js"></script>
   <script src="./color-labels.js"></script>
   <script src="./video-hover.js"></script>
+  <script src="./model-hover.js"></script>
+  <script src="./model-warmup.js"></script>
   <script src="./asset-folder-drag.js"></script>
   <script src="./history-ui.js"></script>
   <script src="./batch-rename.js"></script>
@@ -238,6 +245,9 @@
   <script src="./smart-folders.js"></script>
   <script src="./smart-folders-ui.js"></script>
   <script src="./skin-picker.js"></script>
+  <script src="./asset-health.js"></script>
+  <script src="./similar-images.js"></script>
+  <script src="./task-center-ui.js"></script>
   <script src="./renderer.js"></script>
 </body>
 </html>

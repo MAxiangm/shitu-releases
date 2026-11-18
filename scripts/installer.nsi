@@ -27,7 +27,7 @@ VIAddVersionKey /LANG=2052 "LegalCopyright" ""
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
-!define MUI_FINISHPAGE_RUN "$INSTDIR\${PRODUCT_NAME}.exe"
+!define MUI_FINISHPAGE_RUN "$INSTDIR\${PRODUCT_EXE}"
 !insertmacro MUI_PAGE_FINISH
 !insertmacro MUI_UNPAGE_CONFIRM
 !insertmacro MUI_UNPAGE_INSTFILES
@@ -51,7 +51,7 @@ Function .onInit
   IntCmp $UpdatePid 0 update_failed update_failed +1
   GetFullPathName $0 "$UpdateDirectory"
   StrCmp $0 $UpdateDirectory 0 update_failed
-  IfFileExists "$UpdateDirectory\${PRODUCT_NAME}.exe" +1 update_failed
+  IfFileExists "$UpdateDirectory\${PRODUCT_EXE}" +1 update_failed
   System::Call 'kernel32::OpenProcess(i 0x00100000, i 0, i $UpdatePid) p .r0 ?e'
   Pop $2
   StrCmp $0 0 process_already_exited
@@ -73,7 +73,7 @@ FunctionEnd
 
 Function .onInstSuccess
   ${If} $UpdateMode == 1
-    Exec '"$INSTDIR\${PRODUCT_NAME}.exe"'
+    Exec '"$INSTDIR\${PRODUCT_EXE}"'
   ${EndIf}
 FunctionEnd
 
@@ -82,15 +82,24 @@ Section "Install"
   SetOutPath "$INSTDIR"
   File /r "${SOURCE_DIR}\*"
   WriteUninstaller "$INSTDIR\卸载${PRODUCT_NAME}.exe"
+  ; Retire the old installer-managed shortcuts only on an in-place upgrade.
+  ReadRegStr $0 HKCU "Software\local.shitu.desktop" "InstallDir"
+  ${If} $0 == $INSTDIR
+    Delete "$INSTDIR\卸载拾图.exe"
+    Delete "$DESKTOP\拾图.lnk"
+    Delete "$SMPROGRAMS\拾图\拾图.lnk"
+    Delete "$SMPROGRAMS\拾图\卸载拾图.lnk"
+    RMDir "$SMPROGRAMS\拾图"
+  ${EndIf}
   CreateDirectory "$SMPROGRAMS\${PRODUCT_NAME}"
-  CreateShortcut "$SMPROGRAMS\${PRODUCT_NAME}\${PRODUCT_NAME}.lnk" "$INSTDIR\${PRODUCT_NAME}.exe"
+  CreateShortcut "$SMPROGRAMS\${PRODUCT_NAME}\${PRODUCT_NAME}.lnk" "$INSTDIR\${PRODUCT_EXE}"
   CreateShortcut "$SMPROGRAMS\${PRODUCT_NAME}\卸载${PRODUCT_NAME}.lnk" "$INSTDIR\卸载${PRODUCT_NAME}.exe"
-  CreateShortcut "$DESKTOP\${PRODUCT_NAME}.lnk" "$INSTDIR\${PRODUCT_NAME}.exe"
+  CreateShortcut "$DESKTOP\${PRODUCT_NAME}.lnk" "$INSTDIR\${PRODUCT_EXE}"
   WriteRegStr HKCU "Software\local.shitu.desktop" "InstallDir" "$INSTDIR"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\local.shitu.desktop" "DisplayName" "${PRODUCT_NAME}"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\local.shitu.desktop" "DisplayVersion" "${PRODUCT_VERSION}"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\local.shitu.desktop" "InstallLocation" "$INSTDIR"
-  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\local.shitu.desktop" "DisplayIcon" "$INSTDIR\${PRODUCT_NAME}.exe"
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\local.shitu.desktop" "DisplayIcon" "$INSTDIR\${PRODUCT_EXE}"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\local.shitu.desktop" "UninstallString" '"$INSTDIR\卸载${PRODUCT_NAME}.exe"'
   WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\local.shitu.desktop" "NoModify" 1
   WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\local.shitu.desktop" "NoRepair" 1

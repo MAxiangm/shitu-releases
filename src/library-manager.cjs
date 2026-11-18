@@ -148,7 +148,7 @@ class LibraryManager {
     });
   }
 
-  create(parentDir, name = '拾图素材库') {
+  create(parentDir, name = 'Mosaic 素材库') {
     return this._switch(async () => {
       const root = await this._reserve(await this._parent(parentDir), name);
       const candidate = this._library(root);
@@ -163,7 +163,7 @@ class LibraryManager {
     return this._switch(async () => {
       if (!this._current) throw new Error('请先打开要迁移的素材库');
       const source = await fs.realpath(this._current.root);
-      const destination = await this._reserve(await this._parent(parentDir), '拾图素材库', source);
+      const destination = await this._reserve(await this._parent(parentDir), 'Mosaic 素材库', source);
       // Copy into a newly reserved directory. No existing destination files or
       // source files are overwritten or removed, even if saving config fails.
       for (const entry of await fs.readdir(source)) {

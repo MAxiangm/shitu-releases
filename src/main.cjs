@@ -2,6 +2,7 @@ require('./process-stdio.cjs').installProcessStdioGuards();
 const { app, BrowserWindow, protocol, ipcMain, dialog, shell, nativeImage, nativeTheme, Menu, clipboard, ClipboardItem, net } = require('electron');
 const path = require('node:path');
 const os = require('node:os');
+const { mkdirSync } = require('node:fs');
 const fs = require('node:fs/promises');
 const { pathToFileURL } = require('node:url');
 const { LibraryManager } = require('./library-manager.cjs');
@@ -23,6 +24,8 @@ const { createUiRecovery } = require('./ui-recovery.cjs');
 const { createWindowCorners } = require('./window-corners.cjs');
 const { createVideoPreviewRequests } = require('./video-preview-requests.cjs');
 const { createModelService } = require('./model-service.cjs');
+const { createSimilarImageService } = require('./similar-image-service.cjs');
+const { createTaskCenter } = require('./task-center.cjs');
 const { createFontService } = require('./font-service.cjs');
 const { createAEProjectCollector } = require('./ae-projects.cjs');
 const { createAEPreviewEngine } = require('./ae-preview.cjs');
@@ -31,8 +34,16 @@ const { VIDEO, MODEL, PROJECT, FONT, SUPPORTED } = require('./media-formats.cjs'
 const crypto = require('node:crypto');
 const { spawn } = require('node:child_process');
 const updateConfig = require('../update-config.json');
+const { productName } = require('../package.json');
 
-app.setName('拾图');
+app.setName(productName);
+if (app.isPackaged) {
+  // Keep the installed library locator, caches and Chromium settings at the existing profile.
+  const profile = path.join(app.getPath('appData'), '拾图');
+  mkdirSync(profile, { recursive: true });
+  app.setPath('userData', profile);
+  app.setPath('sessionData', profile);
+}
 nativeTheme.themeSource = 'dark';
 app.setAppUserModelId('local.shitu.desktop');
 protocol.registerSchemesAsPrivileged([{ scheme: 'shitu', privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true } }]);
@@ -57,6 +68,7 @@ let transcodeSettings;
 let uiRecovery;
 let uiDiagnosticWrite = Promise.resolve();
 let modelService;
+let similarImages;
 let fontService;
 let aeProjects;
 let aePreviewService;
@@ -74,6 +86,7 @@ const customWindowControls = process.platform === 'win32';
 const overrideRoot = process.env.SHITU_LIBRARY;
 const legacyRoot = path.join(app.isPackaged ? path.dirname(process.execPath) : app.getAppPath(), 'library');
 const extensionPath = app.isPackaged ? path.join(path.dirname(process.execPath), 'Chrome扩展') : path.join(app.getAppPath(), 'extension');
+const tasks = createTaskCenter({ getLibrary: () => library, onEvent: snapshot => sendActionEvent('task-center', snapshot) });
 
 function requireLibrary() {
   if(switchingLibrary)throw new Error('正在切换素材库，请稍候');
@@ -185,9 +198,11 @@ async function switchLibrary(mode) {
     videoRequests.abortAll();
     videoPreviews.clear();
     modelService?.invalidate();
+    similarImages?.invalidate();
     fontService?.invalidate();
     aePreviewService?.invalidate();
     library=mode==='create'?await libraryManager.create(selected):mode==='migrate'?await libraryManager.migrate(selected):await libraryManager.open(selected);
+    tasks.refresh();
     const snapshot=librarySnapshot();
     aePreviewService?.scheduleLibrary(library);
     mainWindow.webContents.send('shitu:library-changed');
@@ -226,7 +241,9 @@ function checkedHandler(channel, handler) {
   ipcMain.handle(`shitu:${channel}`, async (event, ...args) => {
     assertTrustedSender(event);
     if (installingUpdate && channel !== 'update-state') throw new Error('正在安装更新，请稍候');
-    if (channel.startsWith('update-') || ['prepare-video', 'cancel-video', 'release-video-viewer', 'prepare-model', 'prepare-font', 'prepare-project-preview', 'project-preview-state'].includes(channel)) return handler(...args);
+    if (channel.startsWith('update-') || ['prepare-video', 'cancel-video', 'release-video-viewer', 'prepare-model', 'prepare-model-hover',
+      'cancel-model-hover', 'warm-model-hover', 'cancel-model-warmup', 'prepare-font', 'prepare-project-preview',
+      'project-preview-state', 'find-similar-images', 'cancel-similar-images'].includes(channel)) return handler(...args);
     activeOperations++;
     try { return await handler(...args); }
     finally { activeOperations--; }
@@ -273,6 +290,7 @@ async function installDownloadedUpdate({ filePath }) {
   ensureUpdateCanInstall();
   installingUpdate = true;
   try {
+    similarImages?.invalidate();
     await library?.flush();
     await new Promise((resolve, reject) => {
       const child = spawn(filePath, ['/S', '/SHITUUPDATE'], {
@@ -394,24 +412,42 @@ async function copyAssetPaths(ids, expectedRoot) {
 }
 
 async function importPaths(paths, folderId = null) {
-  requireLibrary();
+  const owner = requireLibrary();
   if (historyBusy || closing) throw new Error('正在保存撤销或重做，请稍后再导入');
   if (importing) throw new Error('正在导入素材，请等待当前任务完成');
   if (!Array.isArray(paths) || paths.some(p => typeof p !== 'string' || !path.isAbsolute(p))) throw new Error('无效的导入路径');
   importing = true;
   try {
-    const report = await library.importPaths(paths, { folderId: folderId || null, onProgress: progress => {
-      if (!mainWindow?.isDestroyed()) mainWindow.webContents.send('shitu:import-progress', progress);
-    } });
-    aePreviewService?.scheduleLibrary(library);
-    return { snapshot: library.snapshot(), report };
+    const report = await tasks.runImport(owner, { paths, folderId, retry: async (filename, folder) => {
+      await importPaths([filename], folder);
+      sendActionEvent('library-changed');
+    } }, reportProgress => owner.importPaths(paths, { folderId: folderId || null, onProgress: progress => {
+      reportProgress(progress);
+      sendActionEvent('import-progress', progress);
+    } }));
+    aePreviewService?.scheduleLibrary(owner);
+    return { snapshot: owner.snapshot(), report };
   } finally { importing = false; }
+}
+
+async function startVideoTranscode(request) {
+  if (closing || switchingLibrary || importing || draggingAssets || historyBusy || imagePlugins?.busy()) throw new Error('请等待当前素材操作完成后再转码');
+  const settings = await transcodeSettings.get();
+  const devices = request?.format === 'dxv' || settings.mode === 'cpu'
+    ? { cpu: { name: os.cpus()[0]?.model || 'CPU', logicalProcessors: Math.max(1, Math.min(128, os.availableParallelism?.() || os.cpus().length || 1)) }, gpus: [] }
+    : await transcodeDevices.discover();
+  if (closing || switchingLibrary || importing || draggingAssets || historyBusy || imagePlugins?.busy()) throw new Error('当前无法开始转码，请稍后重试');
+  const plan = executionPlan(settings, devices, { format: request?.format, total: request?.ids?.length || 0 });
+  return videoTranscodeService.start({ ...request, executionPlan: plan });
 }
 
 function bindHandlers() {
   checkedHandler('window-state', () => windowState());
   checkedHandler('window-command', windowCommand);
   checkedHandler('window-skin', id => setWindowSkin?.(id));
+  checkedHandler('task-center-state', () => tasks.state());
+  checkedHandler('task-center-clear', () => tasks.clear());
+  checkedHandler('task-center-retry', id => tasks.retry(id));
   checkedHandler('get-history-state', () => historyState());
   checkedHandler('undo-history', (expectedRoot, expectedId) => replayHistory('undo', expectedRoot, expectedId));
   checkedHandler('redo-history', (expectedRoot, expectedId) => replayHistory('redo', expectedRoot, expectedId));
@@ -429,21 +465,21 @@ function bindHandlers() {
     return transcodeSettings.save(settings);
   });
   checkedHandler('video-transcode-state', () => videoTranscodeService.state());
-  checkedHandler('video-transcode-start', async request => {
-    if (closing || switchingLibrary || importing || draggingAssets || historyBusy || imagePlugins?.busy()) throw new Error('请等待当前素材操作完成后再转码');
-    const settings = await transcodeSettings.get();
-    const devices = request?.format === 'dxv' || settings.mode === 'cpu'
-      ? { cpu: { name: os.cpus()[0]?.model || 'CPU', logicalProcessors: Math.max(1, Math.min(128, os.availableParallelism?.() || os.cpus().length || 1)) }, gpus: [] }
-      : await transcodeDevices.discover();
-    if (closing || switchingLibrary || importing || draggingAssets || historyBusy || imagePlugins?.busy()) throw new Error('当前无法开始转码，请稍后重试');
-    const plan = executionPlan(settings, devices, { format: request?.format, total: request?.ids?.length || 0 });
-    return videoTranscodeService.start({ ...request, executionPlan: plan });
-  });
+  checkedHandler('video-transcode-start', startVideoTranscode);
   checkedHandler('video-transcode-cancel', id => videoTranscodeService.cancel(id));
   checkedHandler('prepare-video', prepareVideo);
   checkedHandler('cancel-video', (id, expectedRoot, requestToken) => videoRequests.cancel(id, expectedRoot, requestToken));
   checkedHandler('release-video-viewer', (id, expectedRoot) => videoRequests.releaseViewer(id, expectedRoot));
   checkedHandler('prepare-model', (id, expectedRoot) => modelService.prepare(requireLibrary(), id, expectedRoot));
+  checkedHandler('prepare-model-hover', (id, expectedRoot, token) => modelService.prepareHover(requireLibrary(), id, expectedRoot, token));
+  checkedHandler('cancel-model-hover', (id, expectedRoot, token) => modelService.cancelHover(id, expectedRoot, token));
+  checkedHandler('warm-model-hover', (id, expectedRoot, token) => {
+    if (closing || importing || draggingAssets || videoTranscodeService?.busy()) return false;
+    return modelService.warmHover(requireLibrary(), id, expectedRoot, token);
+  });
+  checkedHandler('cancel-model-warmup', (id, expectedRoot, token) => modelService.cancelWarmHover(id, expectedRoot, token));
+  checkedHandler('find-similar-images', (id, expectedRoot, token) => similarImages.search(requireLibrary(), id, expectedRoot, token));
+  checkedHandler('cancel-similar-images', (expectedRoot, token) => similarImages.cancel(expectedRoot, token));
   checkedHandler('prepare-font', (id, expectedRoot, faceIndex = 0) => fontService.prepare(requireLibrary(), id, expectedRoot, faceIndex));
   checkedHandler('prepare-project-preview', (id, expectedRoot, compositionId) => aePreviewService.prepare(requireLibrary(), id, { expectedRoot, compositionId }));
   checkedHandler('project-preview-state', id => aePreviewService.state(requireLibrary(), id));
@@ -581,7 +617,7 @@ async function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1460, height: 920, minWidth: 1080, minHeight: 700,
     ...(customWindowControls ? { frame: false, thickFrame: true, roundedCorners: false } : {}),
-    title: '', backgroundColor: '#0a0a0a',
+    title: productName, backgroundColor: '#0a0a0a',
     icon: path.join(__dirname, '..', 'assets', 'icon.ico'),
     autoHideMenuBar: true, show: false,
     webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true, spellcheck: false }
@@ -619,11 +655,12 @@ async function createWindow() {
     if (mayClose) { mayClose=false; closing=false; return; }
     event.preventDefault();
     if (switchingLibrary || importing || draggingAssets || historyBusy || metadataSaves.size || imagePlugins?.busy() || collector?.activeCount()) {
-      dialog.showMessageBox(mainWindow, { type: 'info', title: '素材操作进行中', message: '请等待素材操作完成后再关闭拾图。图片处理任务可在插件中心取消。', buttons: ['知道了'] });
+      dialog.showMessageBox(mainWindow, { type: 'info', title: '素材操作进行中', message: '请等待素材操作完成后再关闭 Mosaic。图片处理任务可在插件中心取消。', buttons: ['知道了'] });
       return;
     }
     if (closing) return;
     closing = true;
+    similarImages?.invalidate();
     Promise.resolve(videoTranscodeService?.shutdown()).then(() => transcodeSettings?.flush()).then(() => library?.flush()).then(() => Promise.allSettled([transcodeDevices?.shutdown?.(), videoTranscoder?.shutdown(), modelService?.shutdown(), fontService?.shutdown(), aeProjects?.shutdown(), aePreviewService?.shutdown()])).then(() => { mayClose = true; mainWindow.close(); }).catch(error => {
       closing = false;
       dialog.showErrorBox('保存未完成', error.message);
@@ -643,15 +680,27 @@ else {
     transcodeSettings = createTranscodeSettings({ filePath: path.join(app.getPath('userData'), 'transcode-settings.json') });
     videoTranscodeService = createVideoTranscodeService({ engine: videoTranscoder, getLibrary: () => library,
       workDir: path.join(app.getPath('userData'), 'video-transcodes'),
-      onEvent: state => sendActionEvent('video-transcode', state),
+      onEvent: state => {
+        sendActionEvent('video-transcode', state);
+        tasks.transcode(state, startVideoTranscode);
+      },
       onChanged: owner => { if (owner === library) sendActionEvent('library-changed'); }
     });
-    modelService = createModelService({ BrowserWindow, cacheDir: path.join(app.getPath('userData'), 'model-previews'), getLibrary: () => library });
+    modelService = createModelService({ BrowserWindow, cacheDir: path.join(app.getPath('userData'), 'model-previews'),
+      getLibrary: () => library, onHoverTask: (owner, id, render) => tasks.runModel(owner, id, render, { retry: async () => {
+        const token = `hover_retry_${crypto.randomBytes(12).toString('hex')}`;
+        if (closing || importing || draggingAssets || videoTranscodeService?.busy() ||
+            !await modelService.warmHover(owner, id, owner.root, token)) throw new Error('其他素材任务进行中，请稍后重试');
+      } }) });
+    similarImages = createSimilarImageService({ getLibrary: () => library,
+      onProgress: detail => sendActionEvent('similar-image-progress', detail) });
     fontService = createFontService({ BrowserWindow, cacheDir: path.join(app.getPath('userData'), 'font-previews'), getLibrary: () => library });
     aeProjects = createAEProjectCollector({ cacheDir: path.join(app.getPath('userData'), 'ae-projects') });
     libraryManager=new LibraryManager({configPath:path.join(app.getPath('userData'),'library-location.json'),legacyRoot,createThumbnail,
       prepareProjectBundle:(source, options)=>{
-        sendActionEvent('import-progress', { current: 0, total: 1, name: `正在收集 AE 工程与素材：${path.basename(source)}` });
+        const progress = { current: 0, total: 1, name: `正在收集 AE 工程与素材：${path.basename(source)}` };
+        tasks.importStage(library, progress);
+        sendActionEvent('import-progress', progress);
         return aeProjects.prepareProjectBundle(source, options);
       },overrideRoot});
     await libraryManager.init();
@@ -664,7 +713,12 @@ else {
       engine: aePreviewEngine,
       getLibrary: () => library,
       onChanged: owner => { if (owner === library) sendActionEvent('library-changed'); },
-      onProgress: (owner, detail) => { if (owner === library) sendActionEvent('project-preview', detail); }
+      onProgress: (owner, detail) => {
+        if (owner !== library) return;
+        sendActionEvent('project-preview', detail);
+        tasks.projectPreview(owner, detail, (id, compositionId) =>
+          aePreviewService.prepare(owner, id, { expectedRoot: owner.root, compositionId }));
+      }
     });
     imagePlugins=createImagePlugins({
       rootDir:path.join(process.env.SHITU_PLUGIN_ROOT || app.getPath('userData'),'plugins'),
@@ -688,6 +742,7 @@ else {
       try {
         const url = new URL(request.url);
         if (url.hostname === 'model') return modelService.response(request);
+        if (url.hostname === 'model-hover') return modelService.hoverResponse(request);
         if (url.hostname === 'font') return fontService.response(request);
         if (url.hostname === 'project-preview') return aePreviewService.response(request);
         if (request.method !== 'GET' || url.hostname !== 'asset') return new Response(null, { status: 404 });
@@ -721,7 +776,7 @@ else {
     updateScheduler.start();
     aePreviewService.scheduleLibrary(library);
   }).catch(error => {
-    dialog.showErrorBox('拾图无法启动', `${error.message}\n\n请保留库内文件，检查权限或使用备份恢复。`);
+    dialog.showErrorBox('Mosaic 无法启动', `${error.message}\n\n请保留库内文件，检查权限或使用备份恢复。`);
     app.quit();
   });
   app.on('window-all-closed', () => app.quit());

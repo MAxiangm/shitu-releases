@@ -179,7 +179,7 @@ async function readResource(url, signal, type = 'arrayBuffer') {
 function friendlyError(error, warnings) {
   if (error?.name === 'AbortError') return error;
   const detail = String(error?.message || error || '未知错误');
-  if (/WebGL|context|GPU/i.test(detail)) return new Error('无法启动 3D 预览，请确认显卡驱动可用后重启拾图');
+  if (/WebGL|context|GPU/i.test(detail)) return new Error('无法启动 3D 预览，请确认显卡驱动可用后重启 Mosaic');
   if (/draco|meshopt|ktx2|basis/i.test(detail)) return new Error('压缩模型解码失败，请检查模型数据或导出普通 GLB 后重试');
   if (warnings.some(item => item.startsWith('缺少模型资源'))) return new Error('模型引用的文件不完整，请把模型、材质和贴图放在一起重新导入');
   return new Error('模型暂时无法预览：' + detail.slice(0, 500));
@@ -382,6 +382,27 @@ export function create(container, options = {}) {
     if (!model || disposed) throw new Error('模型尚未完成加载');
     render(); return canvas.toDataURL('image/jpeg', Math.max(0.1, Math.min(1, quality)));
   }
+  function captureTurntable(frameCount) {
+    if (!model || disposed) throw new Error('模型尚未完成加载');
+    const start = camera.position.clone().sub(controls.target);
+    const up = new THREE.Vector3(0, 1, 0);
+    const offset = new THREE.Vector3();
+    const frames = [];
+    controls.removeEventListener('change', render);
+    try {
+      for (let frame = 0; frame < frameCount; frame++) {
+        offset.copy(start).applyAxisAngle(up, 2 * Math.PI * frame / frameCount);
+        camera.position.copy(controls.target).add(offset);
+        controls.update();
+        frames.push(captureJPEG({ quality: 0.82 }));
+      }
+    } finally {
+      camera.position.copy(controls.target).add(start);
+      controls.addEventListener('change', render);
+      controls.update();
+    }
+    return frames;
+  }
   function dispose() {
     if (disposed) return;
     clear(); disposed = true; resizeObserver.disconnect(); controls.dispose();
@@ -389,7 +410,7 @@ export function create(container, options = {}) {
     grid.geometry.dispose(); for (const material of Array.isArray(grid.material) ? grid.material : [grid.material]) material.dispose();
     environmentTarget.dispose(); renderer.dispose(); renderer.forceContextLoss(); root.remove();
   }
-  return { load, clear, dispose, resize, resetView, captureJPEG, setAnimation,
+  return { load, clear, dispose, resize, resetView, captureJPEG, captureTurntable, setAnimation,
     get metadata() { return currentMetadata; }, get canvas() { return canvas; } };
 }
 

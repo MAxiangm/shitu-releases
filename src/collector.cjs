@@ -188,10 +188,11 @@ function createCollector({ library, configPath, onImported = () => {}, isReady=(
     // are accepted only with the exact extension id (some Chrome worker builds
     // omit Origin on host-permitted requests). This is a loopback-only API.
     if(request.method==='POST' && request.url==='/v1/connect') {
-      if(request.headers['x-shitu-extension']!==allowedOrigin.replace('chrome-extension://','')) return json(403,{ok:false,error:'不是受支持的拾图采集扩展'});
+      if(request.headers['x-shitu-extension']!==allowedOrigin.replace('chrome-extension://','')) return json(403,{ok:false,error:'不是受支持的 Mosaic 采集扩展'});
       if(!String(request.headers['content-type']).startsWith('application/json')) return json(415,{ok:false,error:'只支持 JSON 请求'});
       try {
         await readJSON(request,4096);
+        // Existing v1 clients treat the app field as the protocol identifier.
         return json(200,{ok:true,app:'拾图',version:appVersion,ready:Boolean(isReady()),connection:{port:listeningPort,token}});
       } catch(error) {return json(400,{ok:false,error:error.message});}
     }
@@ -206,7 +207,7 @@ function createCollector({ library, configPath, onImported = () => {}, isReady=(
       const body = await readJSON(request,28*1024*1024+32768);
       if (request.url === '/v1/ping') return json(200,{ok:true,app:'拾图',version:appVersion,ready:Boolean(isReady())});
       if(!isReady()) {
-        rejectedCapture(new Error('请先在拾图中选择素材库位置，或等待切换完成'));
+        rejectedCapture(new Error('请先在 Mosaic 中选择素材库位置，或等待切换完成'));
         return json(409,{ok:false,error:lastCapture.error});
       }
       if (active >= 3) {
@@ -233,7 +234,7 @@ function createCollector({ library, configPath, onImported = () => {}, isReady=(
         server=http.createServer(handler); server.requestTimeout=100000; server.headersTimeout=10000;
         server.on('connection',socket=>{sockets.add(socket);socket.on('close',()=>sockets.delete(socket));});
         try { await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(port ? port+attempt : 0,'127.0.0.1',()=>{server.removeListener('error',reject);resolve();});}); listeningPort=server.address().port; disabledError=null; return this.info(); }
-        catch(error) { if (error.code !== 'EADDRINUSE') throw error; disabledError='浏览器采集端口被占用，请关闭其他拾图实例后重试'; }
+        catch(error) { if (error.code !== 'EADDRINUSE') throw error; disabledError='浏览器采集端口被占用，请关闭其他 Mosaic 实例后重试'; }
       }
       throw new Error(disabledError);
     },

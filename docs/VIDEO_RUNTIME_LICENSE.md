@@ -1,6 +1,6 @@
-# 拾图视频运行时说明
+# Mosaic 视频运行时说明
 
-拾图使用独立进程调用 FFmpeg 和 ffprobe，解码视频、生成缩略图及建立兼容预览缓存。原视频文件保留，不会被转码覆盖。
+Mosaic 使用独立进程调用 FFmpeg 和 ffprobe，解码视频、生成缩略图及建立兼容预览缓存。转码结果保存为独立文件。
 
 发行包内的 `video-runtime/` 来自 FFmpeg 官方下载页列出的 FFmpeg-Builds（原 BtbN）Windows x64 LGPL shared 构建，版本为 `n9.0.2-39-g7adfbe40dc-20261031`。本项目未修改这些二进制。
 
@@ -20,6 +20,6 @@
 - [固定发行包及校验值](https://github.com/FFmpeg-Builds/FFmpeg-Builds/releases/tag/autobuild-2026-10-31-12-59)
 - [FFmpeg 许可证说明](https://github.com/FFmpeg/FFmpeg/blob/7adfbe40dcde598f93a6963d2f7b22cd75202ccc/LICENSE.md)
 
-该 shared 构建的 FFmpeg DLL 可由用户替换为兼容 ABI 的自行构建版本。拾图没有禁止为调试这些组件而修改或逆向分析它们。更换本机运行时后，发布构建的固定 SHA-256 检查会提示差异；需要开发者确认新版本并更新 `video-runtime-manifest.json` 后再发布。
+该 shared 构建的 FFmpeg DLL 可由用户替换为兼容 ABI 的自行构建版本。你可以为调试这些组件而修改或逆向分析它们。更换本机运行时后，发布构建的固定 SHA-256 检查会提示差异。开发者确认新版本并更新 `video-runtime-manifest.json` 后可重新发布。
 
 公开源码仓库只保存固定版本、下载地址与每个文件的校验值。`node scripts/prepare-video-runtime.cjs` 会下载并验证原始发行包；`node scripts/prepare-build-resources.cjs` 会一并准备此视频运行时。打包时复制整个 `video-runtime`，因此用户安装后不需要另行安装 FFmpeg。

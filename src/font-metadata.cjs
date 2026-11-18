@@ -149,7 +149,7 @@ function cmapReader(tables) {
 function sampleFor(tables) {
   const supports = cmapReader(tables);
   if (!supports) return 'Aa Bb Cc 0123456789';
-  for (const sample of ['拾图 字体预览', 'Aa Bb Cc 0123456789', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz', '0123456789']) {
+  for (const sample of ['Mosaic 字体预览', '字体预览', 'Aa Bb Cc 0123456789', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz', '0123456789']) {
     if ([...sample].filter(value => value !== ' ').every(value => supports(value.codePointAt(0)))) return sample;
   }
   let result = '';

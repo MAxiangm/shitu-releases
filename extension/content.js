@@ -32,8 +32,8 @@
       document.documentElement.append(toastHost);
     }
     const box = toastHost.__shituBox;
-    toastHost.__shituLabel.textContent = `拾图 · ${message}`;
-    toastHost.setAttribute('aria-label', `拾图 · ${message}`);
+    toastHost.__shituLabel.textContent = `Mosaic · ${message}`;
+    toastHost.setAttribute('aria-label', `Mosaic · ${message}`);
     toastHost.setAttribute('data-status', status);
     box.style.borderColor = status === 'error' ? '#d8d8d8' : '#444444';
     box.style.color = status === 'error' ? '#ffffff' : '#d4d4d4';
@@ -161,10 +161,10 @@
       submitted = true;
       const response = await chrome.runtime.sendMessage({ type: 'shitu:capture', media: prepared });
       if (!response?.ok) throw new Error(response?.error || '采集失败，请打开桌面软件重试。');
-      if (!(Number.isSafeInteger(response.imported) && response.imported > 0) && !(Number.isSafeInteger(response.duplicates) && response.duplicates > 0)) throw new Error('桌面未确认素材入库，请在拾图中检查后重试。');
+      if (!(Number.isSafeInteger(response.imported) && response.imported > 0) && !(Number.isSafeInteger(response.duplicates) && response.duplicates > 0)) throw new Error('桌面未确认素材入库，请在 Mosaic 中检查后重试。');
       if (serial !== captureSerial) return;
       const inTrash = !response.imported && response.existingAssets?.some(asset => asset.trashedAt);
-      toast(response.message || (response.imported ? '已保存到素材库，可在“最近导入”查看。' : inTrash ? '这份素材已在回收站，请到拾图恢复后查看。' : '素材库中已有这份文件，可清除筛选后查看。'), response.status || (inTrash ? 'warning' : 'success'));
+      toast(response.message || (response.imported ? '已保存到素材库，可在“最近导入”查看。' : inTrash ? '这份素材已在回收站，请到 Mosaic 恢复后查看。' : '素材库中已有这份文件，可清除筛选后查看。'), response.status || (inTrash ? 'warning' : 'success'));
     } catch (error) {
       const message = /Extension context invalidated|Receiving end does not exist/i.test(error.message || '')
         ? '采集助手已更新，请刷新当前网页后再采集。' : error.message || '采集失败。';

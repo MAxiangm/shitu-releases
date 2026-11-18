@@ -41,8 +41,6 @@ html[data-skin="famicom"][data-skin][data-skin] .app-header {
   border-radius:0 0 8px 8px;
   box-shadow:0 3px 0 #5d1a2b,0 7px 15px #7b554324;
 }
-html[data-skin="famicom"][data-skin][data-skin] .brand-mark { transform:none; gap:3px; }
-html[data-skin="famicom"][data-skin][data-skin] .brand-mark span { background:#efcf7b; border-radius:0; opacity:1; transform:none; }
 html[data-skin="famicom"][data-skin][data-skin] .library-icon {
   background:#f6e9c9;
   color:#7b2837;
@@ -106,8 +104,6 @@ html[data-skin="psp"][data-skin][data-skin] .app-header {
   border-radius:0 0 26px 26px;
   box-shadow:inset 0 -2px 0 #0b1118,inset 0 1px 0 #dce9f337,0 9px 24px #0007;
 }
-html[data-skin="psp"][data-skin][data-skin] .brand-mark { transform:none; gap:3px; }
-html[data-skin="psp"][data-skin][data-skin] .brand-mark span { background:linear-gradient(135deg,#fbffff,#8399b0); border-radius:50%; opacity:1; transform:none; }
 html[data-skin="psp"][data-skin][data-skin] .library-icon,
 html[data-skin="psp"][data-skin][data-skin] .header-actions>.icon-button {
   background:linear-gradient(140deg,#667589,#18212e 65%);
@@ -173,9 +169,7 @@ html[data-skin="gameboy"][data-skin][data-skin] .app-header::after {
   box-shadow:0 0 0 1px #562b37;
   pointer-events:none;
 }
-html[data-skin="gameboy"][data-skin][data-skin] .brand-mark { transform:none; gap:2px; }
 html[data-skin="gameboy"][data-skin][data-skin] :is(.workspace,.details-panel,.browser-popover,.modal,.sf-dialog,.batch-rename-dialog,.font-compare-dialog) { border-radius:5px 5px 20px 5px; }
-html[data-skin="gameboy"][data-skin][data-skin] .brand-mark span { background:#394f2c; border-radius:0; opacity:1; transform:none; box-shadow:1px 1px 0 #d8e4b0; }
 html[data-skin="gameboy"][data-skin][data-skin] .library-icon { border-radius:3px; background:#899878; border:2px solid #525e46; color:#21321b; box-shadow:inset 1px 1px 0 #bcc6a1; }
 html[data-skin="gameboy"][data-skin][data-skin] .collector-button,
 html[data-skin="gameboy"][data-skin][data-skin] .primary-button,
@@ -231,9 +225,6 @@ html[data-skin="switch"][data-skin][data-skin] .app-shell::after {
   pointer-events:none;
 }
 html[data-skin="switch"][data-skin][data-skin] .app-header { border-bottom:2px solid #5b727f; box-shadow:0 2px 0 #12191f; border-radius:0 0 12px 12px; }
-html[data-skin="switch"][data-skin][data-skin] .brand-mark { transform:none; gap:3px; }
-html[data-skin="switch"][data-skin][data-skin] .brand-mark span { border-radius:4px; opacity:1; transform:none; background:#38c8d7; }
-html[data-skin="switch"][data-skin][data-skin] .brand-mark span:nth-child(even) { background:#ef5b68; }
 html[data-skin="switch"][data-skin][data-skin] .library-icon { background:#245763; color:#e8fcff; border-color:#38c8d7; border-radius:12px; }
 html[data-skin="switch"][data-skin][data-skin] .collector-button { background:#da4b5c; color:#fff; border:1px solid #f1848e; box-shadow:0 3px 0 #81333e; }
 html[data-skin="switch"][data-skin][data-skin] .collector-button:hover { background:#ec6573; color:#fff; }

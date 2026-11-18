@@ -1,6 +1,6 @@
-# GitHub 正式发布与自动更新
+# Mosaic 的 GitHub 正式发布与自动更新
 
-自动更新仓库为 `MAxiangm/shitu-releases`。本地生成安装包、提交源码、推送分支或保存 Release 草稿，都不代表新版本已经向用户发布。客户端读取 GitHub 的最新正式 Release；草稿和预发布版本不会进入正式更新通道。
+Mosaic 从 `MAxiangm/shitu-releases` 读取 GitHub 的最新正式 Release。发布后，客户端通过其中的 Windows 安装包和更新清单完成更新。
 
 ## 本地正式发布
 

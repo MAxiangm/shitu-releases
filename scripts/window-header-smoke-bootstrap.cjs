@@ -327,6 +327,33 @@ module.exports = function configureWindowHeaderSmoke({ root, base }) {
       assert.ok(sample?.id, 'Sample import failed');
       await wait(() => visible('#windowControls'), 'Window controls did not load');
       assert.equal((await js('api.windowState()')).customControls, true);
+      const libraryLabels = [
+        ['D:\\工作\\拾图素材库', 'Mosaic 素材库'],
+        ['D:\\工作\\拾图素材库 2\\', 'Mosaic 素材库 2'],
+        ['D:\\工作\\拾图素材库 10000', 'Mosaic 素材库 10000'],
+        ['D:\\工作\\拾图素材库 1', '拾图素材库 1'],
+        ['D:\\工作\\拾图素材库项目', '拾图素材库项目'],
+        ['D:\\工作\\客户素材库', '客户素材库'],
+        ['D:\\工作\\Mosaic 素材库', 'Mosaic 素材库']
+      ];
+      const renderedLabels = await js(`(() => {
+        const original = state.library.root;
+        try {
+          return ${JSON.stringify(libraryLabels.map(([root]) => root))}.map(root => {
+            state.library.root = root;
+            renderLibraryState();
+            return {
+              label: document.getElementById('libraryDisplayName').textContent,
+              path: document.getElementById('managerLibraryPath').textContent,
+              tooltip: document.getElementById('libraryInfo').title
+            };
+          });
+        } finally {
+          state.library.root = original;
+          renderLibraryState();
+        }
+      })()`);
+      assert.deepEqual(renderedLabels, libraryLabels.map(([root, label]) => ({ label, path: root, tooltip: `管理「${label}」\n${root}` })));
 
       const descriptors = [];
       const nativeCorners = {};

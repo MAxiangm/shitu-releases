@@ -239,7 +239,7 @@ async function main(args = process.argv.slice(2)) {
     target = targetSHA(revision.stdout.trim());
   }
   const options = { repository, tag: `v${project.version}`, title: `${project.productName} v${project.version}`,
-    notes: noteFile ? await fs.readFile(noteFile, 'utf8') : `拾图 ${project.version}\n\nWindows x64 安装包。已有自动更新版用户可在应用内更新。`,
+    notes: noteFile ? await fs.readFile(noteFile, 'utf8') : `${project.productName} ${project.version}\n\nWindows x64 安装包。已有自动更新版用户可在应用内更新。`,
     files: [release.installer, release.manifestPath], publish, target, resumeDraft };
   if (verifyOnly) { console.log(`Public release verified: ${(await verifyPublishedRelease(options)).url}`); return; }
   const cli = findGitHubCli();

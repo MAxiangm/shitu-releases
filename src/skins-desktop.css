@@ -35,8 +35,6 @@ html[data-skin="win98"][data-skin] :is(.primary-button,.sp-primary,.collector-bu
 html[data-skin="win98"][data-skin] :is(.primary-button,.secondary-button,.sp-primary,.sp-secondary):active:not(:disabled) {
   box-shadow:inset 1px 1px #404040,inset -1px -1px #fff;
 }
-html[data-skin="win98"] .brand-mark { transform:none; gap:2px; }
-html[data-skin="win98"] .brand-mark span { transform:none; opacity:1; border-radius:0; }
 html[data-skin="winxp"] {
   --skin-bg:#4b91d1; --skin-surface:#ece9d8; --skin-surface-2:#f5f4ed;
   --skin-text:#152439; --skin-muted:#4c5661; --skin-faint:#626a71;
@@ -69,5 +67,3 @@ html[data-skin="mac"] {
   --skin-font:"Segoe UI","Microsoft YaHei UI",sans-serif;
 }
 html[data-skin="mac"] :is(.app-header,.details-panel,.browser-popover,.selection-bar) { backdrop-filter:blur(18px); }
-html[data-skin="mac"] .brand-mark { transform:none; gap:3px; }
-html[data-skin="mac"] .brand-mark span { border-radius:3px; }

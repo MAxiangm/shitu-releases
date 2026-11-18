@@ -24,7 +24,7 @@ async function ensureWorkerVersion() {
   const previous = stored[RELOAD_KEY];
   if (previous?.version === manifest.version && Date.now() - previous.at < 60000) {
     status('扩展更新尚未完成', 'offline');
-    $('feedback').textContent = '请在 Chrome 扩展管理中重新加载拾图采集助手，再刷新素材网页。';
+    $('feedback').textContent = '请在 Chrome 扩展管理中重新加载 Mosaic 采集助手，再刷新素材网页。';
     return false;
   }
   status('正在更新采集助手…');
@@ -46,8 +46,8 @@ async function showRecent(connected = false) {
     : recent.message || '正在采集，尚未收到素材库保存确认。';
   else if (recent.ok && recent.imported > 0) message = '已保存到素材库，可在“全部素材”或“最近导入”查看。';
   else if (recent.ok && recent.duplicates > 0) message = recent.existingAssets?.some(asset => asset.trashedAt)
-    ? '这份素材已在回收站，请到桌面拾图恢复后查看。' : '素材库中已有这份文件，可清除搜索和格式筛选后查看。';
-  else message = recent.error ? `未收到保存确认 · ${recent.error}` : '上次采集未收到保存确认，请到桌面拾图核对。';
+    ? '这份素材已在回收站，请到桌面 Mosaic 恢复后查看。' : '素材库中已有这份文件，可清除搜索和格式筛选后查看。';
+  else message = recent.error ? `未收到保存确认 · ${recent.error}` : '上次采集未收到保存确认，请到桌面 Mosaic 核对。';
   $('recentLabel').textContent = pending && !stale ? '正在采集 · 尚未保存' : '上次采集结果';
   const confirmed = recent.ok && ((Number.isSafeInteger(recent.imported) && recent.imported > 0) || (Number.isSafeInteger(recent.duplicates) && recent.duplicates > 0));
   $('recent').setAttribute('data-state', pending ? stale ? 'unconfirmed' : 'working' : confirmed ? 'success' : recent.error ? 'error' : 'unconfirmed');
@@ -61,20 +61,20 @@ async function checkConnection(force = false) {
   if (checking || reloading) return;
   checking = true;
   $('check').disabled = true;
-  status('正在自动查找拾图…');
+  status('正在查找 Mosaic…');
   try {
     if (!await ensureWorkerVersion()) return false;
     const result = await send({ type: force ? 'shitu:reconnect' : 'shitu:ping' });
     if (result?.ok) {
-      status(result.ready ? `已连接拾图 ${result.version}` : '已连接 · 请先选择素材库', result.ready ? 'online' : '');
+      status(result.ready ? `已连接 · ${result.version}` : '已连接 · 请先选择素材库', result.ready ? 'online' : '');
       $('feedback').textContent = result.ready
         ? upgraded ? '采集助手已更新。请刷新已打开的素材网页，再按住 Alt 并右键采集。' : '已准备好。回到网页，按住 Alt 并右键点击素材即可保存。'
-        : '请先在桌面拾图中选择或新建素材库，之后自动开始接收素材。';
+        : '请先在桌面 Mosaic 中选择或新建素材库，之后自动开始接收素材。';
       await showRecent(true);
       return true;
     }
-    status('等待桌面拾图', 'offline');
-    $('feedback').textContent = result?.error || '请先打开桌面拾图。';
+    status('等待桌面 Mosaic', 'offline');
+    $('feedback').textContent = result?.error || '请先打开桌面 Mosaic。';
     await showRecent();
     return false;
   } catch { status('连接检查失败', 'offline'); $('feedback').textContent = '扩展可能正在更新，请关闭此窗口后重新打开。'; return false; }

@@ -33,10 +33,9 @@ body > .app-header :is(button, .header-menu), .window-controls { -webkit-app-reg
 .header-identity { display: flex; align-items: center; gap: 12px; min-width: 0; }
 .header-drag-space { flex: 1 1 auto; align-self: stretch; min-width: 30px; }
 .window-controls-slot { flex: 0 0 var(--app-window-buttons-width); }
-.app-header .brand { flex: none; gap: 7px; }
-.app-header .brand-mark { width: 17px; height: 17px; gap: 2px; }
-.app-header .brand > div:nth-child(2) { display: block; }
-.app-header .brand strong { color: var(--app-header-text); font-size: 14px; font-weight: 650; letter-spacing: .05em; }
+.app-header .brand { flex: none; gap: 7px; color: var(--app-header-text); }
+.app-header .brand-mark { width: 17px; height: 17px; }
+.app-header .brand strong { font-size: 14px; font-weight: 700; letter-spacing: -.025em; }
 
 .app-header .library-switch {
   min-width: 0;

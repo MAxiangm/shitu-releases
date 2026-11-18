@@ -187,7 +187,7 @@ if (smoke) {
           applyLibrary(restored);
           const plugins = await api.pluginsList();
           await new Promise(resolve => setTimeout(resolve, 350));
-          if (!document.querySelector('#pageTitle') || !document.body.textContent.includes('拾图'))
+          if (!document.querySelector('#pageTitle') || !document.querySelector('.brand')?.textContent.includes('Mosaic'))
             throw new Error('Main interface did not render');
           return { initialTotal: initial.stats.total, imported: imported.report.imported, capturedId: id,
             active: restored.stats.active, protocol: true, thumbnail: true,

@@ -3,7 +3,7 @@
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
-const { root, exists, resetDistDirectory, installerPath } = require('./release-utils.cjs');
+const { root, installedExecutable, exists, resetDistDirectory, installerPath } = require('./release-utils.cjs');
 const { createPackage } = require('./package.cjs');
 const { createUpdateManifest } = require('./create-update-manifest.cjs');
 
@@ -58,7 +58,7 @@ async function main() {
   const output = installerPath(project);
   const version = `${project.version.split(/[-+]/)[0]}.0`;
   const args = [
-    '/V3', `/DPRODUCT_NAME=${project.productName}`, `/DPRODUCT_VERSION=${project.version}`,
+    '/V3', `/DPRODUCT_NAME=${project.productName}`, `/DPRODUCT_EXE=${installedExecutable}`, `/DPRODUCT_VERSION=${project.version}`,
     `/DVERSION_QUAD=${version}`, `/DSOURCE_DIR=${target}`, `/DOUTPUT_FILE=${output}`,
     `/DUNINSTALL_LIST=${uninstallList}`, installerScript
   ];

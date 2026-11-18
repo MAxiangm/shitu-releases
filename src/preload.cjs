@@ -3,6 +3,14 @@ const call = (channel, ...args) => ipcRenderer.invoke(`shitu:${channel}`, ...arg
 contextBridge.exposeInMainWorld('shitu', Object.freeze({
   windowState: () => call('window-state'),
   windowCommand: action => call('window-command', action),
+  taskCenterState: () => call('task-center-state'),
+  clearTasks: () => call('task-center-clear'),
+  retryTask: id => call('task-center-retry', id),
+  onTaskCenter: callback => {
+    const listener = (_event, detail) => callback(detail);
+    ipcRenderer.on('shitu:task-center', listener);
+    return () => ipcRenderer.removeListener('shitu:task-center', listener);
+  },
   setWindowSkin: id => call('window-skin', id),
   onWindowState: callback => {
     const listener = (_event, state) => callback(state);
@@ -59,6 +67,17 @@ contextBridge.exposeInMainWorld('shitu', Object.freeze({
   cancelVideo: (id, expectedRoot, requestToken) => call('cancel-video', id, expectedRoot, requestToken),
   releaseVideoViewer: (id, expectedRoot) => call('release-video-viewer', id, expectedRoot),
   prepareModel: (id, expectedRoot) => call('prepare-model', id, expectedRoot),
+  prepareModelHover: (id, expectedRoot, token) => call('prepare-model-hover', id, expectedRoot, token),
+  cancelModelHover: (id, expectedRoot, token) => call('cancel-model-hover', id, expectedRoot, token),
+  warmModelHover: (id, expectedRoot, token) => call('warm-model-hover', id, expectedRoot, token),
+  cancelModelWarmup: (id, expectedRoot, token) => call('cancel-model-warmup', id, expectedRoot, token),
+  findSimilarImages: (id, expectedRoot, token) => call('find-similar-images', id, expectedRoot, token),
+  cancelSimilarImages: (expectedRoot, token) => call('cancel-similar-images', expectedRoot, token),
+  onSimilarImageProgress: callback => {
+    const listener = (_event, detail) => callback(detail);
+    ipcRenderer.on('shitu:similar-image-progress', listener);
+    return () => ipcRenderer.removeListener('shitu:similar-image-progress', listener);
+  },
   prepareFont: (id, expectedRoot, faceIndex = 0) => call('prepare-font', id, expectedRoot, faceIndex),
   prepareProjectPreview: (id, expectedRoot, compositionId) => call('prepare-project-preview', id, expectedRoot, compositionId),
   projectPreviewState: id => call('project-preview-state', id),

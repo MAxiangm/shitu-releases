@@ -35,7 +35,7 @@ html[data-skin]:not([data-skin="default"]) .app-header {
   border-radius:0 0 var(--skin-radius) var(--skin-radius); box-shadow:var(--skin-panel-shadow);
 }
 html[data-skin]:not([data-skin="default"]) .app-header :is(.header-button,.backup-button,.library-icon,.brand strong) { color:var(--skin-header-text); }
-html[data-skin]:not([data-skin="default"]) .brand-mark span { background:var(--skin-header-text); }
+html[data-skin]:not([data-skin="default"]) .setup-brand { color:var(--skin-text); }
 html[data-skin]:not([data-skin="default"]) .workspace {
   background:var(--skin-surface); border-radius:var(--skin-radius); box-shadow:var(--skin-panel-shadow);
 }

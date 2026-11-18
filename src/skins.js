@@ -12,7 +12,7 @@
   'use strict';
   const STORAGE_KEY = 'shitu-skin';
   const catalog = Object.freeze([
-    { id: 'default', name: '拾图原版', description: '纯黑界面 · 流线背景', base: '#111111', surface: '#222222', accent: '#dedede', ink: '#ffffff', family: 'original', windowCorners: [8, 8, 8, 8] },
+    { id: 'default', name: 'Mosaic 默认', description: '纯黑界面 · 流线背景', base: '#111111', surface: '#222222', accent: '#dedede', ink: '#ffffff', family: 'original', windowCorners: [8, 8, 8, 8] },
     { id: 'famicom', name: '红白机', description: '奶白机壳 · 酒红按键', base: '#eee8d8', surface: '#faf6e9', accent: '#981f36', ink: '#442c29', family: 'console', windowCorners: [6, 6, 6, 6] },
     { id: 'psp', name: 'PSP', description: '钢琴黑 · 冷光面板', base: '#111722', surface: '#222c3d', accent: '#a9d6ff', ink: '#f0f5ff', family: 'console', windowCorners: [20, 20, 20, 20] },
     { id: 'gameboy', name: 'Game Boy', description: '灰色机壳 · 橄榄绿屏', base: '#b9bdab', surface: '#c9d59b', accent: '#42552c', ink: '#25361d', family: 'console', windowCorners: [6, 6, 20, 6] },

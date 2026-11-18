@@ -3,8 +3,9 @@
 // Rebuild a portable application using the preserved Electron runtime.
 const fs = require('node:fs/promises');
 const path = require('node:path');
-const { root, recoveredRuntime, inside, exists, readProject, resetDistDirectory, copyTree, packagePath } = require('./release-utils.cjs');
+const { root, recoveredRuntime, installedExecutable, inside, exists, readProject, resetDistDirectory, copyTree, packagePath } = require('./release-utils.cjs');
 const { verifyVideoRuntime } = require('./prepare-video-runtime.cjs');
+const { brandWindowsExecutable } = require('./brand-windows-executable.cjs');
 
 async function findDependency(name, from) {
   if (!/^(@[a-z0-9_.-]+\/)?[a-z0-9_.-]+$/i.test(name)) throw new Error(`Invalid dependency name: ${name}`);
@@ -55,11 +56,13 @@ async function createPackage() {
   }
   const target = packagePath(project);
   await resetDistDirectory(target);
-  const excluded = new Set(['$PLUGINSDIR', 'resources', 'Chrome扩展', '拾图.exe', '卸载拾图.exe', 'README.md', '使用说明.md', '安装指南.html']);
+  const excluded = new Set(['$PLUGINSDIR', 'resources', 'Chrome扩展', installedExecutable, '卸载拾图.exe', 'README.md', '使用说明.md', '安装指南.html']);
   for (const entry of await fs.readdir(recoveredRuntime, { withFileTypes: true })) {
     if (!excluded.has(entry.name)) await copyTree(path.join(recoveredRuntime, entry.name), path.join(target, entry.name));
   }
-  await copyTree(path.join(recoveredRuntime, '拾图.exe'), path.join(target, `${project.productName}.exe`));
+  const executable = path.join(target, installedExecutable);
+  await copyTree(path.join(recoveredRuntime, '拾图.exe'), executable);
+  await brandWindowsExecutable(executable, path.join(root, 'assets', 'icon.ico'), { ...project, executableName: installedExecutable });
   const appDirectory = path.join(target, 'resources', 'app');
   await fs.mkdir(appDirectory, { recursive: true });
   // Retain Electron's default app so the first public installer can bootstrap CI.

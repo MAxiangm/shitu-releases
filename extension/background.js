@@ -3,7 +3,7 @@
 const CONFIG_KEY = 'shituConnection';
 const LAST_KEY = 'shituLastCapture';
 // A running worker can read an updated manifest without having loaded new code.
-const WORKER_VERSION = '0.11.1';
+const WORKER_VERSION = '0.11.2';
 const CAPTURE_TIMEOUT = 280000;
 const MAX_DATA_LENGTH = 28 * 1024 * 1024;
 const MENU_ID = 'shitu-save-media';
@@ -18,7 +18,7 @@ chrome.storage.local.setAccessLevel?.({ accessLevel: 'TRUSTED_CONTEXTS' }).catch
 
 function checkedConfig(config) {
   // Preserve the port/token object cached by earlier extension versions.
-  if (!config || !Number.isInteger(config.port) || config.port < 38475 || config.port > 38484 || typeof config.token !== 'string' || !/^[a-f0-9]{64}$/i.test(config.token)) throw issue('本机连接信息已失效，将重新查找拾图。', 'INVALID_CONNECTION');
+  if (!config || !Number.isInteger(config.port) || config.port < 38475 || config.port > 38484 || typeof config.token !== 'string' || !/^[a-f0-9]{64}$/i.test(config.token)) throw issue('本机连接信息已失效，将重新查找 Mosaic。', 'INVALID_CONNECTION');
   return { port: config.port, token: config.token.toLowerCase() };
 }
 
@@ -39,15 +39,15 @@ async function requestLocal(port, route, body, token, timeout) {
         body: JSON.stringify(body), credentials: 'omit', cache: 'no-store', redirect: 'error', signal: abort.signal,
       });
     } catch (error) {
-      if (error.name === 'AbortError') throw issue('采集尚未收到确认，桌面可能仍在处理。请先在拾图检查结果，避免重复操作。', 'TIMEOUT');
-      throw issue('尚未找到本机拾图，请先打开桌面软件。', 'CONNECTION_FAILED');
+      if (error.name === 'AbortError') throw issue('采集尚未收到确认，桌面可能仍在处理。请先在 Mosaic 检查结果，避免重复操作。', 'TIMEOUT');
+      throw issue('尚未找到本机 Mosaic，请先打开桌面软件。', 'CONNECTION_FAILED');
     }
     if (response.status === 401) throw issue('本机连接已更新，正在重新连接。', 'UNAUTHORIZED');
     let result;
     try { result = await response.json(); }
     catch (error) {
-      if (error.name === 'AbortError') throw issue('采集尚未收到确认，桌面可能仍在处理。请先在拾图检查结果，避免重复操作。', 'TIMEOUT');
-      throw issue('拾图返回了无效响应，请更新软件和扩展。', 'INVALID_RESPONSE');
+      if (error.name === 'AbortError') throw issue('采集尚未收到确认，桌面可能仍在处理。请先在 Mosaic 检查结果，避免重复操作。', 'TIMEOUT');
+      throw issue('Mosaic 返回了无效响应，请更新软件和扩展。', 'INVALID_RESPONSE');
     }
     if (!response.ok || !result?.ok) throw issue(result?.error || `请求失败（${response.status}）`, 'SERVER_ERROR');
     return result;
@@ -61,7 +61,8 @@ function localRequest(route, body, config, timeout = 90000) {
 
 function appStatus(result) {
   const version = typeof result?.version === 'string' && /^(\d+)\.(\d+)\.(\d+)$/.exec(result.version);
-  if (result?.app !== '拾图' || !version || (Number(version[1]) === 0 && Number(version[2]) < 4) || typeof result.ready !== 'boolean') throw issue('请将桌面拾图更新到 0.4 或更新版本。', 'INCOMPATIBLE_APP');
+  // The v1 app field identifies the collector protocol across desktop releases.
+  if (result?.app !== '拾图' || !version || (Number(version[1]) === 0 && Number(version[2]) < 4) || typeof result.ready !== 'boolean') throw issue('请将桌面端更新到 0.4 或更新版本。', 'INCOMPATIBLE_APP');
   return { ok: true, app: '拾图', version: result.version, ready: result.ready };
 }
 
@@ -90,7 +91,7 @@ async function establishConnection(force = false) {
   const found = attempts.find(result => result.config && result.status.ready) || attempts.find(result => result.config);
   if (!found) {
     const incompatible = attempts.find(result => result.error?.code === 'INCOMPATIBLE_APP');
-    throw incompatible?.error || issue('尚未找到本机拾图，请先打开桌面软件。', 'CONNECTION_FAILED');
+    throw incompatible?.error || issue('尚未找到本机 Mosaic，请先打开桌面软件。', 'CONNECTION_FAILED');
   }
   await chrome.storage.local.set({ [CONFIG_KEY]: found.config });
   return found;
@@ -132,7 +133,7 @@ async function recordFailure(error, details = {}) {
 function captureResult(result) {
   const { imported = 0, duplicates = 0 } = result || {};
   if (!Number.isSafeInteger(imported) || imported < 0 || !Number.isSafeInteger(duplicates) || duplicates < 0 || (!imported && !duplicates))
-    throw issue('桌面未确认素材入库，请在拾图中检查后重试。', 'IMPORT_NOT_CONFIRMED');
+    throw issue('桌面未确认素材入库，请在 Mosaic 中检查后重试。', 'IMPORT_NOT_CONFIRMED');
   const existingAssets = Array.isArray(result.existingAssets) ? result.existingAssets.slice(0, 20).map(asset => ({
     id: safeText(asset?.id, 128), name: safeText(asset?.name, 240),
     trashedAt: typeof asset?.trashedAt === 'string' ? safeText(asset.trashedAt, 80) : null,
@@ -140,7 +141,7 @@ function captureResult(result) {
   })) : [];
   const inTrash = !imported && existingAssets.some(asset => asset.trashedAt);
   const message = imported ? '已保存到素材库，可在“全部素材”或“最近导入”查看。'
-    : inTrash ? '这份素材已在回收站，请到拾图恢复后查看。' : '素材库中已有这份文件，可清除搜索和格式筛选后查看。';
+    : inTrash ? '这份素材已在回收站，请到 Mosaic 恢复后查看。' : '素材库中已有这份文件，可清除搜索和格式筛选后查看。';
   return { ok: true, imported, duplicates, existingAssets, message, status: inTrash ? 'warning' : 'success',
     assetIds: Array.isArray(result.assetIds) ? result.assetIds.filter(id => typeof id === 'string').slice(0, 20) : [],
     ...(typeof result.libraryRoot === 'string' ? { libraryRoot: safeText(result.libraryRoot, 4096) } : {}) };
@@ -204,9 +205,9 @@ async function capture(input, sender) {
     activeStatusId = requestId;
     const name = body.name || body.title || '网页素材';
     await recordCapture({ requestId, ok: false, pending: true, status: 'working', phase: 'connecting', at: Date.now(), name,
-      message: '正在连接桌面拾图，尚未保存。' });
+      message: '正在连接桌面 Mosaic，尚未保存。' });
     let connection = await ensureConnection();
-    if (!connection.status.ready) throw issue('请先在桌面拾图中选择或新建素材库。', 'LIBRARY_NOT_READY');
+    if (!connection.status.ready) throw issue('请先在桌面 Mosaic 中选择或新建素材库。', 'LIBRARY_NOT_READY');
     const message = body.dataBase64 ? '正在写入素材库，等待保存确认…' : '正在下载并写入素材库，等待保存确认…';
     await recordCapture({ requestId, ok: false, pending: true, status: 'working', phase: 'saving', at: Date.now(), name, message });
     await notifyTab(sender?.tab?.id, sender?.frameId, message);
@@ -215,7 +216,7 @@ async function capture(input, sender) {
     catch (error) {
       if (!['UNAUTHORIZED', 'CONNECTION_FAILED'].includes(error.code)) throw error;
       connection = await ensureConnection(true);
-      if (!connection.status.ready) throw issue('请先在桌面拾图中选择或新建素材库。', 'LIBRARY_NOT_READY');
+      if (!connection.status.ready) throw issue('请先在桌面 Mosaic 中选择或新建素材库。', 'LIBRARY_NOT_READY');
       result = await localRequest('/v1/capture', body, connection.config, CAPTURE_TIMEOUT);
     }
     const confirmed = captureResult(result);
@@ -253,7 +254,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 function createMenu() {
   chrome.contextMenus.removeAll(() => {
-    chrome.contextMenus.create({ id: MENU_ID, title: '保存到拾图', contexts: ['image', 'video'], documentUrlPatterns: ['http://*/*', 'https://*/*'] }, () => void chrome.runtime.lastError);
+    chrome.contextMenus.create({ id: MENU_ID, title: '保存到 Mosaic', contexts: ['image', 'video'], documentUrlPatterns: ['http://*/*', 'https://*/*'] }, () => void chrome.runtime.lastError);
   });
 }
 function initialize() { createMenu(); ensureConnection().catch(() => {}); }

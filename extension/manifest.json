@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "拾图采集助手",
-  "version": "0.11.1",
-  "description": "按住 Alt 并右键点击网页图片或直链视频，保存到本机拾图素材库。",
+  "name": "Mosaic 采集助手",
+  "version": "0.11.2",
+  "description": "按住 Alt 并右键点击网页图片或直链视频，保存到本机 Mosaic 素材库。",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAhQ17MPwt3PTniXaak0vQiqAG4PfUAyB+CbZfXbYRfGq6ID98tktRMEf7om3Hl4HyHMVj0Wga/uvYg+7zFT7SJ0b17Q95m8hgxBGqHx88NWZaaTQIzFJRFB5ua4QbAAkB+3owrT+f9XUuZ8OfLPQfe+bA9Fe6L/wY01OoaifpuTh9nj0/V7Iyb01WsZ8X59DAQYvG/btxw5u3LFb3OrzV3L+LGZZfEMJaTpN31CoOZhkpYYeBobGZv3rDhL/LTVHbb34obNcHtm01Vej/sLuUWsTxklAJYP6bFKMQGy7zkZoNmkqmaL6qZ9UgEW/paloRGIfQX0oezInXb631U5K7gwIDAQAB",
   "permissions": ["storage", "contextMenus"],
   "host_permissions": ["http://127.0.0.1/*"],
@@ -14,6 +14,6 @@
     "match_about_blank": true,
     "run_at": "document_start"
   }],
-  "action": { "default_title": "拾图采集助手", "default_popup": "popup.html", "default_icon": "icon.png" },
+  "action": { "default_title": "Mosaic 采集助手", "default_popup": "popup.html", "default_icon": "icon.png" },
   "icons": { "16": "icon.png", "48": "icon.png", "128": "icon.png" }
 }
