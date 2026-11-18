@@ -49,6 +49,7 @@ async function worker({ fetchImpl, initial = {}, port = 38475, storageWriteFailu
 
 async function content({ fetchImpl, mediaUrl = sourceUrl, pageUrl = 'https://frame.example/item', kind = 'image',
   posterOverlay = false, pointerlessVideo = false, unrelatedBackground = false, protectedVideo = false, siteResolvers = {},
+  hangFileReader = false, deepVideoOverlay = false, dialogOverlay = false, dialogOutsideVideo = false, fullscreen = false,
   reply = { ok: true, imported: 1, duplicates: 0, assetIds: ['new-asset'] } } = {}) {
   const nodes = [], events = new Map(), messages = [], fetches = [], timers = new Map();
   let nextTimer = 0;
@@ -56,11 +57,18 @@ async function content({ fetchImpl, mediaUrl = sourceUrl, pageUrl = 'https://fra
     constructor(tag) { this.tagName = tag.toUpperCase(); this.style = {}; this.attributes = {}; this.children = []; this.isConnected = false; this.listeners = new Map(); nodes.push(this); }
     setAttribute(key, value) { this.attributes[key] = String(value); }
     getAttribute(key) { return this.attributes[key] || null; }
+    removeAttribute(key) { delete this.attributes[key]; if (key === 'value') delete this.value; }
     append(...children) { for (const child of children) { this.children.push(child); child.parentElement = this; child.isConnected = this.isConnected; } }
     appendChild(child) { this.append(child); return child; }
     attachShadow() { return new Element('shadow'); }
     addEventListener(type, listener) { this.listeners.set(type, listener); }
-    closest() { return null; }
+    closest(selector) {
+      if (selector.replace(/\s/g, '') !== 'dialog,[role="dialog"]') return null;
+      for (let node = this; node; node = node.parentElement) {
+        if (node.tagName === 'DIALOG' || node.getAttribute('role') === 'dialog') return node;
+      }
+      return null;
+    }
     querySelector() { return null; }
     querySelectorAll(selector) {
       if (selector === ':scope > video, :scope > * > video') {
@@ -86,8 +94,24 @@ async function content({ fetchImpl, mediaUrl = sourceUrl, pageUrl = 'https://fra
     media.setAttribute('poster', sourceUrl);
     wrapper.append(poster);
   }
-  wrapper.append(media);
-  const pointStack = posterOverlay ? pointerlessVideo ? [poster] : [poster, media] : [media];
+  let hitPath = [poster, wrapper, body, documentElement];
+  if (deepVideoOverlay) {
+    const nestedMedia = new Element('div');
+    const outerOverlay = new Element('div');
+    const innerOverlay = new Element('div');
+    const surface = new Element('span');
+    const overlayRoot = dialogOutsideVideo ? new Element('div') : wrapper;
+    if (dialogOverlay || dialogOutsideVideo) overlayRoot.setAttribute('role', 'dialog');
+    if (dialogOutsideVideo) body.append(overlayRoot);
+    wrapper.append(nestedMedia);
+    overlayRoot.append(outerOverlay);
+    nestedMedia.append(media);
+    outerOverlay.append(innerOverlay);
+    innerOverlay.append(surface);
+    hitPath = [surface, innerOverlay, outerOverlay, overlayRoot, body, documentElement];
+  } else wrapper.append(media);
+  const pointStack = deepVideoOverlay ? [hitPath[0]]
+    : posterOverlay ? pointerlessVideo ? [poster] : [poster, media] : [media];
   if (unrelatedBackground) {
     const backdrop = new Element('video');
     backdrop.currentSrc = videoUrl;
@@ -95,30 +119,50 @@ async function content({ fetchImpl, mediaUrl = sourceUrl, pageUrl = 'https://fra
     pointStack.push(backdrop);
   }
   const document = { baseURI: pageUrl, title: 'Frame page', documentElement, body,
+    fullscreenElement: fullscreen ? wrapper : null,
     createElement: tag => new Element(tag), elementsFromPoint: () => pointStack,
     querySelectorAll: selector => selector === 'video' ? nodes.filter(node => node.tagName === 'VIDEO') : [],
     querySelector: selector => selector === '[data-shitu-toast]' ? nodes.find(node => node.attributes['data-shitu-toast'] !== undefined) : null };
   let listener;
   class FileReader {
-    readAsDataURL(blob) { blob.arrayBuffer().then(buffer => { this.result = `data:${blob.type};base64,${Buffer.from(buffer).toString('base64')}`; this.onload?.(); }, error => { this.error = error; this.onerror?.(); }); }
+    readAsDataURL(blob) {
+      if (!hangFileReader) blob.arrayBuffer().then(buffer => {
+        this.result = `data:${blob.type};base64,${Buffer.from(buffer).toString('base64')}`; this.onload?.();
+      }, error => { this.error = error; this.onerror?.(); });
+    }
   }
   const context = { Element, document, FileReader, URL, Blob, Uint8Array, ArrayBuffer, AbortController, AbortSignal,
     location: { href: document.baseURI }, performance: { now: () => Date.now() },
     getComputedStyle: () => ({ backgroundImage: 'none' }),
     setTimeout: (callback, delay) => { const id = ++nextTimer; timers.set(id, { callback, delay }); return id; }, clearTimeout: id => timers.delete(id),
     chrome: { runtime: { id: extensionId, getManifest: () => ({ version: '0.11.1' }),
-      sendMessage: async message => { messages.push(message); return typeof reply === 'function' ? reply(message) : reply; },
+      sendMessage: message => { messages.push(message); return Promise.resolve(typeof reply === 'function' ? reply(message) : reply); },
       onMessage: { addListener: callback => { listener = callback; } } } },
     fetch: async (url, options) => { fetches.push({ url, options }); return fetchImpl ? fetchImpl(url, options) : new Response(bytes, { headers: { 'Content-Type': 'image/png' } }); }
   };
   Object.assign(context, siteResolvers);
-  context.window = { addEventListener: (type, listener) => events.set(type, listener) };
+  context.window = { addEventListener: (type, listener) => events.set(type, [...(events.get(type) || []), listener]) };
   vm.runInNewContext(await fs.readFile(path.join(root, 'extension/content.js'), 'utf8'), context, { filename: 'extension/content.js' });
-  function contextMenu(options = {}) {
-    events.get('contextmenu')({ isTrusted: true, altKey: true, button: 2, clientX: 20, clientY: 20,
-      composedPath: () => [poster, wrapper, body, documentElement], preventDefault() {}, stopImmediatePropagation() {}, ...options });
+  function gesture(type, options = {}) {
+    const state = { prevented: false, stopped: false };
+    const event = { isTrusted: true, altKey: true, button: 2, clientX: 20, clientY: 20,
+      composedPath: () => hitPath, preventDefault() { state.prevented = true; }, stopImmediatePropagation() { state.stopped = true; }, ...options };
+    for (const listener of events.get(type) || []) {
+      listener(event);
+      if (state.stopped) break;
+    }
+    return state;
   }
-  return { nodes, messages, fetches, timers, contextMenu,
+  const contextMenu = options => gesture('contextmenu', options);
+  return { nodes, messages, fetches, timers, contextMenu, pointerDown: options => gesture('pointerdown', options),
+    click: options => gesture('click', { button: 0, ...options }),
+    fullscreenRoot: wrapper, documentElement,
+    exitFullscreen() { document.fullscreenElement = null; gesture('fullscreenchange'); },
+    readToast() {
+      const node = document.querySelector('[data-shitu-toast]');
+      return node ? { status: node.getAttribute('data-status'), message: node.getAttribute('aria-label') } : null;
+    },
+    notify(message) { listener({ type: 'shitu:status', ...message }, { id: extensionId }, () => {}); },
     resolveVideo(pageUrl) {
       return new Promise(resolve => listener({ type: 'shitu:resolve-media', browserVideo: true, media: { url: mediaUrl, kind: 'video', pageUrl } },
         { id: extensionId }, resolve));
@@ -135,6 +179,194 @@ async function content({ fetchImpl, mediaUrl = sourceUrl, pageUrl = 'https://fra
     }
   };
 }
+
+async function until(read, message, timeout = 1300) {
+  const end = Date.now() + timeout;
+  while (Date.now() < end) {
+    const progress = read();
+    if (progress) return progress;
+    await new Promise(resolve => setTimeout(resolve, 3));
+  }
+  throw new Error(message);
+}
+
+test('hanging browser FileReader times out and replaces the reading banner', async () => {
+  const instance = await content({ mediaUrl: 'blob:https://frame.example/local', hangFileReader: true });
+  const saving = instance.capture();
+  const timeout = await until(() => instance.readToast()?.message.includes('正在整理浏览器读取的素材') &&
+    [...instance.timers.values()].find(timer => timer.delay === 15000), 'Browser byte reader never reached the stalled encoding');
+  timeout.callback();
+  const final = await saving;
+  assert.equal(final.status, 'error');
+  assert.match(final.message, /浏览器读取素材超时/);
+  assert.ok(instance.messages.every(message => message.type !== 'shitu:capture'));
+});
+
+test('a synchronous extension restart error cannot prevent the page from showing failure', async () => {
+  const instance = await content({
+    mediaUrl: 'blob:https://frame.example/local',
+    fetchImpl: async () => { throw new Error('读取失败'); },
+    reply: () => { throw new Error('Extension context invalidated'); }
+  });
+  const final = await instance.capture();
+  assert.equal(final.status, 'error');
+  assert.match(final.message, /读取失败/);
+});
+
+test('the page accepts only current-task progress and gives an explicit message if the desktop receipt never arrives', async () => {
+  const instance = await content({ reply: () => new Promise(() => {}) });
+  const saving = instance.capture();
+  const request = await until(() => instance.messages.find(message => message.type === 'shitu:capture'), 'Capture did not reach the worker');
+  assert.match(instance.readToast().message, /连接桌面/);
+  assert.match(request.clientCaptureId, /^\d{13}-\d+$/);
+  instance.notify({ clientCaptureId: '1000000000000-3', message: '另一项任务', status: 'working' });
+  assert.match(instance.readToast().message, /连接桌面/);
+  instance.notify({ clientCaptureId: request.clientCaptureId, message: '正在下载 · 25%', status: 'working',
+    progress: { receivedBytes: 1024, totalBytes: 4096 } });
+  assert.match(instance.readToast().message, /25%/);
+  assert.equal(instance.nodes.find(node => node.tagName === 'PROGRESS').value, 25);
+  const timeout = [...instance.timers.values()].find(timer => timer.delay === 320000);
+  assert.ok(timeout);
+  timeout.callback();
+  const final = await saving;
+  assert.equal(final.status, 'error');
+  assert.match(final.message, /未收到保存确认/);
+  instance.notify({ clientCaptureId: request.clientCaptureId, message: '昨天的进度', status: 'working' });
+  assert.match(instance.readToast().message, /未收到保存确认/);
+});
+
+test('trusted Vimeo Alt+right owns a deep overlay gesture before the player menu and submits once', async () => {
+  const instance = await content({ kind: 'video', pageUrl: 'https://player.vimeo.com/video/1234',
+    mediaUrl: 'https://vod.vimeocdn.com/fixture.mp4', deepVideoOverlay: true });
+
+  assert.deepEqual(instance.pointerDown({ isTrusted: false }), { prevented: false, stopped: false });
+  assert.equal(instance.readToast(), null);
+  assert.deepEqual(instance.pointerDown({ clientX: 200 }), { prevented: false, stopped: false });
+  assert.deepEqual(instance.contextMenu({ clientX: 200 }), { prevented: false, stopped: false });
+  assert.equal(instance.readToast(), null);
+
+  assert.deepEqual(instance.pointerDown(), { prevented: true, stopped: true });
+  assert.match(instance.readToast().message, /正在识别视频来源/);
+  assert.deepEqual(instance.contextMenu({ altKey: false }), { prevented: true, stopped: true });
+  await until(() => instance.readToast()?.status === 'success', 'Video capture did not finish');
+  assert.equal(instance.messages.filter(item => item.type === 'shitu:capture').length, 1);
+
+  assert.deepEqual(instance.pointerDown({ altKey: false }), { prevented: false, stopped: false });
+  assert.deepEqual(instance.contextMenu({ altKey: false }), { prevented: true, stopped: false });
+  assert.equal(instance.messages.filter(item => item.type === 'shitu:capture').length, 1);
+});
+
+test('Instagram and X detail pages capture the video under a deep overlay once from Alt+pointerdown', async t => {
+  const pages = [
+    { name: 'Instagram reel', pageUrl: 'https://www.instagram.com/reel/Selected1/', adapter: 'MosaicInstagramVideo' },
+    { name: 'Instagram video post', pageUrl: 'https://www.instagram.com/p/Selected1/', adapter: 'MosaicInstagramVideo' },
+    { name: 'X status', pageUrl: 'https://x.com/creator/status/1234567890123456789', adapter: 'MosaicXVideo' },
+    { name: 'Twitter status', pageUrl: 'https://twitter.com/creator/status/1234567890123456789', adapter: 'MosaicXVideo' },
+    { name: 'X canonical status', pageUrl: 'https://x.com/i/web/status/1234567890123456789', adapter: 'MosaicXVideo' }
+  ];
+  for (const { name, pageUrl, adapter } of pages) await t.test(name, async () => {
+    let resolutions = 0;
+    const origin = new URL(pageUrl).origin;
+    const instance = await content({ kind: 'video', pageUrl, mediaUrl: `blob:${origin}/selected-video`, deepVideoOverlay: true,
+      siteResolvers: { [adapter]: ({ video, page }) => {
+        resolutions++;
+        assert.equal(video.tagName, 'VIDEO');
+        assert.equal(page.href, pageUrl);
+        return { url: videoUrl, pageUrl };
+      } } });
+    assert.deepEqual(instance.pointerDown({ isTrusted: false }), { prevented: false, stopped: false });
+    assert.equal(instance.readToast(), null);
+    assert.deepEqual(instance.pointerDown({ clientX: 200 }), { prevented: false, stopped: false });
+    assert.equal(instance.readToast(), null);
+
+    assert.deepEqual(instance.pointerDown(), { prevented: true, stopped: true });
+    assert.match(instance.readToast().message, /正在识别视频来源/);
+    assert.deepEqual(instance.contextMenu({ altKey: false }), { prevented: true, stopped: true });
+    await until(() => instance.readToast()?.status === 'success', 'Alt+right detail-page video capture did not finish');
+    const submitted = instance.messages.filter(item => item.type === 'shitu:capture');
+    assert.equal(submitted.length, 1);
+    assert.equal(resolutions, 1);
+    assert.equal(submitted[0].media.kind, 'video');
+    assert.equal(submitted[0].media.url, videoUrl);
+    assert.equal(submitted[0].media.pageUrl, pageUrl);
+    assert.equal(instance.fetches.length, 0, 'The temporary player blob must not be fetched after resolving the full video.');
+  });
+});
+
+test('Instagram and X feed pages do not broadly claim a deeply covered background video', async t => {
+  for (const pageUrl of ['https://www.instagram.com/reels/', 'https://www.instagram.com/', 'https://x.com/home', 'https://twitter.com/explore']) {
+    await t.test(pageUrl, async () => {
+      const instance = await content({ kind: 'video', pageUrl, mediaUrl: videoUrl, deepVideoOverlay: true });
+      assert.deepEqual(instance.pointerDown(), { prevented: false, stopped: false });
+      assert.deepEqual(instance.contextMenu(), { prevented: false, stopped: false });
+      assert.equal(instance.readToast(), null);
+      assert.equal(instance.messages.length, 0);
+    });
+  }
+});
+
+test('Instagram Alt+right captures a video under a deep overlay inside its own dialog', async () => {
+  const pageUrl = 'https://www.instagram.com/sciencegirllife/reel/Df2252EMmtO/';
+  let resolutions = 0;
+  const instance = await content({ kind: 'video', pageUrl,
+    mediaUrl: 'blob:https://www.instagram.com/selected-dialog-video', deepVideoOverlay: true, dialogOverlay: true,
+    siteResolvers: { MosaicInstagramVideo: ({ video }) => {
+      resolutions++;
+      assert.equal(video.closest('dialog, [role="dialog"]').getAttribute('role'), 'dialog');
+      return { url: videoUrl, pageUrl };
+    } } });
+
+  assert.deepEqual(instance.pointerDown(), { prevented: true, stopped: true });
+  assert.deepEqual(instance.contextMenu(), { prevented: true, stopped: true });
+  await until(() => instance.readToast()?.status === 'success', 'Instagram dialog video did not finish capturing');
+  const submitted = instance.messages.filter(item => item.type === 'shitu:capture');
+  assert.equal(resolutions, 1);
+  assert.equal(submitted.length, 1);
+  assert.equal(submitted[0].media.kind, 'video');
+  assert.equal(submitted[0].media.url, videoUrl);
+  assert.equal(instance.fetches.length, 0);
+});
+
+test('Instagram Alt+right on a dialog cannot capture the video behind that dialog', async () => {
+  const instance = await content({ kind: 'video', pageUrl: 'https://www.instagram.com/sciencegirllife/reel/Df2252EMmtO/',
+    mediaUrl: videoUrl, deepVideoOverlay: true, dialogOutsideVideo: true,
+    siteResolvers: { MosaicInstagramVideo: () => { throw new Error('A covered background video must not be resolved'); } } });
+
+  assert.deepEqual(instance.pointerDown(), { prevented: false, stopped: false });
+  assert.deepEqual(instance.contextMenu(), { prevented: false, stopped: false });
+  assert.equal(instance.readToast(), null);
+  assert.equal(instance.messages.length, 0);
+  assert.equal(instance.fetches.length, 0);
+});
+
+test('Vimeo save owns the trusted click before page handlers and shows feedback inside fullscreen', async () => {
+  const instance = await content({ kind: 'video', pageUrl: 'https://player.vimeo.com/video/1234',
+    mediaUrl: 'https://vod.vimeocdn.com/fixture.mp4', deepVideoOverlay: true, fullscreen: true });
+  const activeMenu = () => instance.nodes.find(node => node.isConnected && Object.hasOwn(node.attributes, 'data-shitu-video-menu'));
+  const ordinary = { altKey: false };
+  instance.contextMenu({ ...ordinary, isTrusted: false });
+  assert.equal(activeMenu(), undefined);
+  assert.deepEqual(instance.contextMenu(ordinary), { prevented: true, stopped: false });
+  assert.equal(instance.readToast(), null);
+  assert.equal(instance.messages.length, 0);
+  const button = instance.nodes.find(node => node.tagName === 'BUTTON' && node.textContent === '保存到 Mosaic');
+  const menu = activeMenu();
+  assert.ok(menu && button);
+  assert.equal(menu.parentElement, instance.fullscreenRoot);
+  const menuPath = () => [menu, instance.fullscreenRoot, instance.documentElement];
+  assert.deepEqual(instance.click({ isTrusted: false, composedPath: menuPath }), { prevented: false, stopped: false });
+  assert.equal(instance.messages.length, 0);
+  assert.deepEqual(instance.pointerDown({ button: 0, altKey: false, composedPath: menuPath }), { prevented: false, stopped: true });
+  assert.deepEqual(instance.click({ composedPath: menuPath }), { prevented: true, stopped: true });
+  assert.equal(activeMenu(), undefined);
+  const toast = instance.nodes.find(node => Object.hasOwn(node.attributes, 'data-shitu-toast'));
+  assert.equal(toast.parentElement, instance.fullscreenRoot);
+  assert.match(instance.readToast().message, /正在识别视频来源/);
+  instance.exitFullscreen();
+  assert.equal(toast.parentElement, instance.documentElement);
+  await until(() => instance.readToast()?.status === 'success', 'Mosaic save button did not finish');
+  assert.equal(instance.messages.filter(item => item.type === 'shitu:capture').length, 1);
+});
 
 test('capture worker preserves the clicked iframe source page instead of replacing it with the top page', async () => {
   const instance = await worker();
@@ -156,6 +388,15 @@ test('a selected social video keeps its individual post URL without trusting cro
     assert.equal(result.ok, true);
     assert.equal(instance.requests.find(request => request.route === '/v1/capture').body.pageUrl, expected);
   }
+});
+
+test('Pinterest SPA captures preserve the selected Pin instead of the original document route', async () => {
+  const selected = 'https://ca.pinterest.com/pin/939845016015625153/';
+  const instance = await worker();
+  const result = await instance.send({ type: 'shitu:capture', media: { kind: 'video', url: videoUrl, socialPageUrl: selected } },
+    { id: extensionId, url: 'https://ca.pinterest.com/pin/939845016006277613/', tab: { id: 5 } });
+  assert.equal(result.ok, true);
+  assert.equal(instance.requests.find(request => request.route === '/v1/capture').body.pageUrl, selected);
 });
 
 test('a site video file replaces only the selected blob and keeps the existing collector request', async () => {
@@ -184,6 +425,32 @@ test('a site video file replaces only the selected blob and keeps the existing c
   assert.equal(request.media.social, undefined);
 });
 
+test('starting a selected player may replace its same-origin blob while preserving the poster identity', async () => {
+  for (const [next, expected] of [['blob:https://x.com/started', 'success'], ['blob:https://other.example/changed', 'error']]) {
+    const instance = await content({ kind: 'video', pageUrl: 'https://x.com/user/status/123',
+      mediaUrl: 'blob:https://x.com/loading', posterOverlay: true,
+      siteResolvers: { MosaicXVideo: ({ video }) => {
+        video.currentSrc = next;
+        return { url: videoUrl };
+      } } });
+    assert.equal((await instance.capture()).status, expected);
+    assert.equal(instance.messages.some(message => message.type === 'shitu:capture'), expected === 'success');
+  }
+});
+
+test('a verified selected source can finish after X rebuilds its player without changing the saved video', async () => {
+  const resolver = ({ video }) => {
+    video.isConnected = false;
+    video.currentSrc = 'blob:https://x.com/rebuilt';
+    return { url: videoUrl };
+  };
+  resolver.matchesSelection = (found, selected) => found.url === videoUrl && selected.url === 'blob:https://x.com/selected';
+  const instance = await content({ kind: 'video', pageUrl: 'https://x.com/user/status/123',
+    mediaUrl: 'blob:https://x.com/selected', siteResolvers: { MosaicXVideo: resolver } });
+  assert.equal((await instance.capture()).status, 'success');
+  assert.equal(instance.messages.find(message => message.type === 'shitu:capture').media.url, videoUrl);
+});
+
 test('a protected video never enters a site adapter and a Vimeo embed can surface the original page', async () => {
   const protectedResult = await content({
     kind: 'video', pageUrl: 'https://x.com/user/status/123', protectedVideo: true,
@@ -199,6 +466,179 @@ test('a protected video never enters a site adapter and a Vimeo embed can surfac
   assert.equal((await vimeo.capture()).status, 'error');
   assert.equal(vimeo.nodes.find(node => node.href === 'https://vimeo.com/123')?.style.display, 'block');
   assert.ok(vimeo.messages.every(message => message.type !== 'shitu:capture'));
+});
+
+test('a selected regional Pinterest player sends its full MP4 and canonical Pin to the collector', async () => {
+  const page = 'https://ca.pinterest.com/pin/701224604474154183/';
+  const loaded = `${page}?share=fixture`;
+  const source = 'https://v1.pinimg.com/videos/mc/720p/8c/ee/07/8cee07e7e94db44e5f2bbd5c77da2425.mp4';
+  const sender = { id: extensionId, url: loaded, tab: { id: 12 } };
+  const backend = await worker();
+  const instance = await content({ kind: 'video', pageUrl: loaded,
+    mediaUrl: 'blob:https://ca.pinterest.com/video', deepVideoOverlay: true,
+    siteResolvers: { MosaicPinterestVideo: ({ page: current, video }) => {
+      assert.equal(current.href, loaded);
+      assert.equal(video.tagName, 'VIDEO');
+      return { url: source, name: 'FieldParticle', pageUrl: page };
+    } }, reply: message => backend.send(message, sender) });
+  assert.deepEqual(instance.pointerDown(), { prevented: true, stopped: true });
+  assert.deepEqual(instance.contextMenu({ altKey: false }), { prevented: true, stopped: true });
+  await until(() => instance.readToast()?.status === 'success', 'Pinterest capture did not finish');
+  const requests = backend.requests.filter(request => request.route === '/v1/capture');
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].body.url, source);
+  assert.equal(requests[0].body.pageUrl, page);
+  assert.equal(requests[0].body.name, 'FieldParticle');
+  assert.equal(requests[0].body.dataBase64, undefined);
+  assert.equal(requests[0].body.playback, undefined);
+});
+
+test('Pinterest Alt+right awaits its async source lookup and never fetches the MediaSource blob', async () => {
+  const pageUrl = 'https://ca.pinterest.com/pin/701224604474154183/';
+  const source = 'https://v1.pinimg.com/videos/mc/720p/8c/ee/07/8cee07e7e94db44e5f2bbd5c77da2425.mp4';
+  let finishLookup;
+  let lookups = 0;
+  const resolver = () => { throw new Error('Capture must use the async source lookup'); };
+  resolver.resolveAsync = ({ page, video }) => {
+    lookups++;
+    assert.equal(page.href, pageUrl);
+    assert.equal(video.tagName, 'VIDEO');
+    return new Promise(resolve => { finishLookup = resolve; });
+  };
+  const instance = await content({ kind: 'video', pageUrl,
+    mediaUrl: 'blob:https://ca.pinterest.com/selected-video',
+    siteResolvers: { MosaicPinterestVideo: resolver } });
+  instance.pointerDown();
+  await until(() => finishLookup, 'Pinterest source lookup never started');
+  assert.equal(instance.messages.length, 0);
+  assert.equal(instance.fetches.length, 0);
+  assert.match(instance.readToast().message, /正在识别视频来源/);
+  finishLookup({ url: source, name: 'FieldParticle', pageUrl });
+  await until(() => instance.readToast()?.status === 'success', 'Pinterest async source did not save');
+  assert.equal(lookups, 1);
+  assert.equal(instance.fetches.length, 0);
+  const [capture] = instance.messages.filter(item => item.type === 'shitu:capture');
+  assert.equal(capture.media.url, source);
+  assert.equal(capture.media.socialPageUrl, pageUrl);
+  assert.equal(capture.media.dataBase64, undefined);
+});
+
+test('Pinterest async lookup failures are shown without attempting the blob or submitting a capture', async () => {
+  const message = '未找到这个 Pin 可采集的完整视频，请刷新当前页面后重试。';
+  const resolver = () => null;
+  resolver.resolveAsync = async () => ({ error: message });
+  const instance = await content({ kind: 'video', pageUrl: 'https://ca.pinterest.com/pin/701224604474154183/',
+    mediaUrl: 'blob:https://ca.pinterest.com/selected-video',
+    siteResolvers: { MosaicPinterestVideo: resolver } });
+  const result = await instance.capture();
+  assert.equal(result.status, 'error');
+  assert.equal(result.message, `Mosaic · ${message}`);
+  assert.equal(instance.fetches.length, 0);
+  assert.ok(instance.messages.every(item => item.type !== 'shitu:capture'));
+});
+
+test('Pinterest cannot save a stale async result after its selected video changes', async () => {
+  for (const change of [video => { video.isConnected = false; },
+    video => { video.currentSrc = 'blob:https://ca.pinterest.com/another-video'; },
+    video => { video.mediaKeys = {}; }, video => { video.srcObject = {}; }]) {
+    let finishLookup, selectedVideo;
+    const resolver = () => null;
+    resolver.resolveAsync = ({ video }) => {
+      selectedVideo = video;
+      return new Promise(resolve => { finishLookup = resolve; });
+    };
+    const instance = await content({ kind: 'video', pageUrl: 'https://ca.pinterest.com/pin/701224604474154183/',
+      mediaUrl: 'blob:https://ca.pinterest.com/selected-video',
+      siteResolvers: { MosaicPinterestVideo: resolver } });
+    const saving = instance.capture();
+    await until(() => finishLookup, 'Pinterest source lookup never started');
+    change(selectedVideo);
+    finishLookup({ url: 'https://v1.pinimg.com/videos/mc/720p/8c/ee/07/8cee07e7e94db44e5f2bbd5c77da2425.mp4' });
+    const result = await saving;
+    assert.equal(result.status, 'error');
+    assert.match(result.message, /页面或视频已切换/);
+    assert.equal(instance.fetches.length, 0);
+    assert.ok(instance.messages.every(item => item.type !== 'shitu:capture'));
+  }
+});
+
+test('the right-click option sends the video for a selected Pinterest poster', async () => {
+  const page = 'https://ca.pinterest.com/pin/123456/';
+  const source = 'https://v1.pinimg.com/videos/mc/720p/8c/ee/07/8cee07e7e94db44e5f2bbd5c77da2425.mp4';
+  const instance = await content({ kind: 'image', pageUrl: page,
+    siteResolvers: { MosaicPinterestVideo: ({ video, path }) => {
+      assert.equal(video, null);
+      assert.equal(path[0].tagName, 'IMG');
+      return { url: source, name: 'Video from poster', pageUrl: page };
+    } } });
+  instance.contextMenu({ altKey: false });
+  const menu = instance.nodes.find(node => node.isConnected && Object.hasOwn(node.attributes, 'data-shitu-video-menu'));
+  assert.ok(menu);
+  assert.equal(instance.messages.length, 0);
+  instance.click({ composedPath: () => [menu, instance.documentElement] });
+  await until(() => instance.readToast()?.status === 'success', 'Pinterest poster option did not save the video');
+  const [capture] = instance.messages.filter(item => item.type === 'shitu:capture');
+  assert.equal(capture.media.kind, 'video');
+  assert.equal(capture.media.url, source);
+  assert.equal(capture.media.socialPageUrl, page);
+  assert.equal(instance.fetches.length, 0);
+});
+
+test('Vimeo Alt-right-click forwards the player HLS source with the canonical video page', async () => {
+  const siteResolvers = { URL };
+  vm.runInNewContext(await fs.readFile(path.join(root, 'extension/social-vimeo.js'), 'utf8'), siteResolvers);
+  const pageUrl = 'https://player.vimeo.com/video/1234?app_id=fixture';
+  const source = 'https://vod.vimeocdn.com/selected/master.m3u8';
+  const sender = { id: extensionId, url: pageUrl, tab: { id: 13 } };
+  const backend = await worker({ fetchImpl: async request => Response.json(request.route === '/v1/capture'
+    ? { ok: true, imported: 1, duplicates: 0 }
+    : { ok: true, app: '拾图', version: '0.29.8', ready: true, vimeoPlayback: true }) });
+  const instance = await content({ kind: 'video', pageUrl, mediaUrl: source, siteResolvers, reply: message => backend.send(message, sender) });
+  assert.equal((await instance.capture()).status, 'success');
+  assert.equal(instance.fetches.length, 0);
+  const capture = backend.requests.find(request => request.route === '/v1/capture').body;
+  assert.equal(capture.playback, 'hls');
+  assert.equal(capture.url, source);
+  assert.equal(capture.pageUrl, 'https://vimeo.com/1234');
+  assert.equal(capture.dataBase64, undefined);
+});
+
+test('Vimeo playback requires a verified source and compatible desktop and never retries with webpage credentials', async () => {
+  const source = 'https://vod.vimeocdn.com/selected/master.m3u8';
+  const sender = { id: extensionId, url: 'https://vimeo.com/1234', tab: { id: 13 } };
+  const media = { kind: 'video', playback: 'hls', url: source, pageUrl: sender.url };
+  const scenarios = [
+    { support: true, page: 'https://example.net/1234', attempts: 0 },
+    { support: true, source: 'https://vod.vimeocdn.com.other.test/selected/master.m3u8', attempts: 0 },
+    { support: false, attempts: 0 },
+    { support: true, attempts: 1 }
+  ];
+  for (const scenario of scenarios) {
+    const instance = await worker({ fetchImpl: async request => request.route === '/v1/capture'
+      ? Response.json({ ok: false, code: 'VIDEO_BROWSER_READ', error: '网站返回 HTTP 401' }, { status: 400 })
+      : Response.json({ ok: true, app: '拾图', version: '0.29.8', ready: true, vimeoPlayback: scenario.support }) });
+    const result = await instance.send({ type: 'shitu:capture', media: { ...media, url: scenario.source || media.url } },
+      { ...sender, url: scenario.page || sender.url });
+    assert.equal(result.ok, false);
+    assert.equal(instance.requests.filter(request => request.route === '/v1/capture').length, scenario.attempts);
+    assert.equal(instance.tabMessages.some(({ message }) => message.type === 'shitu:resolve-media'), false);
+  }
+});
+
+test('Vimeo playback accepts an authorized hash URL and preserves the selected SPA video identity', async () => {
+  const scenarios = [
+    { sender: 'https://player.vimeo.com/video/1234?h=published-hash', socialPageUrl: undefined, expected: 'https://vimeo.com/1234' },
+    { sender: 'https://vimeo.com/1234', socialPageUrl: 'https://vimeo.com/5678', expected: 'https://vimeo.com/5678' }
+  ];
+  for (const scenario of scenarios) {
+    const instance = await worker({ fetchImpl: async request => Response.json(request.route === '/v1/capture'
+      ? { ok: true, imported: 1, duplicates: 0 } : { ok: true, app: '拾图', version: '0.29.8', ready: true, vimeoPlayback: true }) });
+    const result = await instance.send({ type: 'shitu:capture', media: {
+      kind: 'video', playback: 'hls', url: 'https://vod.vimeocdn.com/selected/master.m3u8', socialPageUrl: scenario.socialPageUrl
+    } }, { id: extensionId, url: scenario.sender, tab: { id: 13 } });
+    assert.equal(result.ok, true);
+    assert.equal(instance.requests.find(request => request.route === '/v1/capture').body.pageUrl, scenario.expected);
+  }
 });
 
 test('capture destinations remember each library and confirmed locations require the originating document', async () => {

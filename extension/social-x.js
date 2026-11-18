@@ -8,6 +8,8 @@
   const scanned = new WeakSet();
   const media = new Map();
   const maxScriptSize = 2 * 1024 * 1024;
+  const maxPageSize = 8 * 1024 * 1024;
+  const pageTimeout = 8000;
 
   function httpsUrl(value, base) {
     try {
@@ -72,10 +74,23 @@
     try { record = JSON.parse(value); } catch { return; }
     if (!record || typeof record !== 'object') return;
     const queue = [record];
+    let cardBudget = maxScriptSize;
     while (queue.length) {
       const entry = queue.pop();
       if (!entry || typeof entry !== 'object') continue;
       if (entry.media_url_https || entry.preview_image_url) rememberRecord(entry);
+      // Website carousel cards carry their actual video records inside this
+      // named JSON string, rather than the post's ordinary media_entities2.
+      const cardText = entry.key === 'unified_card' && entry.value?.string_value;
+      if (typeof cardText === 'string' && cardText.length <= cardBudget) {
+        cardBudget -= cardText.length;
+        try {
+          const card = JSON.parse(cardText);
+          if (card?.media_entities && typeof card.media_entities === 'object' && !Array.isArray(card.media_entities)) {
+            queue.push(...Object.values(card.media_entities).slice(0, 80));
+          }
+        } catch {}
+      }
       for (const child of Object.values(entry)) if (child && typeof child === 'object') queue.push(child);
     }
   }
@@ -132,7 +147,16 @@
     return null;
   }
 
-  globalThis.MosaicXVideo = ({ document, page, video, path = [] }) => {
+  function selectedPost(page, video, path) {
+    const article = video?.closest?.('article');
+    const links = [...path, ...(article?.querySelectorAll?.('a[href]') || [])];
+    const posts = new Set(links.filter(node => node.tagName === 'A')
+      .map(node => postUrl(node.href || node.getAttribute?.('href'), page)).filter(Boolean));
+    if (posts.size) return posts.size === 1 ? posts.values().next().value : null;
+    return postUrl(page.href);
+  }
+
+  const resolve = ({ document, page, video, path = [] }) => {
     if (!pageHosts.has(page?.hostname)) return null;
     const player = localPlayer(video, path);
     if (!video && player) {
@@ -146,16 +170,95 @@
     if (video?.controlsList?.contains('nodownload')) return { error: '此 X 视频的下载已关闭。' };
     for (const script of document.querySelectorAll('script:not([src])')) readHydration(script);
     const current = videoVariant(video?.currentSrc || video?.getAttribute?.('src'));
-    const identity = posterFor(video, player) || current?.key || download?.key;
+    // Recycled players can retain the previous poster after binding a new
+    // complete video URL. The actual playable file identifies that selection.
+    const identity = current?.key || posterFor(video, player) || download?.key;
     if (!identity && !player) return null;
     const known = media.get(identity);
     if (known?.disabled) return { error: '此 X 视频的下载已关闭。' };
     const declared = known?.variants.reduce((best, item) => !best || item.bitrate > best.bitrate ? item : best, null);
     const source = (download?.key === identity && download) || declared ||
       (current?.key === identity && current) || (identity && observedVariant(identity, document));
-    if (source) return { url: source.url, pageUrl: known?.pageUrl || postUrl(page.href) || page.href };
+    if (source) return { url: source.url, pageUrl: selectedPost(page, video, path) || known?.pageUrl || page.href };
     return { error: '当前 X 帖文没有可读取的完整视频文件。可打开帖子详情后再试。' };
   };
+
+  resolve.matchesSelection = (found, snapshot) => {
+    const selected = videoVariant(snapshot?.url)?.key || posterKey(snapshot?.poster);
+    return Boolean(selected && videoVariant(found?.url)?.key === selected);
+  };
+
+  async function readPage(response, signal) {
+    if (Number(response.headers.get('content-length')) > maxPageSize || !response.body?.getReader) {
+      void response.body?.cancel().catch(() => {});
+      throw new Error('X 页面数据无法读取。');
+    }
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let size = 0, html = '';
+    try {
+      while (true) {
+        const part = await reader.read();
+        signal.throwIfAborted();
+        if (part.done) return html + decoder.decode();
+        size += part.value.byteLength;
+        if (size > maxPageSize) throw new Error('X 页面数据过大。');
+        html += decoder.decode(part.value, { stream: true });
+      }
+    } finally { void reader.cancel().catch(() => {}); }
+  }
+
+  // A timeline route change does not always leave the selected post's Relay
+  // response in the DOM. Recover only its own same-origin public HTML, then
+  // bind a complete MP4 to the clicked player's existing thumbnail identity.
+  resolve.resolveAsync = async context => {
+    const initial = resolve(context);
+    const { document, page, video, path = [] } = context;
+    if (initial?.url || !pageHosts.has(page?.hostname) || !video || video.mediaKeys || video.srcObject ||
+        video.controlsList?.contains('nodownload')) return initial;
+    const player = localPlayer(video, path);
+    const identity = videoVariant(video.currentSrc || video.getAttribute?.('src'))?.key || posterFor(video, player);
+    if (!identity || media.get(identity)?.disabled) return initial;
+    const post = selectedPost(page, video, path);
+    if (!post) return initial;
+    const address = new URL(new URL(post).pathname, page.origin).href;
+    const samePage = () => !document.defaultView?.location || document.defaultView.location.href === page.href;
+    const controller = new AbortController();
+    let timer;
+    try {
+      return await Promise.race([(async () => {
+        const response = await fetch(address, { credentials: 'same-origin', mode: 'same-origin', redirect: 'error',
+          headers: { Accept: 'text/html' }, signal: controller.signal });
+        if (response.status !== 200 || response.redirected || response.url !== address ||
+            !/^text\/html(?:;|$)/i.test(response.headers.get('content-type') || '')) {
+          void response.body?.cancel().catch(() => {});
+          return initial;
+        }
+        const html = await readPage(response, controller.signal);
+        controller.signal.throwIfAborted();
+        if (!samePage()) return { error: '页面已切换，请在当前视频上重新采集。' };
+        const template = document.createElement('template');
+        template.innerHTML = html;
+        for (const script of template.content.querySelectorAll('script:not([src])')) readHydration(script);
+        // X can remove or recycle the player while a right-click is handled.
+        // Resolve the identity captured at the gesture, never the later DOM.
+        const known = media.get(identity);
+        if (known?.disabled) return { error: '此 X 视频的下载已关闭。' };
+        const source = known?.variants.reduce((best, item) => !best || item.bitrate > best.bitrate ? item : best, null) ||
+          observedVariant(identity, document);
+        return source ? { url: source.url, pageUrl: address } : initial;
+      })(), new Promise((_resolve, reject) => {
+        timer = setTimeout(() => {
+          const error = new Error('读取 X 视频来源超时，请重试。');
+          controller.abort(error);
+          reject(error);
+        }, pageTimeout);
+      })]);
+    } catch {
+      return { error: controller.signal.aborted ? '读取 X 视频来源超时，请重试。' : '暂时无法读取 X 视频来源，请刷新帖子后重试。' };
+    } finally { clearTimeout(timer); }
+  };
+  globalThis.MosaicXVideo = resolve;
 
   if (typeof document !== 'undefined' && pageHosts.has(location.hostname) && typeof MutationObserver === 'function') {
     const observer = new MutationObserver(records => {

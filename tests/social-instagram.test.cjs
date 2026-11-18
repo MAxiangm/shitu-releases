@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 
-const env = { URL };
+const env = { URL, AbortController, TextDecoder, setTimeout, clearTimeout };
 vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../extension/social-instagram.js'), 'utf8'), env);
 const resolve = env.MosaicInstagramVideo;
 const home = new URL('https://www.instagram.com/reel/OnTarget/');
@@ -18,7 +18,9 @@ const trustedMedia = value => {
 };
 const metadata = (raw, options = {}) => ({
   querySelector(selector) {
-    return selector.includes('canonical') && options.canonical ? { getAttribute: () => options.canonical } : null;
+    if (selector.includes('canonical') && options.canonical) return { getAttribute: () => options.canonical };
+    if (selector.includes('og:url') && options.ogPage) return { getAttribute: () => options.ogPage };
+    return null;
   },
   querySelectorAll(selector) {
     if (selector.startsWith('script')) return [{ textContent: typeof raw === 'string' ? raw : JSON.stringify(raw) }];
@@ -65,5 +67,116 @@ test('Instagram metadata requires the same canonical page and a genuine video CD
     'https://user@cdninstagram.com/clip.mp4', 'https://cdninstagram.com/clip.m3u8', 'http://cdninstagram.com/clip.mp4']) {
     assert.equal(resolve(input(metadata(post('OnTarget', { video_versions: [{ url }] })))), null);
   }
-  assert.equal(resolve(input(metadata({}, { og: [source, source] }))).url, source);
+  assert.equal(resolve(input(metadata({}, { canonical: home.href, og: [source, source] }))).url, source);
+});
+
+test('Instagram never reuses unbound or conflicting OG video tags after SPA navigation', () => {
+  const oldPost = 'https://www.instagram.com/reel/Elsewhere/';
+  assert.equal(resolve(input(metadata({}, { og: [unrelated] }))), null);
+  assert.equal(resolve(input(metadata({}, { ogPage: oldPost, og: [unrelated] }))), null);
+  assert.equal(resolve(input(metadata({}, { canonical: home.href, ogPage: oldPost, og: [unrelated] }))), null);
+  assert.equal(resolve(input(metadata({}, { canonical: oldPost, ogPage: home.href, og: [unrelated] }))), null);
+  assert.equal(resolve(input(metadata({}, { ogPage: 'https://evil.example/reel/OnTarget/', og: [unrelated] }))), null);
+  assert.equal(resolve(input(metadata({}, { ogPage: home.href, og: [source] }))).url, source);
+  assert.equal(resolve(input(metadata({}, { canonical: home.href, ogPage: home.href, og: [source] }))).url, source);
+});
+
+test('Instagram accepts declared extensionless Meta video URLs and the selected direct player source', () => {
+  const extensionless = 'https://scontent-lax3-1.cdninstagram.com/o1/v/t16/f2/m86/AQMfixture?efg=opaque';
+  assert.equal(resolve(input(metadata(post('OnTarget', { video_versions: [{ url: extensionless }] })))).url, extensionless);
+  assert.equal(resolve(input(metadata({}), { video: { currentSrc: extensionless } })).url, extensionless);
+  assert.equal(resolve(input(metadata({}), { video: { currentSrc: 'https://scontent-lax3-1.cdninstagram.com/v/t51/photo.jpg' } })), null);
+  assert.equal(resolve(input(metadata({}), { video: { currentSrc: 'https://scontent-lax3-1.cdninstagram.com.evil.test/o1/v/video' } })), null);
+  assert.match(resolve(input(metadata(post('OnTarget', { is_drm_protected: true })), { video: { currentSrc: source } })).error, /下载受限/);
+});
+
+function asynchronousPage({ raw = {}, fetched = post('OnTarget'), video = {}, response = {}, fetchImpl } = {}) {
+  const page = new URL(home), requests = [];
+  const selected = { currentSrc: 'blob:https://www.instagram.com/selected', poster: 'https://cdn.example/selected.jpg', isConnected: true, ...video };
+  const document = metadata(raw);
+  document.defaultView = { location: { href: page.href } };
+  document.createElement = tag => {
+    assert.equal(tag, 'template');
+    return { content: metadata(fetched) };
+  };
+  env.fetch = async (url, options) => {
+    requests.push({ url, options });
+    if (fetchImpl) return fetchImpl(url, options, selected, document);
+    const result = new Response('<!doctype html><html>fixture</html>', { headers: { 'content-type': 'text/html' }, ...response });
+    Object.defineProperty(result, 'url', { value: page.href });
+    return result;
+  };
+  return { context: input(document, { page, video: selected }), requests, video: selected, document };
+}
+
+test('Instagram SPA source lookup reads the same post only after current document sources are exhausted', async () => {
+  const instance = asynchronousPage();
+  const result = await resolve.resolveAsync(instance.context);
+  assert.equal(result.url, source);
+  assert.equal(result.pageUrl, home.href);
+  assert.equal(instance.requests.length, 1);
+  assert.equal(instance.requests[0].url, home.href);
+  assert.equal(instance.requests[0].options.credentials, 'same-origin');
+  assert.equal(instance.requests[0].options.mode, 'same-origin');
+  assert.equal(instance.requests[0].options.redirect, 'error');
+  const existing = asynchronousPage({ raw: post('OnTarget') });
+  assert.equal((await resolve.resolveAsync(existing.context)).url, source);
+  assert.equal(existing.requests.length, 0);
+  const direct = asynchronousPage({ video: { currentSrc: source } });
+  assert.equal((await resolve.resolveAsync(direct.context)).url, source);
+  assert.equal(direct.requests.length, 0);
+});
+
+test('Instagram async lookup cannot erase current restrictions or retrieve an unrelated post', async () => {
+  const blocked = asynchronousPage({ raw: post('OnTarget', { allows_download: false }) });
+  assert.match((await resolve.resolveAsync(blocked.context)).error, /下载受限/);
+  assert.equal(blocked.requests.length, 0);
+  const other = asynchronousPage({ fetched: post('Elsewhere') });
+  assert.match((await resolve.resolveAsync(other.context)).error, /完整文件/);
+  const protectedResponse = asynchronousPage({ fetched: post('OnTarget', { is_drm_protected: true }) });
+  assert.match((await resolve.resolveAsync(protectedResponse.context)).error, /下载受限/);
+});
+
+test('Instagram async lookup refuses a login page, invalid response, and source returned after navigation', async t => {
+  for (const [name, fields] of [
+    ['login HTML', { fetched: {} }],
+    ['partial response', { response: { status: 206 } }],
+    ['non HTML response', { response: { headers: { 'content-type': 'application/json' } } }],
+    ['oversized response', { response: { headers: { 'content-type': 'text/html', 'content-length': String(8 * 1024 * 1024 + 1) } } }],
+    ['network failure', { fetchImpl: async () => { throw new TypeError('Network failure'); } }],
+    ['redirect', { fetchImpl: async () => ({ status: 200, redirected: true, url: home.href, body: { cancel: async () => {} } }) }]
+  ]) {
+    await t.test(name, async () => {
+      const instance = asynchronousPage(fields);
+      assert.equal(typeof (await resolve.resolveAsync(instance.context)).error, 'string');
+    });
+  }
+  for (const change of [
+    (video) => { video.isConnected = false; },
+    (video) => { video.currentSrc = 'blob:https://www.instagram.com/other'; },
+    (video) => { video.poster = 'https://cdn.example/other.jpg'; },
+    (_video, document) => { document.defaultView.location.href = 'https://www.instagram.com/reel/OtherPost/'; }
+  ]) {
+    const instance = asynchronousPage({ fetchImpl: async (_url, _options, video, document) => {
+      change(video, document);
+      const response = new Response('<html>fixture</html>', { headers: { 'content-type': 'text/html' } });
+      Object.defineProperty(response, 'url', { value: home.href });
+      return response;
+    } });
+    assert.match((await resolve.resolveAsync(instance.context)).error, /已切换/);
+  }
+});
+
+test('Instagram async source lookup aborts a stalled request after eight seconds', async () => {
+  const originalTimer = env.setTimeout;
+  let timeout, request;
+  env.setTimeout = (callback, milliseconds) => { assert.equal(milliseconds, 8000); timeout = callback; return 42; };
+  env.clearTimeout = () => {};
+  try {
+    const instance = asynchronousPage({ fetchImpl: async (_url, options) => { request = options; return new Promise(() => {}); } });
+    const result = resolve.resolveAsync(instance.context);
+    timeout();
+    assert.equal(request.signal.aborted, true);
+    assert.match((await result).error, /超时/);
+  } finally { env.setTimeout = originalTimer; env.clearTimeout = clearTimeout; }
 });

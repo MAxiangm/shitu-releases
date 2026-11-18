@@ -114,10 +114,19 @@ async function showRecent() {
   const canLocate = !!(recent?.ok && recentRequestId && recent.location?.libraryId && recent.location.assetId);
   $('locateRecent').hidden = !canLocate;
   $('locateRecent').disabled = locating;
+  const progressBar = $('recentProgress');
+  progressBar.hidden = true;
   if (!recent) return;
   let message;
   const pending = recent.pending || recent.status === 'working';
   const stale = pending && Date.now() - Number(recent.at || 0) > 300000;
+  const bytes = recent.progress;
+  if (pending && !stale && bytes?.phase === 'downloading' && Number.isSafeInteger(bytes.receivedBytes) && bytes.receivedBytes >= 0 &&
+      Number.isSafeInteger(bytes.totalBytes) && bytes.totalBytes > 0 && bytes.receivedBytes <= bytes.totalBytes) {
+    progressBar.max = bytes.totalBytes;
+    progressBar.value = bytes.receivedBytes;
+    progressBar.hidden = false;
+  }
   if (pending) message = stale ? '上次采集未收到最终确认，请在桌面“最近导入”或“浏览器采集”状态中核对。'
     : recent.message || '正在采集，尚未收到素材库保存确认。';
   else if (recent.ok && recent.imported > 0) message = recent.message || '已保存到素材库，可在“全部素材”或“最近导入”查看。';
@@ -202,5 +211,8 @@ $('recentClear').addEventListener('click', async () => {
   await showRecent();
 });
 checkConnection();
+chrome.storage.onChanged?.addListener((changes, area) => {
+  if (area === 'local' && Object.hasOwn(changes, 'shituLastCapture')) void showRecent().catch(() => {});
+});
 const refresh = setInterval(() => checkConnection(), 3000);
 window.addEventListener('unload', () => clearInterval(refresh));

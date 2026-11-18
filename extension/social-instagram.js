@@ -7,6 +7,8 @@
   const RESTRICTED = '此视频的下载受限，请使用 Instagram 提供的下载入口。';
   const NO_DOWNLOAD = ['can_download', 'is_downloadable', 'downloadable', 'download_allowed',
     'allows_download', 'allow_download', 'allow_downloads', 'download_enabled', 'is_download_enabled', 'viewer_can_download'];
+  const PAGE_LIMIT = 8 * 1024 * 1024;
+  const PAGE_TIMEOUT = 8000;
 
   function address(value, base) {
     if (typeof value !== 'string' || !value.trim()) return null;
@@ -87,35 +89,121 @@
     return { blocked, carousel, variants };
   }
 
-  globalThis.MosaicInstagramVideo = function ({ document, page, video, path = [], trustedMedia, singleVideo }) {
-    if (!page || !INSTAGRAM.test(page.hostname)) return null;
+  function inspect({ document, page, video, path = [], trustedMedia, singleVideo }) {
+    if (!page || page.protocol !== 'https:' || page.username || page.password || page.port || !INSTAGRAM.test(page.hostname)) return null;
     if (video?.mediaKeys || video?.srcObject) return { error: RESTRICTED };
     const post = selectedPost(page, video, path, singleVideo);
     if (!post) return null;
     const code = postCode(post);
     const clip = value => {
       const url = address(value, page);
-      return url?.protocol === 'https:' && CDN.test(url.hostname) && /\.(?:mp4|m4v)$/i.test(url.pathname)
+      // Current Instagram video_versions can use extensionless /o1/v/ URLs.
+      // Only accept these when declared as video data or selected by <video>.
+      return url?.protocol === 'https:' && CDN.test(url.hostname) &&
+        (/\.(?:mp4|m4v)$/i.test(url.pathname) || /^\/o1\/v\//i.test(url.pathname))
         ? trustedMedia(url.href) : null;
     };
     const { blocked, carousel, variants } = inspectMetadata(document, page, code, clip);
     if (blocked) return { error: RESTRICTED };
-    if (carousel) return null;
+    if (carousel) return { post, code, carousel: true };
     variants.sort((left, right) => right.pixels - left.pixels);
     let url = variants[0]?.source;
+    // A complete URL on the actual chosen player is useful even when SPA
+    // navigation has discarded the server's initial JSON.
+    if (!url) url = clip(video?.currentSrc || video?.getAttribute?.('src'));
     if (!url && postCode(page) === code) {
       const canonical = document.querySelector('link[rel="canonical"]')?.getAttribute('href');
-      if (!canonical || postCode(address(canonical, page)) === code) {
+      const ogPage = document.querySelector('meta[property="og:url"]')?.getAttribute('content');
+      const identities = [canonical, ogPage].filter(Boolean);
+      // SPA navigation can leave a previous post's OG video in the document.
+      // An OG video is usable only with explicit, consistent post identity.
+      if (identities.length && identities.every(value => postCode(address(value, page)) === code)) {
         const metadata = Array.from(document.querySelectorAll(
           'meta[property="og:video:secure_url"], meta[property="og:video:url"], meta[property="og:video"]'
         )).map(node => clip(node.getAttribute('content'))).filter(Boolean);
         if (new Set(metadata).size === 1) url = metadata[0];
       }
     }
-    if (!url) return null;
     const pageUrl = new URL(post.href);
     pageUrl.hash = '';
     pageUrl.search = '';
-    return { url, name: `Instagram ${code}`, pageUrl: pageUrl.href };
+    return { post, code, source: url ? { url, name: `Instagram ${code}`, pageUrl: pageUrl.href } : null };
+  }
+
+  async function readPage(response, signal) {
+    if (Number(response.headers.get('content-length')) > PAGE_LIMIT || !response.body?.getReader) {
+      void response.body?.cancel().catch(() => {});
+      throw new Error('Instagram 页面数据无法读取。');
+    }
+    const reader = response.body.getReader(), decoder = new TextDecoder();
+    let size = 0, html = '';
+    try {
+      while (true) {
+        const chunk = await reader.read();
+        signal.throwIfAborted();
+        if (chunk.done) break;
+        size += chunk.value.byteLength;
+        if (size > PAGE_LIMIT) throw new Error('Instagram 页面数据过大。');
+        html += decoder.decode(chunk.value, { stream: true });
+      }
+      return html + decoder.decode();
+    } finally { void reader.cancel().catch(() => {}); }
+  }
+
+  const resolve = context => {
+    const result = inspect(context);
+    return result?.error ? { error: result.error } : result?.source || null;
   };
+  resolve.resolveAsync = async context => {
+    const initial = inspect(context);
+    if (!initial || initial.error || initial.source) return initial?.error ? { error: initial.error } : initial?.source || null;
+    if (initial.carousel) return { error: '请在这条 Instagram 帖子的具体视频画面上采集。' };
+    const { document, page, video } = context;
+    if (!video) return null;
+    const current = video.currentSrc || video.getAttribute?.('src');
+    const poster = video.poster || video.getAttribute?.('poster');
+    const stillSelected = () => video.isConnected !== false && !video.mediaKeys && !video.srcObject &&
+      (video.currentSrc || video.getAttribute?.('src')) === current &&
+      (video.poster || video.getAttribute?.('poster')) === poster &&
+      (!document.defaultView?.location || document.defaultView.location.href === page.href);
+    const pageUrl = new URL(initial.post.href);
+    pageUrl.search = ''; pageUrl.hash = '';
+    pageUrl.pathname = pageUrl.pathname.replace(/\/embed(?:\/captioned)?\/?$/, '/');
+    if (!pageUrl.pathname.endsWith('/')) pageUrl.pathname += '/';
+    pageUrl.host = page.host;
+    const controller = new AbortController();
+    const unavailable = { error: '未找到当前 Instagram 视频的完整文件。请确认视频可以播放后重试。' };
+    let timer;
+    try {
+      const work = async () => {
+        const response = await fetch(pageUrl.href, { credentials: 'same-origin', mode: 'same-origin', redirect: 'error',
+          headers: { Accept: 'text/html' }, signal: controller.signal });
+        if (response.status !== 200 || response.redirected || response.url !== pageUrl.href ||
+            !/^text\/html(?:;|$)/i.test(response.headers.get('content-type') || '')) {
+          void response.body?.cancel().catch(() => {});
+          return unavailable;
+        }
+        const html = await readPage(response, controller.signal);
+        controller.signal.throwIfAborted();
+        if (!stillSelected()) return { error: '页面或视频已切换，请在当前视频上重新采集。' };
+        const template = document.createElement('template');
+        template.innerHTML = html;
+        const parsed = inspect({ ...context, page: pageUrl, document: {
+          querySelector: selector => template.content.querySelector(selector),
+          querySelectorAll: selector => template.content.querySelectorAll(selector)
+        } });
+        return parsed?.error ? { error: parsed.error } : parsed?.source || unavailable;
+      };
+      return await Promise.race([work(), new Promise((_resolve, reject) => {
+        timer = setTimeout(() => {
+          const error = new Error('读取 Instagram 视频来源超时，请重试。');
+          controller.abort(error); reject(error);
+        }, PAGE_TIMEOUT);
+      })]);
+    } catch {
+      return { error: controller.signal.aborted ? '读取 Instagram 视频来源超时，请重试。'
+        : '暂时无法读取 Instagram 视频来源，请确认当前视频可以播放后重试。' };
+    } finally { clearTimeout(timer); }
+  };
+  globalThis.MosaicInstagramVideo = resolve;
 })();

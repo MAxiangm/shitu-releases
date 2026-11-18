@@ -41,6 +41,19 @@ async function copyProductionDependencies(project, appDirectory) {
   return visited.size;
 }
 
+async function normalizeBundledAiMarkers(appDirectory) {
+  const manifest = JSON.parse(await fs.readFile(path.join(appDirectory, 'src', 'ai-runtime-manifest.json'), 'utf8'));
+  if (!Number.isSafeInteger(manifest.version) || manifest.version < 1) throw new Error('Bundled AI manifest version is invalid.');
+  for (const name of ['cutout', 'upscale']) {
+    const markerPath = path.join(appDirectory, 'ai-runtime', name, 'installed.json');
+    const marker = JSON.parse(await fs.readFile(markerPath, 'utf8'));
+    if (marker.version !== manifest.version) throw new Error(`Bundled AI ${name} marker does not match the resource manifest.`);
+    // Resource availability belongs in the bundle; install timestamps and GPU
+    // probes belong to the recipient's own first-time installation.
+    await fs.writeFile(markerPath, `${JSON.stringify({ version: manifest.version }, null, 2)}\n`);
+  }
+}
+
 async function createPackage() {
   const project = await readProject();
   await verifyVideoRuntime();
@@ -70,6 +83,7 @@ async function createPackage() {
     await copyTree(path.join(recoveredRuntime, 'resources', 'default_app.asar'), path.join(target, 'resources', 'default_app.asar'));
   }
   for (const directory of ['src', 'assets', 'ai-runtime', 'video-runtime']) await copyTree(path.join(root, directory), path.join(appDirectory, directory));
+  await normalizeBundledAiMarkers(appDirectory);
   const updateConfig = JSON.parse(await fs.readFile(path.join(root, 'update-config.json'), 'utf8'));
   if (updateConfig.repository !== '' && !/^[A-Za-z0-9][A-Za-z0-9-]*\/[A-Za-z0-9_.-]+$/.test(updateConfig.repository || '')) {
     throw new Error('update-config.json repository must be empty or owner/repo.');
@@ -91,4 +105,4 @@ async function createPackage() {
 }
 
 if (require.main === module) createPackage().catch(error => { console.error(`Packaging failed: ${error.message}`); process.exitCode = 1; });
-module.exports = { createPackage };
+module.exports = { createPackage, normalizeBundledAiMarkers };

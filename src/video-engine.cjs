@@ -176,6 +176,41 @@ function createVideoEngine({ runtimeDir = path.join(__dirname, '..', 'video-runt
   }
   function probe(source, { signal } = {}) { return operation(signal, internal => probeSource(source, internal)); }
 
+  function muxVimeoPlayback({ input, audio, duration, expectsAudio }, output, { signal } = {}) {
+    return operation(signal, async internal => {
+      const target = absolute(output, '采集输出');
+      const files = [input, ...(audio ? [audio] : [])].map(file => absolute(file, '采集播放清单'));
+      const directory = path.dirname(target);
+      if (files.some(file => path.dirname(file) !== directory || !/^[a-z0-9-]+\.m3u8$/i.test(path.basename(file)))) {
+        throw new Error('采集播放清单的本地路径无效');
+      }
+      let manifest = files[0];
+      if (audio) {
+        // A single master keeps both tracks on the same demuxer timeline.
+        manifest = path.join(directory, 'capture-master.m3u8');
+        const playlist = ['#EXTM3U',
+          `#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="Audio",DEFAULT=YES,URI="${path.basename(files[1])}"`,
+          '#EXT-X-STREAM-INF:BANDWIDTH=1,AUDIO="audio"', path.basename(files[0]), ''].join('\n');
+        await fs.writeFile(manifest, playlist, { flag: 'wx' });
+      }
+      const audioMap = audio || expectsAudio ? '0:a:0' : '0:a:0?';
+      try {
+        await run(ffmpeg, ['-hide_banner', '-loglevel', 'error', '-nostdin', '-n', '-xerror', '-abort_on', 'empty_output_stream',
+          '-protocol_whitelist', 'file', '-format_whitelist', 'hls,mov,mpegts,aac,mp3,ac3,eac3', '-f', 'hls', '-i', manifest,
+          '-map', '0:v:0', '-map', audioMap, '-c', 'copy', '-movflags', '+faststart', '-f', 'mp4', target],
+        { signal: internal, timeoutMs: timeouts.captureMuxMs || 60000 });
+        const media = await probeSource(target, internal);
+        if (!(media.duration > 0) || (duration > 0 && media.duration < duration - 1) || ((audio || expectsAudio) && !media.hasAudio)) {
+          throw new Error('采集文件中的音视频不完整');
+        }
+      } catch (error) {
+        checkSignal(internal);
+        if (error.exitCode !== undefined) throw new Error('Vimeo 播放分段无法完整合并为 MP4，未保存视频');
+        throw error;
+      }
+    });
+  }
+
   function adjacentFrame(source, time, direction) {
     if (!Number.isFinite(time) || time < 0 || ![-1, 1].includes(direction)) throw new Error('逐帧位置无效');
     return operation(undefined, async signal => {
@@ -534,7 +569,7 @@ function createVideoEngine({ runtimeDir = path.join(__dirname, '..', 'video-runt
     for (const controller of controllers) controller.abort();
     await Promise.allSettled([...tasks]);
   }
-  return { probe, adjacentFrame, thumbnail, preview, getReadyPreview, hoverPreview, busy: () => tasks.size > 0, shutdown };
+  return { probe, muxVimeoPlayback, adjacentFrame, thumbnail, preview, getReadyPreview, hoverPreview, busy: () => tasks.size > 0, shutdown };
 }
 
 module.exports = { createVideoEngine, VIDEO_EXTENSIONS, PREVIEW_VERSION, HOVER_VERSION, HOVER_SECONDS, displayMetadata };

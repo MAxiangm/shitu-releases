@@ -2656,7 +2656,8 @@ function renderCaptureResult(result) {
   const box = $('collectorLastCapture');
   box.replaceChildren(); box.classList.toggle('hidden', !result);
   if (!result) return;
-  const messages = { receiving: '正在接收浏览器中的素材…', downloading: '正在下载网页素材，尚未入库…', importing: '下载完成，正在写入素材库…' };
+  const messages = { receiving: '正在接收浏览器中的素材…', downloading: '正在下载网页素材，尚未入库…',
+    muxing: '正在合并音视频，保留原画质和声音…', importing: '下载完成，正在写入素材库…' };
   let message = messages[result.status];
   if (result.status === 'error') message = `上次采集未保存：${result.error || '请重试'}`;
   if (result.status === 'complete') message = result.imported ? `已采集 ${result.imported} 个素材` : result.existingAssets?.some(asset => asset.trashedAt) ? '这份素材已在回收站中，可查看后恢复' : '素材库中已有这份文件';

@@ -43,6 +43,8 @@ button:disabled { opacity: .4; cursor: wait; }
 .recent > span { color: #7f7f7f; font-size: 10px; }
 .recent p { margin: 4px 0 0; color: #c2c2c2; font-size: 11px; overflow-wrap: anywhere; }
 .recent p { white-space: pre-line; }
+.recent progress { display: block; width: 100%; height: 6px; margin-top: 8px; accent-color: var(--accent); }
+.recent progress[hidden] { display: none; }
 .recent[data-state="error"],.recent[data-state="unconfirmed"] { border-color:#777; }
 #recentClear { float:right; padding:0; border:0; background:none; color:#aaa; font-size:10px; }
 #recentClear:hover { color:#fff; }

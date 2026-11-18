@@ -801,7 +801,7 @@ else {
       if (installingUpdate) throw new Error('正在安装更新，暂时无法采集');
       if (historyBusy || closing) throw new Error('正在保存撤销或重做，暂时无法采集');
       return requireLibrary().importPaths(...args);
-    }},getLibraryRoot:()=>library?.root,
+    }},getLibraryRoot:()=>library?.root,muxVimeoPlayback:videoEngine.muxVimeoPlayback,
     listFolders:()=>requireLibrary().listFolders(),hasAsset:id=>requireLibrary().hasAsset(id),
     onLocate:result=>{
       if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed() ||

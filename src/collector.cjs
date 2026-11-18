@@ -9,10 +9,15 @@ const fs = require('node:fs/promises');
 const { createWriteStream, createReadStream } = require('node:fs');
 const { pipeline } = require('node:stream/promises');
 const { Transform } = require('node:stream');
+const { stageVimeoHls, vimeoPlaybackUrl } = require('./vimeo-playback-source.cjs');
+const { stageVimeoDash } = require('./vimeo-dash-source.cjs');
 
 const DEFAULT_ORIGIN = 'chrome-extension://mdleapcbplpefdgchdklofdnpjgokdhh';
 const INLINE_LIMIT = 20 * 1024 * 1024;
 const INLINE_BASE64_LIMIT = Math.ceil(INLINE_LIMIT / 3) * 4;
+const MAX_PROGRESS_RECORDS = 64;
+const PROGRESS_TTL_MS = 5 * 60 * 1000;
+const CAPTURE_REQUEST_ID = /^(?:[1-9]\d{0,15}-[1-9]\d{0,15}|[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})$/i;
 const INLINE_MIME = {
   png: 'image/png', jpg: 'image/jpeg', webp: 'image/webp', gif: 'image/gif', bmp: 'image/bmp',
   svg: 'image/svg+xml', avif: 'image/avif', tiff: 'image/tiff', mp4: 'video/mp4',
@@ -65,24 +70,38 @@ async function readJSON(request, limit) {
 }
 
 function captureError(code, message) { return Object.assign(new Error(message), { code }); }
+function validCaptureRequestId(value) { return typeof value === 'string' && CAPTURE_REQUEST_ID.test(value); }
 
 function createCollector({ library, configPath, onImported = () => {}, onLocate,
   getLibraryRoot = () => library.root, listFolders = () => library.listFolders(), hasAsset = id => library.hasAsset(id),
   isReady=()=>true, allowedOrigin = DEFAULT_ORIGIN, port = 38475, allowPrivate = false, maxDownloadBytes = 512 * 1024 * 1024, timeout = 90000,
-  appVersion = require('../package.json').version } = {}) {
+  appVersion = require('../package.json').version, muxVimeoPlayback, playbackTimeout = 240000 } = {}) {
   let server, token, listeningPort, active = 0, disabledError, lastCapture;
   const sockets = new Set();
+  const captures = new Map();
   const progress = (job, status, extra = {}) => {
     Object.assign(job, { status, at: Date.now() }, extra);
   };
   const rejectedCapture = error => { lastCapture = { status: 'error', at: Date.now(), error: error.message || String(error) }; };
+  function pruneProgress() {
+    const cutoff = Date.now() - PROGRESS_TTL_MS;
+    for (const [id, record] of captures) {
+      if (record.finishedAt && (record.finishedAt < cutoff || captures.size > MAX_PROGRESS_RECORDS)) captures.delete(id);
+    }
+  }
+  function captureProgress(id) {
+    pruneProgress();
+    const job = captures.get(id)?.job;
+    return job ? { phase: job.status, at: job.at, receivedBytes: job.receivedBytes,
+      ...(job.totalBytes === undefined ? {} : { totalBytes: job.totalBytes }) } : null;
+  }
   function libraryId(root) {
     return typeof root === 'string' && root ? crypto.createHmac('sha256', token).update(`capture-library\0${root}`).digest('hex') : null;
   }
   function readyStatus() {
     const ready = Boolean(isReady());
     const id = ready ? libraryId(getLibraryRoot()) : null;
-    return { ready, ...(id ? { libraryId: id } : {}) };
+    return { ready, captureProgress: true, ...(muxVimeoPlayback ? { vimeoPlayback: true } : {}), ...(id ? { libraryId: id } : {}) };
   }
   function currentDestination(destination, id) {
     if (destination === undefined) return null;
@@ -95,28 +114,35 @@ function createCollector({ library, configPath, onImported = () => {}, onLocate,
     }
     return folderId;
   }
-  async function download(url, destination, pageUrl, signal, redirects = 0) {
+  async function openMedia(url, { pageUrl, signal, vimeo = false, range } = {}, redirects = 0) {
     if (redirects > 5) throw new Error('下载重定向次数过多');
+    if (vimeo) url = vimeoPlaybackUrl(url.href);
     const hostname = url.hostname.replace(/^\[|\]$/g, '');
     const addresses = net.isIP(hostname) ? [{address:hostname,family:net.isIP(hostname)}] : await dns.lookup(hostname, {all:true});
-    if (!addresses.length || (!allowPrivate && addresses.some(a => !publicAddress(a.address)))) throw new Error('不支持从本机或内网地址采集');
+    if (!addresses.length || ((vimeo || !allowPrivate) && addresses.some(a => !publicAddress(a.address)))) throw new Error('不支持从本机或内网地址采集');
     signal.throwIfAborted();
     const response = await new Promise((resolve,reject) => {
       const request = (url.protocol === 'https:' ? https : http).get(url, {
         signal,
         autoSelectFamily: true, autoSelectFamilyAttemptTimeout: 250,
         lookup: (_host, options, callback) => options?.all ? callback(null, addresses) : callback(null,addresses[0].address,addresses[0].family),
-        headers: { 'User-Agent': 'Mozilla/5.0 ShituCollector/0.4', 'Accept': 'image/*,video/*;q=0.9,*/*;q=0.5', ...(pageUrl ? {Referer:pageUrl} : {}) }
+        headers: { 'User-Agent': 'Mozilla/5.0 ShituCollector/0.4', 'Accept': 'image/*,video/*;q=0.9,*/*;q=0.5',
+          ...(pageUrl && !vimeo ? {Referer:pageUrl} : {}), ...(range ? {Range:`bytes=${range.start}-${range.end}`} : {}) }
       }, resolve);
       request.on('error',reject);
     });
     if ([301,302,303,307,308].includes(response.statusCode)) {
       response.resume();
       if (!response.headers.location) throw new Error('下载重定向地址缺失');
-      return download(webUrl(new URL(response.headers.location,url).href), destination, pageUrl, signal, redirects+1);
+      return openMedia(webUrl(new URL(response.headers.location,url).href), { pageUrl, signal, vimeo, range }, redirects+1);
     }
+    return { response, url };
+  }
+  async function download(url, destination, pageUrl, signal, job, vimeo = false) {
+    const { response } = await openMedia(url, { pageUrl, signal, vimeo });
     if (response.statusCode !== 200) {
       response.resume();
+      if (vimeo) throw vimeoReadError(response.statusCode);
       const error = new Error(`网站返回 HTTP ${response.statusCode}，可能需要登录或不允许直接下载`);
       if ([401, 403].includes(response.statusCode)) error.code = 'VIDEO_BROWSER_READ';
       throw error;
@@ -125,17 +151,62 @@ function createCollector({ library, configPath, onImported = () => {}, onLocate,
     if (/mpegurl|dash\+xml|text\/html/i.test(type)) {
       response.resume();
       const error = new Error('该地址返回了网页或分段视频流，无法直接保存为视频文件');
-      if (/text\/html/i.test(type)) error.code = 'VIDEO_BROWSER_READ';
+      if (!vimeo && /text\/html/i.test(type)) error.code = 'VIDEO_BROWSER_READ';
       throw error;
     }
-    if (Number(response.headers['content-length']) > maxDownloadBytes) { response.destroy(); throw new Error('素材超过 512 MB 下载上限'); }
-    let bytes = 0;
-    const limiter = new Transform({ transform(chunk,_encoding,callback) { bytes += chunk.length; callback(bytes > maxDownloadBytes ? new Error('素材超过 512 MB 下载上限') : null, chunk); } });
+    const total = Number(response.headers['content-length']);
+    if (total > maxDownloadBytes) { response.destroy(); throw new Error('素材超过 512 MB 下载上限'); }
+    if (Number.isSafeInteger(total) && total >= 0) progress(job, 'downloading', { totalBytes: total });
+    const limiter = new Transform({ transform(chunk, _encoding, callback) {
+      const receivedBytes = job.receivedBytes + chunk.length;
+      if (receivedBytes > maxDownloadBytes) return callback(new Error('素材超过 512 MB 下载上限'));
+      progress(job, 'downloading', { receivedBytes });
+      callback(null, chunk);
+    } });
     await pipeline(response, limiter, createWriteStream(destination, {flags:'wx'}), {signal});
   }
-  async function capture(body) {
-    const job = { status: 'receiving', at: Date.now(), name: typeof body?.name === 'string' ? body.name.slice(0, 240) : '',
-      kind: ['image', 'video'].includes(body?.kind) ? body.kind : undefined };
+  function vimeoReadError(status) {
+    return new Error([401, 403].includes(status)
+      ? `Vimeo 返回 HTTP ${status}，当前播放源无法读取，未保存视频。`
+      : `Vimeo 媒体请求返回 HTTP ${status}，未保存视频。`);
+  }
+  async function readVimeo(source, { destination, limit = maxDownloadBytes, range } = {}, signal, job) {
+    const budget = Math.min(limit, maxDownloadBytes - job.receivedBytes);
+    const tooLarge = () => new Error('Vimeo 播放源超出采集大小上限');
+    if (budget <= 0 || (range && range.end - range.start + 1 > budget)) throw tooLarge();
+    const { response, url } = await openMedia(vimeoPlaybackUrl(source), { signal, vimeo: true, range });
+    if (response.statusCode !== (range ? 206 : 200)) {
+      response.destroy();
+      throw vimeoReadError(response.statusCode);
+    }
+    const rangeHeader = /^bytes (\d+)-(\d+)\/(?:\d+|\*)$/i.exec(String(response.headers['content-range'] || ''));
+    if (range && (!rangeHeader || Number(rangeHeader[1]) !== range.start || Number(rangeHeader[2]) !== range.end)) {
+      response.destroy(); throw new Error('Vimeo 返回的分段区间与播放清单不符');
+    }
+    if (/text\/html/i.test(String(response.headers['content-type'] || '')) || response.headers['content-encoding']) {
+      response.destroy(); throw new Error('Vimeo 返回的数据不是可直接读取的媒体文件');
+    }
+    if (Number(response.headers['content-length']) > budget) { response.destroy(); throw tooLarge(); }
+    let bytes = 0;
+    function count(chunk) {
+      bytes += chunk.length;
+      const receivedBytes = job.receivedBytes + chunk.length;
+      if (bytes > budget || receivedBytes > maxDownloadBytes) throw tooLarge();
+      progress(job, 'downloading', { receivedBytes });
+    }
+    const chunks = [];
+    if (destination) {
+      const limiter = new Transform({ transform(chunk, _encoding, callback) {
+        try { count(chunk); callback(null, chunk); } catch (error) { callback(error); }
+      } });
+      await pipeline(response, limiter, createWriteStream(destination, { flags: 'wx' }), { signal });
+    } else {
+      for await (const chunk of response) { count(chunk); chunks.push(chunk); }
+    }
+    if (!bytes || (range && bytes !== range.end - range.start + 1)) throw new Error('Vimeo 播放分段不完整，未保存视频');
+    return destination ? undefined : { body: Buffer.concat(chunks, bytes), url };
+  }
+  async function capture(body, job) {
     lastCapture = job;
     let temporary;
     try {
@@ -153,7 +224,17 @@ function createCollector({ library, configPath, onImported = () => {}, onLocate,
             (parsed.protocol === 'data:' && !body.url.toLowerCase().startsWith(`data:${body.kind}/`))) throw new Error('素材地址只支持 HTTP、HTTPS 或浏览器提供的临时素材');
       }
       const pageUrl = body.pageUrl ? webUrl(body.pageUrl,'来源页面').href : undefined;
-      if (source && /\.(m3u8|mpd)(?:$|[?#])/i.test(source.href)) throw new Error('暂不支持直播、分段流或受保护视频，请使用可直接下载的视频文件');
+      const playback = body.playback;
+      const stagePlayback = playback === 'hls' ? stageVimeoHls : playback === 'dash' ? stageVimeoDash : null;
+      if (playback !== undefined) {
+        if ((playback !== 'file' && !stagePlayback) || body.kind !== 'video' || !source || inline ||
+            !/^https:\/\/vimeo\.com\/\d{1,20}\/?$/.test(pageUrl || '')) throw new Error('Vimeo 播放源采集请求无效');
+        if (stagePlayback && !muxVimeoPlayback) throw new Error('请更新桌面 Mosaic 后采集 Vimeo 播放视频');
+        source = vimeoPlaybackUrl(source.href);
+        const redirectId = /^\/progressive_redirect\/playback\/(\d+)\//.exec(source.pathname)?.[1];
+        if (source.hostname === 'player.vimeo.com' && redirectId !== new URL(pageUrl).pathname.split('/')[1]) throw new Error('Vimeo 播放源与当前视频不符');
+      }
+      if (source && !stagePlayback && /\.(m3u8|mpd)(?:$|[?#])/i.test(source.href)) throw new Error('暂不支持直播、分段流或受保护视频，请使用可直接下载的视频文件');
       let inlineBytes;
       if (inline) {
         const allowedMime = body.kind === 'image' ? /^image\/(?:png|jpeg|webp|gif|bmp|svg\+xml|avif|tiff)$/i : /^video\/(?:mp4|webm|ogg|quicktime)$/i;
@@ -165,10 +246,19 @@ function createCollector({ library, configPath, onImported = () => {}, onLocate,
       }
       temporary = await fs.mkdtemp(path.join(os.tmpdir(),'shitu-capture-'));
       const original = path.join(temporary,'download');
-      if (inline) await fs.writeFile(original,inlineBytes,{flag:'wx'});
+      if (inline) {
+        await fs.writeFile(original,inlineBytes,{flag:'wx'});
+        progress(job, 'receiving', { receivedBytes: inlineBytes.length, totalBytes: inlineBytes.length });
+      }
       else {
         progress(job, 'downloading');
-        await download(source,original,pageUrl,AbortSignal.timeout(timeout));
+        if (stagePlayback) {
+          const signal = AbortSignal.timeout(playbackTimeout);
+          const media = await stagePlayback({ url: source, directory: temporary, signal,
+            read: (url, options) => readVimeo(url, options, signal, job) });
+          progress(job, 'muxing');
+          await muxVimeoPlayback(media, original, { signal });
+        } else await download(source,original,pageUrl,AbortSignal.timeout(playback ? playbackTimeout : timeout),job,Boolean(playback));
       }
       const handle = await fs.open(original,'r');
       const head = Buffer.alloc(4096); let bytesRead;
@@ -184,7 +274,8 @@ function createCollector({ library, configPath, onImported = () => {}, onLocate,
       await fs.rename(original,typed);
       if (body.destination !== undefined) currentDestination(body.destination, libraryId(getLibraryRoot()));
       progress(job, 'importing', { name });
-      const report = await library.importPaths([typed], { folderId, metadata:{name,...(source ? {sourceUrl:source.href} : {}),...(pageUrl ? {pageUrl} : {})} });
+      const sourceUrl = playback ? pageUrl : source?.href;
+      const report = await library.importPaths([typed], { folderId, metadata:{name,...(sourceUrl ? {sourceUrl} : {}),...(pageUrl ? {pageUrl} : {})} });
       if (report?.errors?.length) throw new Error(report.errors[0].message || '素材写入素材库失败');
       if (!Number.isSafeInteger(report?.imported) || report.imported < 0 || !Number.isSafeInteger(report?.duplicates) || report.duplicates < 0 || !report.imported && !report.duplicates)
         throw new Error(report?.unsupported?.length ? '素材库不支持此文件格式，未保存素材' : '素材库未保存这份素材，请重试或检查素材库位置');
@@ -239,7 +330,7 @@ function createCollector({ library, configPath, onImported = () => {}, onLocate,
     }
     const supplied = request.headers['x-shitu-token'];
     if (typeof supplied !== 'string' || !/^[a-f0-9]{64}$/.test(supplied) || !crypto.timingSafeEqual(Buffer.from(supplied),Buffer.from(token))) return json(401,{ok:false,error:'连接已失效，采集助手需要自动重新连接'});
-    if (request.method !== 'POST' || !['/v1/ping','/v1/capture','/v1/folders','/v1/locate'].includes(request.url)) return json(404,{ok:false,error:'接口不存在'});
+    if (request.method !== 'POST' || !['/v1/ping','/v1/capture','/v1/capture-progress','/v1/folders','/v1/locate'].includes(request.url)) return json(404,{ok:false,error:'接口不存在'});
     if (!String(request.headers['content-type']).startsWith('application/json')) {
       if (request.url === '/v1/capture') rejectedCapture(new Error('只支持 JSON 请求'));
       return json(415,{ok:false,error:'只支持 JSON 请求'});
@@ -247,6 +338,10 @@ function createCollector({ library, configPath, onImported = () => {}, onLocate,
     try {
       const body = await readJSON(request, request.url === '/v1/capture' ? 28*1024*1024+32768 : 4096);
       if (request.url === '/v1/ping') return json(200,{ok:true,app:'拾图',version:appVersion,...readyStatus()});
+      if (request.url === '/v1/capture-progress') {
+        if (!validCaptureRequestId(body?.requestId)) return json(400,{ok:false,error:'采集任务编号无效'});
+        return json(200,{ok:true,progress:captureProgress(body.requestId)});
+      }
       if(!isReady()) {
         const error = new Error('请先在 Mosaic 中选择素材库位置，或等待切换完成');
         if (request.url === '/v1/capture') rejectedCapture(error);
@@ -269,16 +364,28 @@ function createCollector({ library, configPath, onImported = () => {}, onLocate,
         await onLocate({libraryRoot:root,assetIds:[assetId]});
         return json(200,{ok:true});
       }
+      const id = body?.requestId;
+      if (id !== undefined && !validCaptureRequestId(id)) throw new Error('采集任务编号无效');
+      const pending = captures.get(id);
+      if (pending && !pending.finishedAt) return json(409,{ok:false,error:'此素材仍在采集中',code:'CAPTURE_PENDING'});
       if (active >= 3) {
         rejectedCapture(new Error('当前有多个素材正在采集，请稍候再试'));
         return json(429,{ok:false,error:lastCapture.error});
       }
+      const job = { status:'receiving', at:Date.now(), receivedBytes:0, name:typeof body?.name === 'string' ? body.name.slice(0,240) : '',
+        kind:['image','video'].includes(body?.kind) ? body.kind : undefined };
+      const record = { job };
+      if (id !== undefined) {
+        captures.delete(id);
+        captures.set(id, record);
+        pruneProgress();
+      }
       active++;
       response.writeHead(200,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store',...cors}); response.write('\n');
       const heartbeat = setInterval(()=>{if (!response.destroyed) response.write(' ');},10000); heartbeat.unref();
-      try { const result = await capture(body); if (!response.destroyed) response.end(JSON.stringify(result)); }
+      try { const result = await capture(body, job); if (!response.destroyed) response.end(JSON.stringify(result)); }
       catch(error) { if (!response.destroyed) response.end(JSON.stringify({ok:false,error:error.message,...(error.code ? {code:error.code} : {})})); }
-      finally { clearInterval(heartbeat); active--; }
+      finally { clearInterval(heartbeat); record.finishedAt = Date.now(); active--; }
     } catch(error) {
       if (request.url === '/v1/capture') rejectedCapture(error);
       if (!response.headersSent) json(400,{ok:false,error:error.message});
@@ -299,7 +406,7 @@ function createCollector({ library, configPath, onImported = () => {}, onLocate,
     },
     info() { return {enabled:Boolean(listeningPort),baseUrl:listeningPort?`http://127.0.0.1:${listeningPort}`:null,code:listeningPort?`SHITU1.${listeningPort}.${token}`:null,error:disabledError,lastCapture:lastCapture ? structuredClone(lastCapture) : null}; },
     activeCount: () => active,
-    async close() { for(const socket of sockets)socket.destroy();if(server?.listening)await new Promise(resolve=>server.close(resolve));listeningPort=null; }
+    async close() { for(const socket of sockets)socket.destroy();if(server?.listening)await new Promise(resolve=>server.close(resolve));captures.clear();listeningPort=null; }
   };
 }
 module.exports={createCollector,identify,publicAddress,webUrl};

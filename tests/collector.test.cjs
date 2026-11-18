@@ -4,10 +4,15 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const http = require('node:http');
+const https = require('node:https');
 const dns = require('node:dns/promises');
 const { EventEmitter } = require('node:events');
+const { Readable } = require('node:stream');
+const { spawnSync } = require('node:child_process');
+const { setTimeout: delay } = require('node:timers/promises');
 const { Library } = require('../src/library.cjs');
 const { createCollector } = require('../src/collector.cjs');
+const { createVideoEngine } = require('../src/video-engine.cjs');
 
 const testsRoot = path.resolve(__dirname, '..', '.recovery', 'tests');
 const EXTENSION = 'mdleapcbplpefdgchdklofdnpjgokdhh';
@@ -46,6 +51,82 @@ async function sourceServer(t, handler) {
   });
   return { server, port: server.address().port, url: `http://127.0.0.1:${server.address().port}` };
 }
+
+test('Vimeo playback combines a complete video and separate audio without encoding and retains only the public page URL', async t => {
+  const runtimeDir = path.resolve(__dirname, '..', 'video-runtime');
+  const suffix = process.platform === 'win32' ? '.exe' : '';
+  const ffmpeg = path.join(runtimeDir, `ffmpeg${suffix}`);
+  const ffprobe = path.join(runtimeDir, `ffprobe${suffix}`);
+  try { await Promise.all([fs.access(ffmpeg), fs.access(ffprobe)]); }
+  catch { t.skip('Bundled video runtime unavailable'); return; }
+  const engine = createVideoEngine({ runtimeDir, cacheDir: path.join(testsRoot, 'unused-capture-cache') });
+  t.after(() => engine.shutdown());
+  const setup = await fixture(t, { muxVimeoPlayback: engine.muxVimeoPlayback });
+  assert.equal((await setup.request('/v1/ping', {})).body.vimeoPlayback, true);
+  const media = path.join(setup.directory, 'fixture');
+  await fs.mkdir(media);
+  const run = (executable, args) => {
+    const result = spawnSync(executable, args, { cwd: media, encoding: 'utf8', windowsHide: true, timeout: 30000 });
+    assert.ifError(result.error);
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout;
+  };
+  run(ffmpeg, ['-v', 'error', '-f', 'lavfi', '-i', 'testsrc2=s=96x64:r=10:d=2', '-f', 'lavfi', '-i', 'sine=f=440:r=48000:d=2',
+    '-c:v', 'libopenh264', '-g', '10', '-threads', '1', '-c:a', 'aac', 'original.mp4']);
+  for (const [type, label] of [['v', 'picture'], ['a', 'sound']]) {
+    run(ffmpeg, ['-v', 'error', '-i', 'original.mp4', '-map', `0:${type}:0`, '-c', 'copy', '-f', 'hls',
+      '-hls_time', '1', '-hls_playlist_type', 'vod', '-hls_segment_type', 'fmp4', '-hls_fmp4_init_filename', `${label}-init.mp4`, `${label}.m3u8`]);
+  }
+  await fs.writeFile(path.join(media, 'master.m3u8'), ['#EXTM3U',
+    '#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="original-audio",NAME="Original",DEFAULT=YES,URI="sound.m3u8"',
+    '#EXT-X-STREAM-INF:BANDWIDTH=500000,RESOLUTION=96x64,CODECS="avc1.42c01e,mp4a.40.2",AUDIO="original-audio"', 'picture.m3u8', ''].join('\n'));
+  const hosts = [];
+  const originalGet = https.get;
+  const originalLookup = dns.lookup;
+  dns.lookup = async (host, options) => host === 'capture-test.vimeocdn.com' ? [{ address: '203.0.113.80', family: 4 }] : originalLookup(host, options);
+  https.get = (url, options, responseReady) => {
+    assert.equal(url.hostname, 'capture-test.vimeocdn.com');
+    assert.equal(options.headers.Referer, undefined);
+    assert.equal(options.headers.Cookie, undefined);
+    hosts.push(url.pathname);
+    const request = new EventEmitter();
+    fs.readFile(path.join(media, path.posix.basename(url.pathname))).then(bytes => {
+      const response = Readable.from([bytes]);
+      response.statusCode = 200;
+      response.headers = { 'content-length': bytes.length };
+      responseReady(response);
+    }, error => request.emit('error', error));
+    return request;
+  };
+  t.after(() => { https.get = originalGet; dns.lookup = originalLookup; });
+  const pageUrl = 'https://vimeo.com/123';
+  const { body } = await setup.capture({ kind: 'video', playback: 'hls', name: 'Vimeo fixture', pageUrl,
+    url: 'https://capture-test.vimeocdn.com/master.m3u8?ephemeral=fixture-value' });
+  assert.equal(body.ok, true, body.error);
+  assert.equal(body.imported, 1);
+  assert.ok(hosts.includes('/picture.m3u8') && hosts.includes('/sound.m3u8'));
+  const [asset] = setup.library.snapshot().assets;
+  assert.equal(asset.sourceUrl, pageUrl);
+  assert.equal(asset.pageUrl, pageUrl);
+  const saved = setup.library.getAssetPath(asset.id, 'original');
+  const streams = await engine.probe(saved);
+  assert.equal(streams.codec, 'h264');
+  assert.equal(streams.audioCodec, 'aac');
+  assert.ok(streams.duration >= 1.99);
+  const packetHashes = (filename, type) => {
+    const json = run(ffprobe, ['-v', 'error', '-select_streams', `${type}:0`, '-show_packets', '-show_data_hash', 'sha256',
+      '-show_entries', 'packet=data_hash', '-of', 'json', filename]);
+    return JSON.parse(json).packets.map(packet => packet.data_hash);
+  };
+  assert.deepEqual(packetHashes(saved, 'v'), packetHashes('picture.m3u8', 'v'));
+  assert.deepEqual(packetHashes(saved, 'a'), packetHashes('sound.m3u8', 'a'));
+
+  const direct = (await setup.capture({ kind: 'video', playback: 'file', name: 'Vimeo file', pageUrl,
+    url: 'https://capture-test.vimeocdn.com/original.mp4?ephemeral=fixture-value' })).body;
+  assert.equal(direct.imported, 1, direct.error);
+  const directFile = setup.library.getAssetPath(direct.assetIds[0], 'original');
+  assert.deepEqual(await fs.readFile(directFile), await fs.readFile(path.join(media, 'original.mp4')));
+});
 
 test('HTTP inline image bytes import without local DNS or download and retain the original source URL', async t => {
   let notified;
@@ -181,11 +262,50 @@ test('connect and ping report the actual configured application version while re
   const setup = await fixture(t, { appVersion: '7.8.9' });
   const connected = await setup.request('/v1/connect', {}, { headers: { 'X-Shitu-Extension': EXTENSION } });
   assert.equal(connected.body.version, '7.8.9');
-  assert.equal((await setup.request('/v1/ping', {})).body.version, '7.8.9');
+  assert.equal(connected.body.captureProgress, true);
+  const ping = (await setup.request('/v1/ping', {})).body;
+  assert.equal(ping.version, '7.8.9');
+  assert.equal(ping.captureProgress, true);
   const wrongToken = await setup.capture(image(), { headers: { 'X-Shitu-Token': '0'.repeat(64) } });
   assert.equal(wrongToken.status, 401); assert.equal(setup.service.info().lastCapture, null);
   const wrongOrigin = await setup.capture(image(), { headers: { Origin: 'https://untrusted.example.test' } });
   assert.equal(wrongOrigin.status, 403); assert.equal(setup.service.info().lastCapture, null);
+});
+
+test('progress reports actual bytes from an active capture and never exposes another capture or its source', async t => {
+  const prefix = PNG.subarray(0, 16);
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const source = await sourceServer(t, (_request, response) => {
+    response.writeHead(200, { 'Content-Type': 'image/png', 'Content-Length': PNG.length });
+    response.write(prefix);
+    void gate.then(() => response.end(PNG.subarray(prefix.length)));
+  });
+  const setup = await fixture(t, { allowPrivate: true });
+  const requestId = '1710000000000-1';
+  const check = id => setup.request('/v1/capture-progress', { requestId: id });
+  assert.deepEqual((await check(requestId)).body, { ok: true, progress: null });
+  assert.equal((await check('bad-id')).status, 400);
+  assert.equal((await setup.request('/v1/capture-progress', { requestId },
+    { headers: { 'X-Shitu-Token': '0'.repeat(64) } })).status, 401);
+  const payload = { kind: 'image', url: source.url + '/image.png?signature=private-fixture', requestId };
+  const pending = setup.capture(payload, { signal: AbortSignal.timeout(5000) });
+  let current;
+  try {
+    const deadline = Date.now() + 3000;
+    while (Date.now() < deadline) {
+      current = (await check(requestId)).body.progress;
+      if (current?.receivedBytes === prefix.length) break;
+      await delay(10);
+    }
+    assert.deepEqual(current, { phase: 'downloading', at: current.at, receivedBytes: prefix.length, totalBytes: PNG.length });
+    assert.equal((await check('1710000000000-2')).body.progress, null);
+    assert.equal((await setup.capture(payload)).body.code, 'CAPTURE_PENDING');
+    assert.equal(setup.library.snapshot().stats.total, 0);
+  } finally { release(); }
+  assert.equal((await pending).body.imported, 1);
+  const complete = (await check(requestId)).body.progress;
+  assert.deepEqual(complete, { phase: 'complete', at: complete.at, receivedBytes: PNG.length, totalBytes: PNG.length });
 });
 
 test('web captures use the chosen nested folder and locate the exact saved or duplicate asset', async t => {
@@ -247,9 +367,12 @@ test('importing state stays visible during library work and ends only after the 
   const gate = new Promise(resolve => { release = resolve; });
   const setup = await fixture(t, { library: { importPaths: async () => { entered(); await gate; return { imported: 1, duplicates: 0, errors: [], assetIds: ['saved'] }; } } });
   t.after(() => release());
-  const pending = setup.capture(image());
+  const requestId = '1710000000000-3';
+  const pending = setup.capture(image({ requestId }));
   await enteredPromise;
   assert.equal(setup.service.info().lastCapture.status, 'importing'); assert.equal(setup.service.activeCount(), 1);
+  const importing = (await setup.request('/v1/capture-progress', { requestId })).body.progress;
+  assert.deepEqual(importing, { phase: 'importing', at: importing.at, receivedBytes: PNG.length, totalBytes: PNG.length });
   release(); const result = (await pending).body;
   assert.equal(result.ok, true); assert.equal(setup.service.info().lastCapture.status, 'complete'); assert.equal(setup.service.activeCount(), 0);
 });
@@ -260,9 +383,12 @@ test('download failures and timeouts become explicit errors without a saved asse
   const failure = (await setup.capture({ kind: 'image', url: denied.url + '/image.png' })).body;
   assert.equal(failure.ok, false); assert.match(failure.error, /403/); assert.equal(setup.service.info().lastCapture.status, 'error');
   const slow = await sourceServer(t, () => {});
-  const timedOut = (await setup.capture({ kind: 'image', url: slow.url + '/image.png' })).body;
+  const requestId = '1710000000000-4';
+  const timedOut = (await setup.capture({ kind: 'image', url: slow.url + '/image.png', requestId })).body;
   assert.equal(timedOut.ok, false); assert.match(timedOut.error, /超时/);
   assert.equal(setup.service.activeCount(), 0); assert.equal(setup.library.snapshot().stats.total, 0);
+  const failed = (await setup.request('/v1/capture-progress', { requestId })).body.progress;
+  assert.deepEqual(failed, { phase: 'error', at: failed.at, receivedBytes: 0 });
 });
 
 test('the web video retry signal is reserved for browser-readable authorization failures', async t => {

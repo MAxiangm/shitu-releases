@@ -4,8 +4,10 @@ const CONFIG_KEY = 'shituConnection';
 const LAST_KEY = 'shituLastCapture';
 const DESTINATIONS_KEY = 'shituCaptureDestinations';
 // A running worker can read an updated manifest without having loaded new code.
-const WORKER_VERSION = '0.11.5';
+const WORKER_VERSION = '0.11.19';
 const CAPTURE_TIMEOUT = 280000;
+const PAGE_READ_TIMEOUT = 22000;
+const PROGRESS_INTERVAL = 1000;
 const MAX_DATA_LENGTH = 28 * 1024 * 1024;
 const MENU_ID = 'shitu-save-media';
 const pending = new Map();
@@ -42,18 +44,18 @@ async function requestLocal(port, route, body, token, timeout) {
         body: JSON.stringify(body), credentials: 'omit', cache: 'no-store', redirect: 'error', signal: abort.signal,
       });
     } catch (error) {
-      if (error.name === 'AbortError') throw issue('采集尚未收到确认，桌面可能仍在处理。请先在 Mosaic 检查结果，避免重复操作。', 'TIMEOUT');
+      if (abort.signal.aborted || error?.name === 'AbortError') throw issue('采集尚未收到确认，桌面可能仍在处理。请先在 Mosaic 检查结果，避免重复操作。', 'TIMEOUT');
       throw issue('尚未找到本机 Mosaic，请先打开桌面软件。', 'CONNECTION_FAILED');
     }
     if (response.status === 401) throw issue('本机连接已更新，正在重新连接。', 'UNAUTHORIZED');
     let result;
     try { result = await response.json(); }
     catch (error) {
-      if (error.name === 'AbortError') throw issue('采集尚未收到确认，桌面可能仍在处理。请先在 Mosaic 检查结果，避免重复操作。', 'TIMEOUT');
+      if (abort.signal.aborted || error?.name === 'AbortError') throw issue('采集尚未收到确认，桌面可能仍在处理。请先在 Mosaic 检查结果，避免重复操作。', 'TIMEOUT');
       throw issue('Mosaic 返回了无效响应，请更新软件和扩展。', 'INVALID_RESPONSE');
     }
     if (!response.ok || !result?.ok) {
-      const captureCodes = ['VIDEO_BROWSER_READ', 'CAPTURE_LIBRARY_CHANGED', 'CAPTURE_FOLDER_MISSING'];
+      const captureCodes = ['VIDEO_BROWSER_READ', 'CAPTURE_LIBRARY_CHANGED', 'CAPTURE_FOLDER_MISSING', 'CAPTURE_PENDING'];
       const code = route === '/v1/capture' && captureCodes.includes(result?.code) ? result.code : 'SERVER_ERROR';
       throw issue(result?.error || `请求失败（${response.status}）`, code);
     }
@@ -71,7 +73,9 @@ function appStatus(result) {
   // The v1 app field identifies the collector protocol across desktop releases.
   if (result?.app !== '拾图' || !version || (Number(version[1]) === 0 && Number(version[2]) < 4) || typeof result.ready !== 'boolean') throw issue('请将桌面端更新到 0.4 或更新版本。', 'INCOMPATIBLE_APP');
   const libraryId = exactId(result.libraryId);
-  return { ok: true, app: '拾图', version: result.version, ready: result.ready, ...(libraryId ? { libraryId } : {}) };
+  return { ok: true, app: '拾图', version: result.version, ready: result.ready,
+    ...(libraryId ? { libraryId } : {}), ...(result.captureProgress === true ? { captureProgress: true } : {}),
+    ...(result.vimeoPlayback === true ? { vimeoPlayback: true } : {}) };
 }
 
 async function discoverAt(port) {
@@ -229,7 +233,24 @@ function captureResult(result) {
     ...(typeof result.libraryRoot === 'string' ? { libraryRoot: safeText(result.libraryRoot, 4096) } : {}) };
 }
 
-function checkedMedia(input) {
+function checkedVimeoPlayback(input, source, senderUrl) {
+  const rejected = () => new Error('Vimeo 播放源或页面地址无效。');
+  let page;
+  try { page = new URL(senderUrl); } catch { throw rejected(); }
+  if (page.protocol !== 'https:' || page.port || page.username || page.password || !/^(?:(?:www|player)\.)?vimeo\.com$/.test(page.hostname)) throw rejected();
+  const id = page.hostname === 'player.vimeo.com'
+    ? /^\/video\/(\d+)\/?$/.exec(page.pathname)?.[1]
+    : /^(?:\/(?:channels\/[^/]+|groups\/[^/]+\/videos))?\/(\d+)\/?$/.exec(page.pathname)?.[1];
+  const fromCdn = /\.vimeocdn\.com$/.test(source.hostname);
+  const fromPlayer = source.hostname === 'player.vimeo.com' && /^\/progressive_redirect\/playback\/(\d+)\//i.exec(source.pathname)?.[1] === id;
+  const validPath = input.playback === 'file' && /\.(?:mp4|m4v|mov|webm)$/i.test(source.pathname) ||
+    input.playback === 'hls' && /\.m3u8$/i.test(source.pathname) || input.playback === 'dash' && /\.mpd$/i.test(source.pathname);
+  if (!id || input.kind !== 'video' || source.protocol !== 'https:' || source.port || source.hash ||
+      !validPath || (!fromCdn && !fromPlayer) || Object.hasOwn(input, 'dataBase64')) throw rejected();
+  return { playback: input.playback, pageUrl: `https://vimeo.com/${id}` };
+}
+
+function checkedMedia(input, senderUrl) {
   if (!input || typeof input !== 'object' || !['image', 'video'].includes(input.kind)) throw new Error('不是可采集的图片或视频。');
   if (typeof input.url !== 'string' || input.url.length > 8192) throw new Error('素材地址过长或无效。');
   const url = input.url;
@@ -237,7 +258,9 @@ function checkedMedia(input) {
   try { parsed = new URL(url); } catch { throw new Error('素材地址无效。'); }
   if (!['http:', 'https:', 'data:', 'blob:'].includes(parsed.protocol)) throw new Error('不支持这种素材地址。');
   if (parsed.username || parsed.password) throw new Error('素材地址不能包含账号密码。');
-  if (input.kind === 'video' && /\.(m3u8|mpd)(?:$|[?#])/i.test(url)) {
+  const playback = Object.hasOwn(input, 'playback')
+    ? checkedVimeoPlayback(input, parsed, acceptedSocialPage(input.socialPageUrl, senderUrl) || senderUrl) : null;
+  if (!playback && input.kind === 'video' && /\.(m3u8|mpd)(?:$|[?#])/i.test(url)) {
     throw new Error('这是分段流媒体，暂不能保存为视频文件。请使用网站提供的下载功能。');
   }
   const body = {
@@ -246,6 +269,7 @@ function checkedMedia(input) {
     name: safeText(input.name, 240),
     title: safeText(input.title, 500),
     pageUrl: safeText(input.pageUrl, 8192),
+    ...playback,
   };
   const temporary = ['data:', 'blob:'].includes(parsed.protocol);
   const inline = Object.hasOwn(input, 'dataBase64');
@@ -261,20 +285,87 @@ function checkedMedia(input) {
   return body;
 }
 
-async function notifyTab(tabId, frameId, message, status = 'working', locateReceipt) {
-  if (typeof tabId !== 'number') return;
-  await chrome.tabs.sendMessage(tabId, { type: 'shitu:status', message, status, ...(locateReceipt ? { locateReceipt } : {}) }, { frameId: frameId || 0 }).catch(() => {});
+function pageTarget(sender) {
+  return sender.documentId ? { documentId: sender.documentId } : { frameId: sender.frameId || 0 };
 }
 
-async function readVideoFromPage(body, sender) {
+function notifyTab(sender, message, { status = 'working', locateReceipt, clientCaptureId, progress } = {}) {
+  if (typeof sender?.tab?.id !== 'number') return;
+  void Promise.resolve().then(() => chrome.tabs.sendMessage(sender.tab.id, {
+    type: 'shitu:status', message, status, ...(locateReceipt ? { locateReceipt } : {}),
+    ...(clientCaptureId ? { clientCaptureId } : {}), ...(progress ? { progress } : {})
+  }, pageTarget(sender))).catch(() => {});
+}
+
+function readFromPage(sender, message) {
+  let timer;
+  const deadline = new Promise((_resolve, reject) => {
+    timer = setTimeout(() => reject(issue('网页读取超时，请刷新页面后重试。', 'PAGE_READ_TIMEOUT')), PAGE_READ_TIMEOUT);
+  });
+  const reply = Promise.resolve().then(() => chrome.tabs.sendMessage(sender.tab.id, message, pageTarget(sender)));
+  return Promise.race([reply, deadline]).finally(() => clearTimeout(timer));
+}
+
+async function readVideoFromPage(body, sender, clientCaptureId) {
   if (body.kind !== 'video' || body.dataBase64 || !/^https?:/i.test(body.url) || typeof sender?.tab?.id !== 'number') return null;
-  const target = sender.documentId ? { documentId: sender.documentId } : { frameId: sender.frameId || 0 };
-  const reply = await chrome.tabs.sendMessage(sender.tab.id, {
-    type: 'shitu:resolve-media', media: { ...body, pageUrl: sender.url || body.pageUrl }, browserVideo: true
-  }, target).catch(() => null);
+  const reply = await readFromPage(sender, {
+    type: 'shitu:resolve-media', media: { ...body, pageUrl: sender.url || body.pageUrl }, browserVideo: true,
+    ...(clientCaptureId ? { clientCaptureId } : {})
+  }).catch(error => {
+    if (error.code === 'PAGE_READ_TIMEOUT') throw error;
+    return null;
+  });
   const media = reply?.media;
   if (!reply?.ok || media?.url !== body.url || media.kind !== 'video' || !Object.hasOwn(media, 'dataBase64')) return null;
   return checkedMedia({ ...body, dataBase64: media.dataBase64, mimeType: media.mimeType });
+}
+
+function captureProgress(value) {
+  if (!['receiving', 'downloading', 'muxing', 'importing', 'complete'].includes(value?.phase)) return null;
+  const receivedBytes = Number.isSafeInteger(value.receivedBytes) && value.receivedBytes >= 0 ? value.receivedBytes : 0;
+  const knownTotal = Number.isSafeInteger(value.totalBytes) && value.totalBytes > 0 && value.totalBytes >= receivedBytes;
+  return { phase: value.phase, receivedBytes, ...(knownTotal ? { totalBytes: value.totalBytes } : {}) };
+}
+
+function displayBytes(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
+}
+
+function progressMessage(progress) {
+  if (progress.phase === 'receiving') return '桌面正在接收素材…';
+  if (progress.phase === 'muxing') return '正在合并音视频（不重新编码）…';
+  if (progress.phase === 'importing') return '正在写入素材库，等待保存确认…';
+  if (progress.phase === 'complete') return '正在确认入库结果…';
+  const received = displayBytes(progress.receivedBytes);
+  if (progress.totalBytes) {
+    const percent = Math.floor(progress.receivedBytes / progress.totalBytes * 100);
+    return `正在下载素材 · ${percent}% · ${received} / ${displayBytes(progress.totalBytes)}`;
+  }
+  return progress.receivedBytes ? `正在下载素材 · 已接收 ${received}` : '正在下载素材…';
+}
+
+function watchProgress(requestId, config, publish) {
+  let stopped = false, timer, previous;
+  async function poll() {
+    try {
+      const reply = await localRequest('/v1/capture-progress', { requestId }, config, 1500);
+      if (stopped) return;
+      const progress = captureProgress(reply.progress);
+      const key = progress && JSON.stringify(progress);
+      if (key && key !== previous) {
+        previous = key;
+        await publish(progress.phase, progressMessage(progress), progress);
+      }
+    } catch (error) {
+      if (['SERVER_ERROR', 'UNAUTHORIZED'].includes(error.code)) stopped = true;
+    } finally {
+      if (!stopped) timer = setTimeout(poll, PROGRESS_INTERVAL);
+    }
+  }
+  timer = setTimeout(poll, PROGRESS_INTERVAL);
+  return () => { stopped = true; clearTimeout(timer); };
 }
 
 function acceptedSocialPage(value, frameUrl) {
@@ -286,56 +377,73 @@ function acceptedSocialPage(value, frameUrl) {
         /^\/(?:[a-z0-9_.]+\/)?(?:reels?|p|tv)\/[a-z0-9_-]+(?:\/embed(?:\/captioned)?)?\/?$/i.test(post.pathname)) return post.href;
     if (/^(?:(?:www|platform)\.)?(?:twitter|x)\.com$/.test(post.hostname) &&
         /^\/(?:[a-z0-9_]+\/status|i\/(?:web\/)?status)\/\d+\/?$/i.test(post.pathname)) return post.href;
+    if (/^(?:[a-z0-9-]+\.)?pinterest\.com$/.test(post.hostname) && /^\/pin\/\d{1,32}\/?$/.test(post.pathname)) return post.href;
+    if (/^(?:www\.)?vimeo\.com$/.test(post.hostname) && /^(?:\/(?:channels\/[^/]+|groups\/[^/]+\/videos))?\/\d+\/?$/.test(post.pathname)) return post.href;
   } catch {}
   return null;
 }
 
-async function capture(input, sender) {
+async function capture(input, sender, clientCaptureId) {
   let body, key, requestId, resolveShared, rejectShared;
   try {
-    body = checkedMedia(input);
-    if (/^https?:/i.test(sender?.url || '')) body.pageUrl = (body.kind === 'video' && acceptedSocialPage(input.socialPageUrl, sender.url)) || sender.url;
-    else if (!/^https?:/i.test(body.pageUrl || '') && /^https?:/i.test(sender?.tab?.url || '')) body.pageUrl = sender.tab.url;
+    body = checkedMedia(input, sender?.url);
+    if (!body.playback) {
+      if (/^https?:/i.test(sender?.url || '')) body.pageUrl = (body.kind === 'video' && acceptedSocialPage(input.socialPageUrl, sender.url)) || sender.url;
+      else if (!/^https?:/i.test(body.pageUrl || '') && /^https?:/i.test(sender?.tab?.url || '')) body.pageUrl = sender.tab.url;
+    }
     key = JSON.stringify([sender?.tab?.id, sender?.documentId || sender?.frameId || 0, body.url]);
     if (pending.has(key)) {
       const shared = pending.get(key);
       key = null;
+      if (clientCaptureId) {
+        shared.clientCaptureId = clientCaptureId;
+        if (shared.status) notifyTab(sender, shared.status.message, { ...shared.status, clientCaptureId });
+      }
       await recordFailure(issue('这份素材仍在采集中，正在等待同一任务的保存结果。', 'ALREADY_PENDING'), { name: body.name });
-      return shared;
+      return shared.promise;
     }
     const shared = new Promise((resolve, reject) => { resolveShared = resolve; rejectShared = reject; });
     shared.catch(() => {});
-    pending.set(key, shared);
+    const job = { promise: shared, clientCaptureId };
+    pending.set(key, job);
     requestId = `${Date.now()}-${++requestSerial}`;
     activeStatusId = requestId;
     const name = body.name || body.title || '网页素材';
-    await recordCapture({ requestId, ok: false, pending: true, status: 'working', phase: 'connecting', at: Date.now(), name,
-      message: '正在连接桌面 Mosaic，尚未保存。' });
+    function publish(phase, message, progress) {
+      job.status = { message, progress };
+      notifyTab(sender, message, { progress, clientCaptureId: job.clientCaptureId });
+      return recordCapture({ requestId, ok: false, pending: true, status: 'working', phase, at: Date.now(), name,
+        message, ...(progress ? { progress } : {}) });
+    }
+    await publish('connecting', '正在连接桌面 Mosaic，尚未保存…');
     let connection = await ensureConnection();
     if (!connection.status.ready) throw issue('请先在桌面 Mosaic 中选择或新建素材库。', 'LIBRARY_NOT_READY');
     const destination = await captureDestination(connection.status.libraryId);
-    const message = body.dataBase64 ? '正在写入素材库，等待保存确认…' : '正在下载并写入素材库，等待保存确认…';
-    await recordCapture({ requestId, ok: false, pending: true, status: 'working', phase: 'saving', at: Date.now(), name, message });
-    await notifyTab(sender?.tab?.id, sender?.frameId, message);
     async function submit(media) {
-      const payload = destination ? { ...media, destination } : media;
-      try { return await localRequest('/v1/capture', payload, connection.config, CAPTURE_TIMEOUT); }
+      const payload = { ...media, requestId, ...(destination ? { destination } : {}) };
+      async function attempt() {
+        if (media.playback && !connection.status.vimeoPlayback) throw issue('请将桌面 Mosaic 更新到支持 Vimeo 播放采集的版本。', 'INCOMPATIBLE_APP');
+        await publish(media.dataBase64 ? 'receiving' : 'downloading',
+          media.dataBase64 ? '正在把素材交给桌面…' : '正在下载素材…');
+        const stop = connection.status.captureProgress ? watchProgress(requestId, connection.config, publish) : null;
+        try { return await localRequest('/v1/capture', payload, connection.config, CAPTURE_TIMEOUT); }
+        finally { stop?.(); }
+      }
+      try { return await attempt(); }
       catch (error) {
         if (!['UNAUTHORIZED', 'CONNECTION_FAILED'].includes(error.code)) throw error;
         connection = await ensureConnection(true);
         if (!connection.status.ready) throw issue('请先在桌面 Mosaic 中选择或新建素材库。', 'LIBRARY_NOT_READY');
         if (destination && connection.status.libraryId !== destination.libraryId) throw new Error('素材库已切换，请重新采集。');
-        return localRequest('/v1/capture', payload, connection.config, CAPTURE_TIMEOUT);
+        return attempt();
       }
     }
     let result;
     try { result = await submit(body); }
     catch (error) {
-      if (error.code !== 'VIDEO_BROWSER_READ') throw error;
-      const message = '正在尝试从当前网页读取视频，尚未保存…';
-      await recordCapture({ requestId, ok: false, pending: true, status: 'working', phase: 'reading', at: Date.now(), name, message });
-      await notifyTab(sender?.tab?.id, sender?.frameId, message);
-      const browserVideo = await readVideoFromPage(body, sender);
+      if (body.playback || error.code !== 'VIDEO_BROWSER_READ') throw error;
+      await publish('reading', '正在从当前网页读取视频，尚未保存…');
+      const browserVideo = await readVideoFromPage(body, sender, job.clientCaptureId);
       if (!browserVideo) throw error;
       result = await submit(browserVideo);
     }
@@ -360,7 +468,8 @@ async function handleMessage(message, sender) {
   if (sender.id !== chrome.runtime.id) throw new Error('请求来源无效。');
   if (message?.type === 'shitu:capture') {
     if (!sender.tab || !/^https?:/i.test(sender.url || '')) throw new Error('请在普通网页中采集素材。');
-    return capture(message.media, sender);
+    const clientCaptureId = typeof message.clientCaptureId === 'string' && /^\d{13}-\d{1,10}$/.test(message.clientCaptureId) ? message.clientCaptureId : undefined;
+    return capture(message.media, sender, clientCaptureId);
   }
   if (message?.type === 'shitu:capture-failed' || message?.type === 'shitu:locate') {
     if (!sender.tab || !/^https?:/i.test(sender.url || '')) throw new Error('请求来源无效。');
@@ -398,22 +507,22 @@ chrome.runtime.onInstalled.addListener(initialize);
 chrome.runtime.onStartup.addListener(initialize);
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   if (info.menuItemId !== MENU_ID || !tab?.id) return;
-  const frameId = info.frameId || 0;
-  await notifyTab(tab.id, frameId, '正在准备采集，尚未保存…');
+  const sender = { tab, url: info.frameUrl || info.pageUrl, frameId: info.frameId || 0 };
+  notifyTab(sender, '正在准备采集，尚未保存…');
   try {
     let media = { url: info.srcUrl, kind: info.mediaType === 'video' ? 'video' : 'image', pageUrl: info.frameUrl || info.pageUrl, title: tab.title };
     const temporary = /^(blob|data):/i.test(info.srcUrl || '');
     if (temporary || media.kind === 'image') {
       let resolved;
-      try { resolved = await chrome.tabs.sendMessage(tab.id, { type: 'shitu:resolve-media', media }, { frameId }); }
-      catch (error) { if (temporary) throw new Error('无法读取临时素材，请刷新网页后重试。'); }
+      try { resolved = await readFromPage(sender, { type: 'shitu:resolve-media', media }); }
+      catch (error) { if (temporary) throw error.code === 'PAGE_READ_TIMEOUT' ? error : new Error('无法读取临时素材，请刷新网页后重试。'); }
       if (resolved?.ok) media = resolved.media;
       else if (resolved || temporary) throw new Error(resolved?.error || '无法读取临时素材。');
     }
-    const result = await capture(media, { tab, url: info.frameUrl || info.pageUrl, frameId });
-    await notifyTab(tab.id, frameId, result.message, result.status, result.locateReceipt);
+    const result = await capture(media, sender);
+    notifyTab(sender, result.message, { status: result.status, locateReceipt: result.locateReceipt });
   } catch (error) {
     await recordFailure(error, { name: tab.title });
-    await notifyTab(tab.id, frameId, error.message, 'error');
+    notifyTab(sender, error.message, { status: 'error' });
   }
 });

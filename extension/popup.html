@@ -7,8 +7,8 @@
   <section class="gesture"><kbd>Alt</kbd><b>＋</b><span>鼠标右键</span><p>在网页播放器、视频文件链接或图片上点击即可采集。<br>看到“已保存”后，可在 Mosaic 的“最近导入”查看。</p></section>
   <section class="destination"><label for="captureFolder">保存到</label><select id="captureFolder" aria-describedby="folderNote" disabled><option value="">未分类</option></select><p id="folderNote" role="status" hidden></p></section>
   <section class="automatic"><strong>打开 Mosaic 后自动连接</strong><p id="feedback" role="status">正在查找本机运行中的 Mosaic…</p></section>
-  <section id="recent" class="recent" hidden><span id="recentLabel">上次采集结果</span><button id="recentClear" type="button" title="清除记录，不会取消正在进行的采集">清除记录</button><p id="recentText"></p><button id="locateRecent" type="button" hidden>在 Mosaic 中查看</button><p id="locateNote" role="status" hidden></p></section>
-  <footer>采集助手 0.11.5<br>支持 Instagram Reel、X 帖子的视频文件，以及 Vimeo 官方下载版本。<br>视频直链下载上限 512 MB，网页内读取上限 20 MB。</footer>
+  <section id="recent" class="recent" hidden><span id="recentLabel">上次采集结果</span><button id="recentClear" type="button" title="清除记录，不会取消正在进行的采集">清除记录</button><p id="recentText"></p><progress id="recentProgress" aria-label="素材下载进度" hidden></progress><button id="locateRecent" type="button" hidden>在 Mosaic 中查看</button><p id="locateNote" role="status" hidden></p></section>
+  <footer>采集助手 0.11.11<br>支持 Pinterest、Instagram、X 和 Vimeo 提供的可读取视频。<br>桌面下载上限 512 MB，网页内读取上限 20 MB。</footer>
   <script src="popup.js"></script>
 </body>
 </html>
