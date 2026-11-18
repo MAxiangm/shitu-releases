@@ -20,11 +20,19 @@ const folderPanelSmoke = process.env.SHITU_FOLDER_PANEL_SMOKE === '1';
 const fontSmoke = process.env.SHITU_FONT_SMOKE === '1';
 const organizeSmoke = process.env.SHITU_ORGANIZE_SMOKE === '1';
 const skinsSmoke = process.env.SHITU_SKINS_SMOKE === '1';
-if ([smoke, updateSmoke, videoSmoke, modelSmoke, aeSmoke, folderSmoke, colorsSmoke, hoverVideoSmoke, assetDragSmoke, transcodeSmoke, uiRecoverySmoke, undoSmoke, folderPanelSmoke, fontSmoke, organizeSmoke, skinsSmoke].filter(Boolean).length > 1) throw new Error('Choose one smoke test mode at a time.');
-const testing = smoke || updateSmoke || videoSmoke || modelSmoke || aeSmoke || folderSmoke || colorsSmoke || hoverVideoSmoke || assetDragSmoke || transcodeSmoke || uiRecoverySmoke || undoSmoke || folderPanelSmoke || fontSmoke || organizeSmoke || skinsSmoke;
+const windowHeaderSmoke = process.env.SHITU_WINDOW_HEADER_SMOKE === '1';
+const modes = [smoke, updateSmoke, videoSmoke, modelSmoke, aeSmoke, folderSmoke, colorsSmoke, hoverVideoSmoke, assetDragSmoke, transcodeSmoke, uiRecoverySmoke, undoSmoke, folderPanelSmoke, fontSmoke, organizeSmoke, skinsSmoke, windowHeaderSmoke];
+if (modes.filter(Boolean).length > 1) throw new Error('Choose one smoke test mode at a time.');
+const testing = modes.includes(true);
 const base = testing
   ? path.resolve(process.env.SHITU_SMOKE_DIRECTORY)
   : path.join(root, '.recovery', 'development');
+if (windowHeaderSmoke) {
+  const relative = path.relative(path.join(root, '.recovery', 'tests'), base);
+  if (!relative || relative.startsWith('..') || path.isAbsolute(relative) || fs.lstatSync(base).isSymbolicLink()) throw new Error('Window header smoke directory must stay inside .recovery/tests.');
+  const marker = JSON.parse(fs.readFileSync(path.join(base, 'window-header-smoke-fixture.json'), 'utf8'));
+  if (!process.env.SHITU_WINDOW_HEADER_SMOKE_TOKEN || marker.token !== process.env.SHITU_WINDOW_HEADER_SMOKE_TOKEN) throw new Error('Window header smoke marker does not match.');
+}
 if (skinsSmoke) {
   const relative = path.relative(path.join(root, '.recovery', 'tests'), base);
   if (!relative || relative.startsWith('..') || path.isAbsolute(relative) || fs.lstatSync(base).isSymbolicLink()) throw new Error('Skins smoke directory must stay inside .recovery/tests.');
@@ -519,4 +527,5 @@ function configureUpdateSmoke() {
 if (fontSmoke) require('./font-smoke-bootstrap.cjs')({ root, base });
 if (organizeSmoke) require('./organize-smoke-bootstrap.cjs')({ root, base });
 if (skinsSmoke) require('./skins-smoke-bootstrap.cjs')({ root, base });
+if (windowHeaderSmoke) require('./window-header-smoke-bootstrap.cjs')({ root, base });
 require(path.join(root, 'src', 'main.cjs'));

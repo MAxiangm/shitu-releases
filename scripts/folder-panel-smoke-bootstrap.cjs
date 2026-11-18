@@ -64,7 +64,9 @@ module.exports = function configureFolderPanelSmoke({ root, base }) {
       };
       const readLayout = () => js(`(()=>{const rect=id=>{const b=document.querySelector(id).getBoundingClientRect();return{left:b.left,right:b.right,top:b.top,bottom:b.bottom,width:b.width,height:b.height};},doc=document.documentElement;return{width:innerWidth,height:innerHeight,scrollWidth:doc.scrollWidth,clientWidth:doc.clientWidth,sidebar:rect('#folderSidebar'),details:rect('#detailsPanel'),workspace:rect('.workspace'),gallery:rect('#galleryScroller')};})()`);
       const assertLayout = (layout, width, height) => {
-        assert.equal(layout.width, width); assert.equal(layout.height, height);
+        // Windows can round the thick frame to physical pixels at fractional DPI.
+        assert.ok(Math.abs(layout.width - width) <= 2 && Math.abs(layout.height - height) <= 2,
+          `Expected a viewport near ${width}×${height}, got ${layout.width}×${layout.height}`);
         assert.ok(layout.scrollWidth <= layout.clientWidth + 1, 'Docked panel and details cause horizontal page overflow');
         assert.ok(layout.sidebar.width >= 180 && layout.workspace.width > 200 && layout.details.width > 200, 'Layout hid an active panel');
         assert.ok(layout.workspace.left >= layout.sidebar.right + 8, 'Workspace overlaps the pinned folder sidebar');

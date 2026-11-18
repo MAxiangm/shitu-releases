@@ -1,6 +1,14 @@
 const { contextBridge, ipcRenderer, webUtils } = require('electron');
 const call = (channel, ...args) => ipcRenderer.invoke(`shitu:${channel}`, ...args);
 contextBridge.exposeInMainWorld('shitu', Object.freeze({
+  windowState: () => call('window-state'),
+  windowCommand: action => call('window-command', action),
+  setWindowSkin: id => call('window-skin', id),
+  onWindowState: callback => {
+    const listener = (_event, state) => callback(state);
+    ipcRenderer.on('shitu:window-state', listener);
+    return () => ipcRenderer.removeListener('shitu:window-state', listener);
+  },
   updateState: () => call('update-state'),
   checkUpdate: () => call('update-check'),
   openUpdateRelease: () => call('update-open-release'),

@@ -114,6 +114,7 @@ GLB/glTF、FBX、OBJ、STL、PLY 可离线预览，支持旋转、缩放、平�
 git clone https://github.com/MAxiangm/shitu-releases.git
 cd shitu-releases
 node scripts/prepare-build-resources.cjs
+npm install --omit=dev --ignore-scripts --no-package-lock
 node scripts/start.cjs
 ```
 

@@ -102,6 +102,7 @@ module.exports = function configureSkinsSmoke({ root, base }) {
         await capture(`skin-${skin}-font-compare-1080x700.png`); await key('Escape');
       }
       await setSkin('default');
+      await click('#headerMoreButton');
       await click('#backgroundMotionButton');
       assert.equal(await js("localStorage.getItem('shitu-background-motion')"), 'off');
       await setSkin('psp'); await setSkin('default');

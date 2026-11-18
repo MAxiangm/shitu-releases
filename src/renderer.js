@@ -650,7 +650,12 @@ function renderAppUpdate() {
     status === 'checking' ? '检查中' : status === 'installing' ? '更新中' : status === 'error' ? '更新重试' : '更新';
   $('appUpdateLabel').textContent = label;
   $('appUpdateButton').title = status === 'available' ? `发现新版本 ${latest}` : updateStatusText(snapshot);
-  $('appUpdateButton').classList.toggle('has-update', ['available', 'downloaded'].includes(status));
+  const hasUpdate = ['available', 'downloaded'].includes(status);
+  $('appUpdateButton').classList.toggle('has-update', hasUpdate);
+  $('headerMoreButton').classList.toggle('has-update', hasUpdate);
+  const moreLabel = hasUpdate ? '更多工具，有软件更新' : '更多工具';
+  $('headerMoreButton').setAttribute('aria-label', moreLabel);
+  $('headerMoreButton').title = moreLabel;
   $('appUpdateButton').disabled = status === 'installing' || updateUi.preparingInstall;
   $('appUpdateCurrent').textContent = snapshot.currentVersion ? `v${snapshot.currentVersion}` : '—';
   $('appUpdateLatest').textContent = latest || '尚未检查';
@@ -754,6 +759,7 @@ function applyLibrary(library, preserveSelection = true) {
   libraryRefreshSerial += 1;
   const rootChanged = (state.library.root || '').toLowerCase() !== (library.root || '').toLowerCase();
   if (rootChanged) {
+    setHeaderMenuOpen(false);
     batchRenameUi.close(true); fontCompareUi.close(); smartFoldersUi.close(); skinPickerUi.close();
     closeFolderMenu();
     collapsedFolders.clear();
@@ -1747,6 +1753,7 @@ function renderLibraryState() {
   $('backupButton').disabled = !ready || state.libraryChanging;
   $('collectorButton').disabled = !ready || state.libraryChanging;
   $('pluginCenterButton').disabled = !ready || state.libraryChanging;
+  $('toggleDetails').disabled = !ready || state.libraryChanging;
   $('searchInput').disabled = !ready || state.libraryChanging;
   $('formatFilter').disabled = !ready || state.libraryChanging;
   $('sortSelect').disabled = !ready || state.libraryChanging;
@@ -2623,6 +2630,55 @@ $('appUpdateOverlay').addEventListener('click', event => { if (event.target === 
 $('videoTranscodeButton').addEventListener('click', () => openVideoTranscode());
 $('settingsButton').addEventListener('click', openTranscodeSettings);
 $('skinButton').addEventListener('click', () => { videoHover.stop(); skinPickerUi.open(); });
+function setHeaderMenuOpen(open, { focus = false } = {}) {
+  $('headerMoreButton').setAttribute('aria-expanded', String(open));
+  $('headerMenu').classList.toggle('hidden', !open);
+  if (open) videoHover.stop();
+  if (focus) $('headerMoreButton').focus({ preventScroll: true });
+}
+$('headerMoreButton').addEventListener('click', () => setHeaderMenuOpen($('headerMenu').classList.contains('hidden')));
+$('headerMenu').addEventListener('click', event => {
+  if (event.target.closest('button:not(:disabled)')) setHeaderMenuOpen(false, { focus: true });
+}, true);
+document.addEventListener('pointerdown', event => {
+  if (!event.target.closest('.header-more')) setHeaderMenuOpen(false);
+});
+document.addEventListener('focusin', event => {
+  if (!event.target.closest('.header-more')) setHeaderMenuOpen(false);
+});
+document.querySelector('.header-more').addEventListener('keydown', event => {
+  if (event.key === 'Escape' && !$('headerMenu').classList.contains('hidden')) {
+    event.preventDefault(); event.stopPropagation(); setHeaderMenuOpen(false, { focus: true });
+  }
+});
+function renderWindowState(snapshot) {
+  const custom = snapshot?.customControls === true;
+  const expanded = snapshot?.maximized === true || snapshot?.fullScreen === true;
+  document.documentElement.toggleAttribute('data-custom-window', custom);
+  document.documentElement.toggleAttribute('data-window-maximized', custom && expanded);
+  $('windowControls').hidden = !custom;
+  const label = expanded ? '还原窗口' : '最大化窗口';
+  $('windowMaximize').setAttribute('aria-label', label);
+  $('windowMaximize').title = label;
+}
+if (api.windowState && api.windowCommand) {
+  let stateRevision = 0;
+  api.onWindowState?.(snapshot => { stateRevision++; renderWindowState(snapshot); });
+  api.windowState().then(snapshot => { if (!stateRevision) renderWindowState(snapshot); }).catch(messageError);
+  for (const [id, command] of [['windowMinimize', 'minimize'], ['windowMaximize', 'toggle-maximize'], ['windowClose', 'close']]) {
+    $(id).addEventListener('click', () => { void run(() => api.windowCommand(command)); });
+  }
+}
+if (api.setWindowSkin) {
+  const syncWindowSkin = () => { void api.setWindowSkin(window.ShituSkins.current().id).catch(messageError); };
+  window.addEventListener('shitu-skin-change', syncWindowSkin);
+  syncWindowSkin();
+}
+for (const region of [document.querySelector('.app-header'), $('windowControls')]) {
+  region.addEventListener('keydown', event => {
+    if (event.target.closest('button') && [' ', 'Enter', 'Delete', 'Backspace'].includes(event.key)) event.stopPropagation();
+  });
+}
 $('videoTranscodeSettings').addEventListener('click', openTranscodeSettings);
 $('transcodeSettingsClose').addEventListener('click', closeTranscodeSettings);
 $('transcodeSettingsCancel').addEventListener('click', closeTranscodeSettings);

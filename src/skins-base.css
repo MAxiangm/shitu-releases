@@ -40,16 +40,19 @@ html[data-skin]:not([data-skin="default"]) .workspace {
   background:var(--skin-surface); border-radius:var(--skin-radius); box-shadow:var(--skin-panel-shadow);
 }
 html[data-skin]:not([data-skin="default"]) :is(.toolbar,.folder-navigation,.workspace-footer,.details-top,.manager-current,.manager-choice,.collector-status,.collector-actions,.update-versions,.update-notes-area,.folder-color-section,.smart-folder-heading) { border-color:var(--skin-border); }
-html[data-skin]:not([data-skin="default"]) :is(.browser-popover,.folder-context-menu,.details-panel,.selection-bar,.modal,.progress-panel,.toast,.batch-rename-dialog,.sf-dialog,.font-compare-dialog,.preview-window,.preview-font,.preview-project,.sp-dialog) {
+html[data-skin]:not([data-skin="default"]) :is(.browser-popover,.folder-context-menu,.details-panel,.selection-bar,.modal,.progress-panel,.toast,.batch-rename-dialog,.sf-dialog,.font-compare-dialog,.preview-window,.preview-font,.preview-project,.sp-window) {
   background:var(--skin-surface); color:var(--skin-text); border-color:var(--skin-border-strong);
   border-radius:var(--skin-radius); box-shadow:var(--skin-panel-shadow);
 }
-html[data-skin]:not([data-skin="default"]) .app-shell.folder-panel-pinned #folderPanel { background:var(--skin-surface); border-color:var(--skin-border-strong); }
+html[data-skin]:not([data-skin="default"]) .app-shell.folder-panel-pinned #folderPanel { background:var(--skin-surface); border-color:var(--skin-border-strong); border-radius:var(--skin-radius); }
+html[data-skin]:not([data-skin="default"]) .folder-navigation-button { color:var(--skin-text); }
+html[data-skin]:not([data-skin="default"]) .folder-navigation-button:hover:not(:disabled) { color:var(--skin-text); background:var(--skin-hover); border-color:var(--skin-border); }
 html[data-skin]:not([data-skin="default"]) :is(.details-top,.batch-rename-header,.font-compare-heading,.sp-header) {
   background:var(--skin-title-bg); color:var(--skin-title-text); border-color:var(--skin-border);
 }
 html[data-skin]:not([data-skin="default"]) :is(.details-top,.batch-rename-header,.font-compare-heading,.sp-header) :is(h1,h2,h3,p,span,strong,button) { color:inherit; }
-html[data-skin]:not([data-skin="default"]) :is(.sf-heading,.preview-top) { color:var(--skin-text); }
+html[data-skin]:not([data-skin="default"]) .sf-heading { color:var(--skin-text); }
+html[data-skin]:not([data-skin="default"]) :is(.preview-top,.preview-video-status) { background:var(--skin-surface-2); border-color:var(--skin-border); }
 html[data-skin]:not([data-skin="default"]) :is(h1,h2,h3,h4,.asset-name,.folder-card-name,.detail-input,.metadata-row>span:last-child,.preview-top strong,.setup-option strong,.manager-choice strong,.progress-top strong,.selection-bar strong,.project-preview-summary h2,.transcode-settings-cpu strong,.video-transcode-worker strong,.sp-plugin-name,.sp-tool-title h3,.sp-settings h4,.font-compare-card-heading h3) { color:var(--skin-text); }
 html[data-skin]:not([data-skin="default"]) :is(.eyebrow,.section-label,.sidebar-hint,.folder-card-meta,.asset-subline,.asset-tags span,.metadata-row>span:first-child,.detail-label,.detail-tags-help,.detail-save-note,.detail-placeholder,.detail-placeholder p,.detail-placeholder span,.empty-state>p,.empty-footnote,.content-meta,.content-meta>span:last-child,.gallery-section-title,.workspace-footer,.breadcrumb,.breadcrumb>span,.storage-status,.local-label,.small-count,.nav-count,.search-box,.search-box kbd,.icon.muted,.folder-path-placeholder,.folder-breadcrumb-separator,.color-label-caption,.folder-color-title,.preview-meta,.preview-top span,.preview-bottom,.sf-label,.sf-eyebrow,.sf-description,.sf-summary,.sf-check,.sf-custom-days span,.batch-rename-field,.batch-rename-check,.batch-rename-preview-heading span,.batch-rename-extra,.batch-rename-status,.batch-rename-field small,.font-compare-summary,.font-compare-controls label,.font-compare-card-meta,.font-compare-asset-name,.font-compare-face,.font-compare-note,.font-preview-controls label,.font-preview-note,.modal p,.modal-parent-field,.update-versions dt,.update-notes-area h3,.update-hint,.update-progress-area>span,.collector-steps span,.collector-steps li::before,.manager-choice small,.manager-migrate>p,.setup-description,.setup-eyebrow,.setup-footnote,.setup-brand small,.setup-legacy>span,.setup-legacy code,.video-transcode-options label,.video-transcode-options small,.video-transcode-progress span,.video-transcode-device-row,.video-transcode-worker span,.transcode-settings-options label,.transcode-settings-options small,.transcode-settings-cpu,.sp-panel,.sp-field-label,.sp-range-heading,.sp-tool-title p,.sp-plugin-description,.sp-field small,.sp-setting-note,.sp-engine-info,.sp-progress-content p,.sp-result-links,.sp-progress-content progress) { color:var(--skin-muted); }
 html[data-skin]:not([data-skin="default"]) :is(.nav-item,.collection-menu summary,.folder-breadcrumb,.folder-panel-pin,.text-button,.selection-action,.icon-button,.folder-more,.folder-toggle,.folder-card-more,.smart-folder-edit,.color-label-custom,.tag-pill,.folder-context-menu button,.manager-choice,.preview-motion,.sp-text-button) { color:var(--skin-text); }
@@ -111,9 +114,10 @@ html[data-skin]:not([data-skin="default"]) .tag-pill::before { color:inherit; op
 html[data-skin]:not([data-skin="default"]) :is(.sp-plugin-item.is-active,.sp-source.is-selected) { border-color:var(--skin-accent); background:var(--skin-hover); }
 html[data-skin]:not([data-skin="default"]) .sp-source-check { background:var(--skin-accent); color:var(--skin-accent-ink); }
 html[data-skin]:not([data-skin="default"]) .sp-preview { border-color:var(--skin-border); }
-html[data-skin]:not([data-skin="default"]) :is(.sp-dialog,.sp-sidebar,.sp-settings,.sp-header,.sp-footer) { border-color:var(--skin-border); }
+html[data-skin]:not([data-skin="default"]) :is(.sp-window,.sp-sidebar,.sp-settings,.sp-header,.sp-footer) { border-color:var(--skin-border); }
 html[data-skin]:not([data-skin="default"]) :is(.sp-sidebar,.sp-settings) { background:var(--skin-surface-2); }
 html[data-skin]:not([data-skin="default"]) .preview-arrow { background:var(--skin-surface); color:var(--skin-text); border-color:var(--skin-border-strong); }
+html[data-skin]:not([data-skin="default"]) .preview-arrow:hover { background:var(--skin-hover); }
 html[data-skin]:not([data-skin="default"]) .cylinder-card-surface { background:var(--skin-surface); color:var(--skin-text); border-color:var(--skin-border); }
 html[data-skin]:not([data-skin="default"]) .cylinder-card.active .cylinder-card-surface { border-color:var(--skin-accent); }
 /* Keep errors distinct in both light and dark palettes. */
@@ -123,8 +127,10 @@ html[data-skin]:not([data-skin="default"]) :is(.details-top,.batch-rename-header
 html[data-skin]:not([data-skin="default"]) :is(.tag-pill.active,.folder-panel-pin[aria-pressed=true],.selection-mode-button[aria-pressed=true],.header-actions>.icon-button[aria-pressed=true]) {
   background:var(--skin-selected-bg); color:var(--skin-selected-text); border-color:var(--skin-accent);
 }
+html[data-skin]:not([data-skin="default"]) .folder-row .nav-item .icon { color:var(--skin-muted); }
 html[data-skin]:not([data-skin="default"]) .nav-item.active .icon { color:inherit; }
 html[data-skin]:not([data-skin="default"]) :is(.preview-video-status,.project-preview-summary,.project-composition-meta,.project-preview-notes,.sp-source-heading,.sp-source-actions,.sp-list-empty,.sp-no-sources,.sp-progress-label strong,.sp-progress-label>span,.sp-range-heading output) { color:var(--skin-muted); }
+html[data-skin]:not([data-skin="default"]) .preview-video-status.is-error { color:var(--skin-error); }
 html[data-skin]:not([data-skin="default"]) .sp-tool-mark { color:var(--skin-accent); border-color:var(--skin-border); }
 html[data-skin]:not([data-skin="default"]) :is(.details-top,.batch-rename-header,.font-compare-heading,.sp-header) :is(h1,h2,h3,h4) { color:var(--skin-title-text)!important; }
 html[data-skin]:not([data-skin="default"]) .batch-rename-table-scroll th { color:var(--skin-muted); }

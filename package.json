@@ -1,7 +1,7 @@
 {
   "name": "shitu",
   "productName": "拾图",
-  "version": "0.26.0",
+  "version": "0.26.3",
   "description": "A local-first image library for Windows",
   "main": "src/main.cjs",
   "private": true,
@@ -23,6 +23,7 @@
     "test:fonts": "node scripts/smoke-font.cjs",
     "test:organize": "node scripts/smoke-organize.cjs",
     "test:skins": "node scripts/smoke-skins.cjs",
+    "test:window-header": "node scripts/smoke-window-header.cjs",
     "test:drag": "node scripts/smoke-asset-drag.cjs",
     "test:colors": "node scripts/smoke-colors.cjs",
     "test:video": "node scripts/smoke-video.cjs",
@@ -40,6 +41,7 @@
     "playwright-core": "^1.64.1"
   },
   "dependencies": {
+    "koffi": "3.3.8",
     "sharp": "0.35.5"
   },
   "repository": {

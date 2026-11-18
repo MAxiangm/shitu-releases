@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' shitu: data: blob:; media-src 'self' shitu:; font-src 'self' shitu:; style-src 'self'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self' shitu: data: blob:; worker-src 'self' blob:; object-src 'none'; base-uri 'none'">
-  <title></title>
+  <title>拾图</title>
   <script src="./skins.js"></script>
   <link rel="stylesheet" href="./styles.css">
   <link rel="stylesheet" href="./font-preview.css">
@@ -16,6 +16,7 @@
   <link rel="stylesheet" href="./skins-desktop.css">
   <link rel="stylesheet" href="./skins-consoles.css">
   <link rel="stylesheet" href="./skin-picker.css">
+  <link rel="stylesheet" href="./window-header.css">
 </head>
 <body>
   <canvas id="ambientParticles" aria-hidden="true"></canvas>
@@ -53,12 +54,40 @@
     <symbol id="i-redo" viewBox="0 0 24 24"><path d="m15 5 5 5-5 5M20 10H10a6 6 0 0 0 0 12"/></symbol>
     <symbol id="i-shield" viewBox="0 0 24 24"><path d="m12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6Z"/><path d="m8 12 3 3 5-6"/></symbol>
   </defs></svg>
+  <header class="app-header">
+    <div class="header-identity">
+      <div class="brand"><div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span><span></span></div><div><strong>拾图</strong></div></div>
+      <button class="library-switch" id="libraryInfo" type="button" aria-label="管理素材库" title="管理素材库位置">
+        <span class="library-icon"><svg class="icon" aria-hidden="true"><use href="#i-folder"/></svg></span>
+        <span><strong id="libraryDisplayName">我的素材库</strong><small id="libraryDisplayStatus">本地存储 · 随时灵感</small></span>
+        <svg class="icon" aria-hidden="true"><use href="#i-chevron"/></svg>
+      </button>
+    </div>
+    <div class="header-drag-space" aria-hidden="true"></div>
+    <div id="headerActions" class="header-actions" aria-label="拾图工具">
+      <button id="videoTranscodeButton" class="header-button hidden" type="button" aria-haspopup="dialog" title="查看视频转码任务"><svg class="icon" aria-hidden="true"><use href="#i-video"/></svg><span id="videoTranscodeLabel">视频转码</span></button>
+      <button id="skinButton" class="header-button" type="button" aria-haspopup="dialog" title="更换界面皮肤" aria-label="更换界面皮肤"><svg class="icon" aria-hidden="true"><use href="#i-palette"/></svg><span>皮肤</span></button>
+      <button id="collectorButton" class="header-button collector-button" type="button" title="浏览器采集"><svg class="icon" aria-hidden="true"><use href="#i-browser"/></svg><span>浏览器采集</span></button>
+      <button class="icon-button" id="toggleDetails" type="button" aria-label="显示或隐藏详情面板" title="显示 / 隐藏详情" aria-pressed="false"><svg class="icon" aria-hidden="true"><use href="#i-info"/></svg></button>
+      <div class="header-more">
+        <button id="headerMoreButton" class="icon-button header-more-button" type="button" aria-label="更多工具" title="更多工具" aria-controls="headerMenu" aria-expanded="false"><svg class="icon" aria-hidden="true"><use href="#i-more"/></svg></button>
+        <div id="headerMenu" class="header-menu hidden" role="group" aria-label="更多工具">
+          <button id="settingsButton" class="header-button" type="button" aria-haspopup="dialog" title="设置转码设备"><svg class="icon" aria-hidden="true"><use href="#i-settings"/></svg><span>转码设备设置</span></button>
+          <button id="appUpdateButton" class="header-button update-button" type="button" title="检查拾图更新" aria-haspopup="dialog"><svg class="icon" aria-hidden="true"><use href="#i-download"/></svg><span id="appUpdateLabel">更新</span></button>
+          <button id="pluginCenterButton" class="header-button" type="button" title="插件中心"><svg class="icon" aria-hidden="true"><use href="#i-image"/></svg><span>插件中心</span></button>
+          <button id="backupButton" class="header-button" type="button" title="备份素材库"><svg class="icon" aria-hidden="true"><use href="#i-shield"/></svg><span>备份素材库</span></button>
+          <button id="backgroundMotionButton" class="header-button" type="button" aria-pressed="true" title="开启或暂停背景动画"><svg class="icon" aria-hidden="true"><use href="#i-motion"/></svg><span id="backgroundMotionLabel">动效：开</span></button>
+        </div>
+      </div>
+    </div>
+    <div class="window-controls-slot" aria-hidden="true"></div>
+  </header>
+  <div id="windowControls" class="window-controls" role="group" aria-label="窗口控制" hidden>
+    <button id="windowMinimize" type="button" aria-label="最小化窗口" title="最小化窗口"><svg class="window-control-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8h10"/></svg></button>
+    <button id="windowMaximize" type="button" aria-label="最大化窗口" title="最大化窗口"><svg class="window-control-icon window-maximize-icon" viewBox="0 0 16 16" aria-hidden="true"><rect x="3.5" y="3.5" width="9" height="9"/></svg><svg class="window-control-icon window-restore-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M6 3.5h6.5V10"/><rect x="3.5" y="6" width="6.5" height="6.5"/></svg></button>
+    <button id="windowClose" type="button" aria-label="关闭窗口" title="关闭窗口"><svg class="window-control-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="m4 4 8 8M12 4l-8 8"/></svg></button>
+  </div>
   <div class="app-shell details-hidden">
-    <header class="app-header">
-      <button class="library-switch" id="libraryInfo" aria-label="管理素材库" title="管理素材库位置"><span class="library-icon"><svg class="icon"><use href="#i-folder"/></svg></span><span><strong id="libraryDisplayName">我的素材库</strong><small id="libraryDisplayStatus">本地存储 · 随时灵感</small></span><svg class="icon"><use href="#i-chevron"/></svg></button>
-      <div class="brand"><div class="brand-mark"><span></span><span></span><span></span><span></span></div><div><strong>拾图</strong><span>SHITU LIBRARY</span></div></div>
-      <div class="header-actions"><button id="videoTranscodeButton" class="header-button hidden" type="button" aria-haspopup="dialog" title="查看视频转码任务"><svg class="icon"><use href="#i-video"/></svg><span id="videoTranscodeLabel">视频转码</span></button><button id="skinButton" class="header-button" type="button" aria-haspopup="dialog" title="更换界面皮肤" aria-label="更换界面皮肤"><svg class="icon"><use href="#i-palette"/></svg><span>皮肤</span></button><button id="settingsButton" class="header-button" type="button" aria-haspopup="dialog" title="设置转码设备"><svg class="icon"><use href="#i-settings"/></svg><span>设置</span></button><button id="appUpdateButton" class="header-button update-button" type="button" title="检查拾图更新" aria-haspopup="dialog"><svg class="icon"><use href="#i-download"/></svg><span id="appUpdateLabel">更新</span></button><button id="pluginCenterButton" class="header-button" title="插件中心"><svg class="icon"><use href="#i-image"/></svg><span>插件</span></button><button id="backupButton" class="header-button" title="备份素材库"><svg class="icon"><use href="#i-shield"/></svg><span>备份</span></button><button id="backgroundMotionButton" class="header-button" type="button" aria-pressed="true" title="开启或暂停背景粒子与线条动画"><svg class="icon"><use href="#i-motion"/></svg><span id="backgroundMotionLabel">动效：开</span></button><button id="collectorButton" class="header-button collector-button" title="浏览器采集"><span>浏览器采集</span><svg class="icon"><use href="#i-arrow"/></svg></button><button class="icon-button" id="toggleDetails" aria-label="显示或隐藏详情面板" title="显示 / 隐藏详情" aria-pressed="false"><svg class="icon"><use href="#i-info"/></svg></button></div>
-    </header>
     <aside id="folderSidebar" class="folder-sidebar hidden" aria-label="文件夹侧栏"></aside>
     <main class="workspace">
       <section class="page-heading"><div><div class="eyebrow">YOUR VISUAL COLLECTION</div><h1 id="pageTitle">全部素材<span class="title-dot">.</span></h1><p id="pageSubtitle">收集值得留下的灵感。</p></div></section>

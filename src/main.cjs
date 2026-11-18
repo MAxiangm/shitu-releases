@@ -20,6 +20,7 @@ const { createVideoTranscodeService } = require('./video-transcode-service.cjs')
 const { createTranscodeDeviceManager } = require('./transcode-devices.cjs');
 const { createTranscodeSettings, executionPlan } = require('./transcode-settings.cjs');
 const { createUiRecovery } = require('./ui-recovery.cjs');
+const { createWindowCorners } = require('./window-corners.cjs');
 const { createVideoPreviewRequests } = require('./video-preview-requests.cjs');
 const { createModelService } = require('./model-service.cjs');
 const { createFontService } = require('./font-service.cjs');
@@ -36,6 +37,7 @@ nativeTheme.themeSource = 'dark';
 app.setAppUserModelId('local.shitu.desktop');
 protocol.registerSchemesAsPrivileged([{ scheme: 'shitu', privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true } }]);
 let mainWindow;
+let setWindowSkin;
 let library;
 let importing = false;
 let closing = false;
@@ -68,6 +70,7 @@ let activeOperations = 0;
 let historyBusy = false;
 const metadataSaves = new Set();
 const indexPage = pathToFileURL(path.join(__dirname, 'index.html')).href;
+const customWindowControls = process.platform === 'win32';
 const overrideRoot = process.env.SHITU_LIBRARY;
 const legacyRoot = path.join(app.isPackaged ? path.dirname(process.execPath) : app.getAppPath(), 'library');
 const extensionPath = app.isPackaged ? path.join(path.dirname(process.execPath), 'Chrome扩展') : path.join(app.getAppPath(), 'extension');
@@ -230,6 +233,35 @@ function checkedHandler(channel, handler) {
   });
 }
 
+function windowState(window = mainWindow) {
+  return {
+    customControls: customWindowControls,
+    maximized: window.isMaximized(),
+    fullScreen: window.isFullScreen()
+  };
+}
+
+function windowCommand(action) {
+  if (!customWindowControls) throw new Error('当前平台使用系统窗口按钮');
+  const window = mainWindow;
+  switch (action) {
+    case 'minimize':
+      if (window.isMinimizable()) window.minimize();
+      break;
+    case 'toggle-maximize':
+      if (window.isFullScreen()) window.setFullScreen(false);
+      else if (window.isMaximized()) window.unmaximize();
+      else if (window.isMaximizable()) window.maximize();
+      break;
+    case 'close':
+      // Keep native Close behavior, including the existing work and save guards.
+      setImmediate(() => { if (!window.isDestroyed()) window.close(); });
+      break;
+    default:
+      throw new Error('不支持的窗口操作');
+  }
+}
+
 function ensureUpdateCanInstall() {
   if (!app.isPackaged || process.platform !== 'win32') throw new Error('开发模式不安装更新，请使用正式安装版');
   if (installingUpdate || closing || activeOperations || switchingLibrary || importing || draggingAssets || videoTranscodeService?.busy() || imagePlugins?.busy() || collector?.activeCount()) {
@@ -377,6 +409,9 @@ async function importPaths(paths, folderId = null) {
 }
 
 function bindHandlers() {
+  checkedHandler('window-state', () => windowState());
+  checkedHandler('window-command', windowCommand);
+  checkedHandler('window-skin', id => setWindowSkin?.(id));
   checkedHandler('get-history-state', () => historyState());
   checkedHandler('undo-history', (expectedRoot, expectedId) => replayHistory('undo', expectedRoot, expectedId));
   checkedHandler('redo-history', (expectedRoot, expectedId) => replayHistory('redo', expectedRoot, expectedId));
@@ -545,11 +580,16 @@ function bindHandlers() {
 async function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1460, height: 920, minWidth: 1080, minHeight: 700,
+    ...(customWindowControls ? { frame: false, thickFrame: true, roundedCorners: false } : {}),
     title: '', backgroundColor: '#0a0a0a',
     icon: path.join(__dirname, '..', 'assets', 'icon.ico'),
     autoHideMenuBar: true, show: false,
     webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true, spellcheck: false }
   });
+  if (customWindowControls) {
+    try { setWindowSkin = createWindowCorners(mainWindow); }
+    catch (error) { recordUiDiagnostic({ event: 'window-corners-unavailable', source: 'main', reason: error.code }); }
+  }
   mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   mainWindow.webContents.on('will-navigate', (event, url) => { if (url !== indexPage) event.preventDefault(); });
   mainWindow.webContents.session.setPermissionRequestHandler((_wc, _permission, callback) => callback(false));
@@ -571,6 +611,9 @@ async function createWindow() {
   };
   for (const event of ['minimize', 'hide']) mainWindow.on(event, () => sendVisibility(false));
   for (const event of ['restore', 'show', 'focus']) mainWindow.on(event, () => sendVisibility(true));
+  for (const event of ['maximize', 'unmaximize', 'restore', 'enter-full-screen', 'leave-full-screen']) {
+    mainWindow.on(event, () => sendActionEvent('window-state', windowState()));
+  }
   for (const event of ['restore', 'focus']) mainWindow.on(event, () => updateScheduler?.trigger(event));
   mainWindow.on('close', event => {
     if (mayClose) { mayClose=false; closing=false; return; }

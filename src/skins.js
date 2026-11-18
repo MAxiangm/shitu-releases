@@ -12,16 +12,16 @@
   'use strict';
   const STORAGE_KEY = 'shitu-skin';
   const catalog = Object.freeze([
-    { id: 'default', name: '拾图原版', description: '纯黑界面 · 流线背景', base: '#111111', surface: '#222222', accent: '#dedede', ink: '#ffffff', family: 'original' },
-    { id: 'famicom', name: '红白机', description: '奶白机壳 · 酒红按键', base: '#eee8d8', surface: '#faf6e9', accent: '#981f36', ink: '#442c29', family: 'console' },
-    { id: 'psp', name: 'PSP', description: '钢琴黑 · 冷光面板', base: '#111722', surface: '#222c3d', accent: '#a9d6ff', ink: '#f0f5ff', family: 'console' },
-    { id: 'gameboy', name: 'Game Boy', description: '灰色机壳 · 橄榄绿屏', base: '#b9bdab', surface: '#c9d59b', accent: '#42552c', ink: '#25361d', family: 'console' },
-    { id: 'switch', name: 'Switch', description: '深灰底色 · 红蓝点缀', base: '#24272b', surface: '#32363d', accent: '#00c3e3', ink: '#f4f5f7', family: 'console' },
-    { id: 'win97', name: 'Win97', description: '经典灰色 · 渐变标题', base: '#527a88', surface: '#d4d0c8', accent: '#294f7e', ink: '#1b2026', family: 'desktop' },
-    { id: 'win98', name: 'Win98', description: '青绿桌面 · 立体控件', base: '#008080', surface: '#c0c0c0', accent: '#000080', ink: '#111111', family: 'desktop' },
-    { id: 'winxp', name: 'WinXP', description: '蓝色标题 · 奶白面板', base: '#426fa5', surface: '#ece9d8', accent: '#245edb', ink: '#1a2740', family: 'desktop' },
-    { id: 'mac', name: 'Mac', description: '浅灰玻璃 · 柔和圆角', base: '#e5e9f0', surface: '#f8f9fc', accent: '#087cf0', ink: '#242832', family: 'desktop' }
-  ].map(Object.freeze));
+    { id: 'default', name: '拾图原版', description: '纯黑界面 · 流线背景', base: '#111111', surface: '#222222', accent: '#dedede', ink: '#ffffff', family: 'original', windowCorners: [8, 8, 8, 8] },
+    { id: 'famicom', name: '红白机', description: '奶白机壳 · 酒红按键', base: '#eee8d8', surface: '#faf6e9', accent: '#981f36', ink: '#442c29', family: 'console', windowCorners: [6, 6, 6, 6] },
+    { id: 'psp', name: 'PSP', description: '钢琴黑 · 冷光面板', base: '#111722', surface: '#222c3d', accent: '#a9d6ff', ink: '#f0f5ff', family: 'console', windowCorners: [20, 20, 20, 20] },
+    { id: 'gameboy', name: 'Game Boy', description: '灰色机壳 · 橄榄绿屏', base: '#b9bdab', surface: '#c9d59b', accent: '#42552c', ink: '#25361d', family: 'console', windowCorners: [6, 6, 20, 6] },
+    { id: 'switch', name: 'Switch', description: '深灰底色 · 红蓝点缀', base: '#24272b', surface: '#32363d', accent: '#00c3e3', ink: '#f4f5f7', family: 'console', windowCorners: [12, 12, 12, 12] },
+    { id: 'win97', name: 'Win97', description: '经典灰色 · 渐变标题', base: '#527a88', surface: '#d4d0c8', accent: '#294f7e', ink: '#1b2026', family: 'desktop', windowCorners: [] },
+    { id: 'win98', name: 'Win98', description: '青绿桌面 · 立体控件', base: '#008080', surface: '#c0c0c0', accent: '#000080', ink: '#111111', family: 'desktop', windowCorners: [] },
+    { id: 'winxp', name: 'WinXP', description: '蓝色标题 · 奶白面板', base: '#426fa5', surface: '#ece9d8', accent: '#245edb', ink: '#1a2740', family: 'desktop', windowCorners: [10, 10, 6, 6] },
+    { id: 'mac', name: 'Mac', description: '浅灰玻璃 · 柔和圆角', base: '#e5e9f0', surface: '#f8f9fc', accent: '#087cf0', ink: '#242832', family: 'desktop', windowCorners: [14, 14, 14, 14] }
+  ].map(skin => Object.freeze({ ...skin, windowCorners: Object.freeze(skin.windowCorners) })));
   const get = id => catalog.find(skin => skin.id === id) || catalog[0];
   const normalize = id => get(id).id;
   function create({ document, getStorage = () => null, onChange = () => {} } = {}) {

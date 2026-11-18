@@ -93,6 +93,8 @@ jobs:
         run: |
           if (-not (Test-Path -LiteralPath 'C:\Program Files\7-Zip\7z.exe')) { choco install 7zip --yes --no-progress }
           node scripts/prepare-build-resources.cjs
+      - name: Install pinned production dependencies
+        run: npm install --omit=dev --ignore-scripts --no-package-lock
       - name: Prepare video decoder and DXV test samples
         run: |
           node scripts/prepare-video-runtime.cjs
@@ -119,6 +121,10 @@ jobs:
         run: node scripts/smoke-organize.cjs
       - name: Smoke test skins and appearance persistence
         run: node scripts/smoke-skins.cjs
+      - name: Smoke test themed title bar and window controls
+        run: node scripts/smoke-window-header.cjs
+        env:
+          SHITU_TEST_WINDOW_HIT_TEST: '1'
       - name: Smoke test single and multiple assets dragged into folders
         run: node scripts/smoke-asset-drag.cjs
       - name: Smoke test metadata undo and redo
