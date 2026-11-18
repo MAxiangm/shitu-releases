@@ -99,6 +99,8 @@ jobs:
           node scripts/prepare-video-test-fixtures.cjs
       - name: Prepare verified model test samples
         run: node scripts/prepare-model-test-fixtures.cjs
+      - name: Prepare verified font test samples
+        run: node scripts/prepare-font-test-fixtures.cjs
       - name: Check source
         run: node scripts/check.cjs
       - name: Run unit tests
@@ -111,6 +113,8 @@ jobs:
         run: node scripts/smoke-folders.cjs
       - name: Smoke test dropdown and pinned folder panel
         run: node scripts/smoke-folder-panel.cjs
+      - name: Smoke test font import and preview
+        run: node scripts/smoke-font.cjs
       - name: Smoke test single and multiple assets dragged into folders
         run: node scripts/smoke-asset-drag.cjs
       - name: Smoke test metadata undo and redo
