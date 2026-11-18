@@ -60,7 +60,7 @@
   </defs></svg>
   <header class="app-header">
     <div class="header-identity">
-      <div class="brand"><svg class="brand-mark" aria-hidden="true"><use href="#i-mosaic-mark"/></svg><strong>Mosaic</strong></div>
+      <div class="brand"><div class="brand-mark" data-brand-motion="paused" aria-hidden="true"><svg class="brand-mark-static"><use href="#i-mosaic-mark"/></svg><span class="brand-mark-motion"></span></div><strong>Mosaic</strong></div>
       <button class="library-switch" id="libraryInfo" type="button" aria-label="管理素材库" title="管理素材库位置">
         <span class="library-icon"><svg class="icon" aria-hidden="true"><use href="#i-folder"/></svg></span>
         <span><strong id="libraryDisplayName">我的素材库</strong><small id="libraryDisplayStatus">本地存储 · 随时灵感</small></span>
@@ -81,7 +81,8 @@
           <button id="appUpdateButton" class="header-button update-button" type="button" title="检查 Mosaic 更新" aria-haspopup="dialog"><svg class="icon" aria-hidden="true"><use href="#i-download"/></svg><span id="appUpdateLabel">更新</span></button>
           <button id="pluginCenterButton" class="header-button" type="button" title="插件中心"><svg class="icon" aria-hidden="true"><use href="#i-image"/></svg><span>插件中心</span></button>
           <button id="backupButton" class="header-button" type="button" title="备份素材库"><svg class="icon" aria-hidden="true"><use href="#i-shield"/></svg><span>备份素材库</span></button>
-          <button id="backgroundMotionButton" class="header-button" type="button" aria-pressed="true" title="开启或暂停背景动画"><svg class="icon" aria-hidden="true"><use href="#i-motion"/></svg><span id="backgroundMotionLabel">动效：开</span></button>
+          <button id="brandMotionButton" class="header-button" type="button" aria-pressed="false" title="开启或暂停 Mosaic 标志动效"><svg class="icon" aria-hidden="true"><use href="#i-mosaic-mark"/></svg><span id="brandMotionLabel">标志动效：关</span></button>
+          <button id="backgroundMotionButton" class="header-button" type="button" aria-pressed="true" title="开启或暂停默认皮肤的背景动效"><svg class="icon" aria-hidden="true"><use href="#i-motion"/></svg><span id="backgroundMotionLabel">背景动效：开</span></button>
         </div>
       </div>
     </div>
@@ -122,7 +123,7 @@
     </main>
     <aside id="detailsPanel" class="details-panel hidden" aria-label="素材详情"><div class="details-top"><span>素材详情</span><button id="closeDetails" class="icon-button" title="收起详情" aria-label="收起详情"><svg class="icon"><use href="#i-close"/></svg></button></div><div id="detailsContent" class="details-content"></div><div class="details-footer"><svg class="icon"><use href="#i-shield"/></svg>原文件保留，整理更安心</div></aside>
   </div>
-  <section id="libraryOnboarding" class="library-onboarding hidden" aria-labelledby="setupTitle"><div class="setup-shell"><div class="setup-brand"><svg class="brand-mark" aria-hidden="true"><use href="#i-mosaic-mark"/></svg><span>Mosaic <small>万象 · 数字资产库</small></span></div><div class="setup-eyebrow">A HOME FOR YOUR INSPIRATION</div><h1 id="setupTitle">选择你的素材库位置<span class="title-dot">.</span></h1><p class="setup-description">图片、视频、标签与整理信息，都保存在你选择的素材库文件夹。<br>选一个空间充足、方便备份的位置，再开始收集灵感。</p><p id="setupError" class="setup-error hidden" role="alert"></p><div class="setup-options"><button id="setupCreateLibrary" class="setup-option"><span class="setup-option-icon"><svg class="icon"><use href="#i-plus"/></svg></span><strong>新建素材库</strong><span>选择保存位置，创建独立的素材库文件夹</span><svg class="icon setup-arrow"><use href="#i-arrow"/></svg></button><button id="setupOpenLibrary" class="setup-option"><span class="setup-option-icon"><svg class="icon"><use href="#i-folder"/></svg></span><strong>打开已有素材库</strong><span>选择已有素材库文件夹</span><svg class="icon setup-arrow"><use href="#i-arrow"/></svg></button></div><div id="setupLegacy" class="setup-legacy hidden"><span>检测到之前的素材库</span><code id="setupLegacyPath"></code><button id="setupUseLegacy" class="secondary-button">继续使用原素材库<svg class="icon"><use href="#i-arrow"/></svg></button></div><p id="setupOperationStatus" class="library-operation-status hidden" role="status"></p><div class="setup-footnote"><svg class="icon"><use href="#i-shield"/></svg><span>位置由你选择。导入会复制素材，保留来源文件。</span></div></div></section>
+  <section id="libraryOnboarding" class="library-onboarding hidden" aria-labelledby="setupTitle"><div class="setup-shell"><div class="setup-brand"><div class="brand-mark" data-brand-motion="paused" aria-hidden="true"><svg class="brand-mark-static"><use href="#i-mosaic-mark"/></svg><span class="brand-mark-motion"></span></div><span>Mosaic <small>万象 · 数字资产库</small></span></div><div class="setup-eyebrow">A HOME FOR YOUR INSPIRATION</div><h1 id="setupTitle">选择你的素材库位置<span class="title-dot">.</span></h1><p class="setup-description">图片、视频、标签与整理信息，都保存在你选择的素材库文件夹。<br>选一个空间充足、方便备份的位置，再开始收集灵感。</p><p id="setupError" class="setup-error hidden" role="alert"></p><div class="setup-options"><button id="setupCreateLibrary" class="setup-option"><span class="setup-option-icon"><svg class="icon"><use href="#i-plus"/></svg></span><strong>新建素材库</strong><span>选择保存位置，创建独立的素材库文件夹</span><svg class="icon setup-arrow"><use href="#i-arrow"/></svg></button><button id="setupOpenLibrary" class="setup-option"><span class="setup-option-icon"><svg class="icon"><use href="#i-folder"/></svg></span><strong>打开已有素材库</strong><span>选择已有素材库文件夹</span><svg class="icon setup-arrow"><use href="#i-arrow"/></svg></button></div><div id="setupLegacy" class="setup-legacy hidden"><span>检测到之前的素材库</span><code id="setupLegacyPath"></code><button id="setupUseLegacy" class="secondary-button">继续使用原素材库<svg class="icon"><use href="#i-arrow"/></svg></button></div><p id="setupOperationStatus" class="library-operation-status hidden" role="status"></p><div class="setup-footnote"><svg class="icon"><use href="#i-shield"/></svg><span>位置由你选择。导入会复制素材，保留来源文件。</span></div></div></section>
   <div id="dropOverlay" class="drop-overlay hidden"><div><svg class="icon"><use href="#i-upload"/></svg><h2>让灵感在这里落脚</h2><p>松开鼠标，导入图片、视频、字体、3D 模型、AE 工程或整个文件夹</p><span>模型和 AE 工程会收集依赖素材；原始文件保留在原处</span></div></div>
   <button id="setupAppUpdate" class="setup-update-button hidden" type="button" aria-haspopup="dialog"><svg class="icon"><use href="#i-download"/></svg>软件更新</button>
   <div id="preview" class="preview hidden" role="dialog" aria-modal="true" aria-label="圆柱素材预览">
@@ -230,6 +231,7 @@
   <div id="toastStack" class="toast-stack" aria-live="polite"></div>
   <div id="assetDragGhost" class="asset-drag-ghost hidden" role="status" aria-live="polite"></div>
   <script src="./particle-background.js"></script>
+  <script src="./brand-motion.js"></script>
   <script src="./cylinder-preview.js"></script>
   <script src="./plugin-center.js"></script>
   <script src="./folder-tree.js"></script>

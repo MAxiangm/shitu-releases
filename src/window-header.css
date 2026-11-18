@@ -121,7 +121,7 @@ html[data-skin][data-skin][data-skin] .app-header .header-actions > #collectorBu
   background: var(--skin-surface-2, #191919);
   color: var(--skin-text, #eee);
 }
-html[data-skin] .app-header .header-menu > .header-button {
+html[data-skin] .app-header .header-actions .header-menu > .header-button {
   width: 100%;
   max-width: none;
   min-height: 33px;

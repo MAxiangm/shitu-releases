@@ -128,10 +128,11 @@
     else if (!document.hidden && appVisible && pageActive && !contextLost) draw();
   }
   function updateButton() {
-    motionButton?.setAttribute('aria-pressed', String(motionEnabled));
-    if (motionButton) motionButton.disabled = !skinAllowsMotion();
+    const available = skinAllowsMotion();
+    motionButton?.setAttribute('aria-pressed', String(available && motionEnabled));
+    if (motionButton) motionButton.disabled = !available;
     const label = document.getElementById('backgroundMotionLabel');
-    if (label) label.textContent = !skinAllowsMotion() ? '静态皮肤' : motionEnabled ? '动效：开' : '动效：关';
+    if (label) label.textContent = !available ? '背景动效：静态皮肤' : motionEnabled ? '背景动效：开' : '背景动效：关';
   }
   motionButton?.addEventListener('click', () => {
     motionEnabled = !motionEnabled;

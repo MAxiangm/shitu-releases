@@ -86,6 +86,142 @@ module.exports = function configureWindowHeaderSmoke({ root, base }) {
     fs.writeFileSync(path.join(base, filename), image.toPNG());
     screenshots.push(filename);
   }
+  function brandState(selector) {
+    return js(`(() => {
+      const mark = document.querySelector(${JSON.stringify(selector)});
+      const moving = mark.querySelector('.brand-mark-motion');
+      const fixed = mark.querySelector('.brand-mark-static');
+      const shown = node => {
+        const style = getComputedStyle(node);
+        return Boolean(node.getClientRects().length && style.visibility === 'visible' && Number(style.opacity) > 0);
+      };
+      const animation = moving.getAnimations()[0];
+      const timing = animation?.effect.getTiming();
+      return { status: mark.dataset.brandMotion, moving: shown(moving), fixed: shown(fixed),
+        tint: getComputedStyle(moving).backgroundColor, ink: getComputedStyle(mark).color,
+        duration: timing?.duration, infinite: timing?.iterations === Infinity };
+    })()`);
+  }
+  async function brandPixels(selector) {
+    const bounds = await js(`(() => {
+      const { left, top, right, bottom } = document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect();
+      const x = Math.floor(left), y = Math.floor(top);
+      return { x, y, width: Math.ceil(right) - x, height: Math.ceil(bottom) - y };
+    })()`);
+    const image = await window.webContents.capturePage(bounds);
+    assert.ok(!image.isEmpty(), `No pixels captured for ${selector}`);
+    return image.toBitmap();
+  }
+  async function checkBrandMotion() {
+    const header = '.app-header .brand-mark', setup = '.setup-brand .brand-mark';
+    const debuggerClient = window.webContents.debugger;
+    const play = (selector, message) => wait(async () => {
+      const state = await brandState(selector);
+      return state.status === 'playing' && state.moving && !state.fixed;
+    }, message);
+    const pause = (selector, message) => wait(async () => {
+      const state = await brandState(selector);
+      return state.status === 'paused' && state.fixed && !state.moving;
+    }, message);
+    const toggle = async selector => {
+      await click('#headerMoreButton');
+      await wait(() => visible(selector), `Motion setting did not open: ${selector}`);
+      await click(selector);
+      await wait(async () => !await visible('#headerMenu'), `Motion setting did not close: ${selector}`);
+    };
+    const media = value => debuggerClient.sendCommand('Emulation.setEmulatedMedia', {
+      features: value ? [{ name: 'prefers-reduced-motion', value }] : []
+    });
+    async function reload() {
+      await new Promise((resolve, reject) => {
+        const contents = window.webContents;
+        const timeout = setTimeout(() => {
+          contents.removeListener('did-finish-load', onLoad);
+          reject(new Error('Window header did not reload'));
+        }, 6000);
+        function onLoad() {
+          clearTimeout(timeout);
+          resolve();
+        }
+        contents.once('did-finish-load', onLoad);
+        contents.reload();
+      });
+      await wait(() => visible('#windowControls'), 'Window controls did not return after reloading');
+    }
+
+    debuggerClient.attach('1.3');
+    try {
+      await media('no-preference');
+      await play(header, 'Mosaic logo did not start in the title bar');
+      const original = await brandState(header);
+      assert.equal(original.duration, 8000, 'Logo loop did not use the source runtime');
+      assert.equal(original.infinite, true, 'Mosaic logo was not set to loop');
+      assert.equal(original.tint, original.ink, 'Logo lost the header text color');
+
+      await toggle('#backgroundMotionButton');
+      assert.equal(await js("localStorage.getItem('shitu-background-motion')"), 'off');
+      await play(header, 'Disabling the background also paused the logo');
+      await js("ShituSkins.apply('famicom')");
+      await reload();
+      assert.equal(await js('document.documentElement.dataset.skin'), 'famicom');
+      assert.equal(await js("localStorage.getItem('shitu-background-motion')"), 'off');
+      assert.equal(await js("localStorage.getItem('shitu-brand-motion')"), null);
+      await play(header, 'Mosaic logo did not start on the Famicom skin with the old background preference off');
+      const famicom = await brandState(header);
+      assert.notEqual(famicom.ink, original.ink, 'Skin change did not change the logo ink');
+      assert.equal(famicom.tint, famicom.ink, 'Logo did not follow the Famicom skin ink');
+      const frame = await brandPixels(header);
+      await wait(async () => !frame.equals(await brandPixels(header)), 'Visible Famicom logo pixels did not change', 8000);
+
+      await media('reduce');
+      await wait(() => js("matchMedia('(prefers-reduced-motion: reduce)').matches"), 'Reduced motion was not emulated');
+      await pause(header, 'The default logo behavior did not honor reduced motion');
+      await toggle('#brandMotionButton');
+      assert.equal(await js("localStorage.getItem('shitu-brand-motion')"), 'on');
+      await play(header, 'Explicitly enabling the logo did not override reduced motion');
+      assert.equal(await js("localStorage.getItem('shitu-background-motion')"), 'off');
+      await media('no-preference');
+      await toggle('#brandMotionButton');
+      assert.equal(await js("localStorage.getItem('shitu-brand-motion')"), 'off');
+      await pause(header, 'Explicitly disabling the logo did not restore the static mark');
+      await reload();
+      await pause(header, 'Disabled logo preference did not persist on reload');
+      const staticFrame = await brandPixels(header);
+      await sleep(350);
+      assert.ok(staticFrame.equals(await brandPixels(header)), 'Static logo pixels changed with logo motion disabled');
+      await toggle('#brandMotionButton');
+      await play(header, 'Mosaic logo did not resume after enabling logo motion');
+
+      window.minimize();
+      await wait(() => window.isMinimized(), 'Window minimization did not start');
+      await wait(() => js(`document.querySelector(${JSON.stringify(header)}).dataset.brandMotion === 'paused'`),
+        'Mosaic logo kept playing while minimized');
+      window.restore();
+      await play(header, 'Mosaic logo did not resume when the window restored');
+
+      const needsLibrary = await js('state.library.needsLibrary === true');
+      try {
+        await js("state.library.needsLibrary = true; renderLibraryState();");
+        await play(setup, 'The onboarding logo did not animate');
+        const onboarding = await brandState(setup);
+        assert.equal(onboarding.tint, onboarding.ink, 'Onboarding logo did not follow the onboarding ink');
+      } finally {
+        await js(`state.library.needsLibrary = ${JSON.stringify(needsLibrary)}; renderLibraryState();`);
+      }
+      await wait(() => js(`document.querySelector(${JSON.stringify(setup)}).dataset.brandMotion !== 'playing'`),
+        'The hidden onboarding logo kept animating');
+
+      return { durationMs: original.duration, looping: true, pixelsChanged: true, followsSkin: true,
+        legacyBackgroundOff: true, preferencePersists: true, reducedMotionStatic: true, reducedMotionOverride: true,
+        stopsWhenMinimized: true, resumesOnRestore: true,
+        onboarding: true, stopsHiddenOnboarding: true };
+    } finally {
+      if (window.isMinimized()) window.restore();
+      await js("ShituSkins.apply('default')");
+      await media();
+      debuggerClient.detach();
+    }
+  }
   async function fail(error) {
     if (finishing) return;
     finishing = true;
@@ -354,6 +490,7 @@ module.exports = function configureWindowHeaderSmoke({ root, base }) {
         }
       })()`);
       assert.deepEqual(renderedLabels, libraryLabels.map(([root, label]) => ({ label, path: root, tooltip: `管理「${label}」\n${root}` })));
+      const brandMotion = await checkBrandMotion();
 
       const descriptors = [];
       const nativeCorners = {};
@@ -406,7 +543,7 @@ module.exports = function configureWindowHeaderSmoke({ root, base }) {
       await wait(() => visible('#headerMenu'), 'More controls did not open');
       const menuBackground = await js(`getComputedStyle(document.querySelector('#headerMenu')).backgroundColor`);
       assert.match(menuBackground, /^rgb\(/, 'More tools menu background is translucent');
-      for (const selector of ['#settingsButton', '#appUpdateButton', '#backupButton', '#pluginCenterButton', '#backgroundMotionButton']) {
+      for (const selector of ['#settingsButton', '#appUpdateButton', '#backupButton', '#pluginCenterButton', '#backgroundMotionButton', '#brandMotionButton']) {
         assert.ok(await visible(`#headerMenu ${selector}`), `Missing or hidden menu action: ${selector}`);
       }
       await capture('header-mac-menu-wide.png');
@@ -481,7 +618,7 @@ module.exports = function configureWindowHeaderSmoke({ root, base }) {
       window.once('closed', () => {
         finishing = true;
         const normalClose = closeAttempts.length === 3 && closeAttempts[0].prevented && closeAttempts[1].prevented && !closeAttempts[2].prevented;
-        const result = { ok: normalClose, compactHeaderAtBothWidths: true, pinnedSidebarAndDetailsFit: true, captionStyles: descriptors, draggableHeader: true, nativeHitTest, nativeCorners, groupedMenuKeyboardDismissed: true, deviceSettingsOpensFromMenu: true,
+        const result = { ok: normalClose, compactHeaderAtBothWidths: true, pinnedSidebarAndDetailsFit: true, brandMotion, captionStyles: descriptors, draggableHeader: true, nativeHitTest, nativeCorners, groupedMenuKeyboardDismissed: true, deviceSettingsOpensFromMenu: true,
           narrowPinnedSkins, widePinnedSkins,
           nativeMaximizeAndRestore: true, nativeMinimizeAndRestore: true, captionWorksInPreviewAndModal: true,
           existingCloseGuardHonored: normalClose, nativeMessages, networkRequests: network.length, screenshots };
