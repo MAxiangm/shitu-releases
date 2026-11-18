@@ -13,7 +13,8 @@ function assetMenuTemplate(assets, folders, choose, transcodePresets = []) {
   const colorValues = assets.map(asset => ColorLabels.normalize(asset.colorLabel));
   const commonColor = colorValues.length && colorValues.every(value => value === colorValues[0]) ? colorValues[0] : null;
   const customColor = commonColor && ColorLabels.get(commonColor)?.custom ? ColorLabels.get(commonColor) : null;
-  const canTranscode = assets.length > 0 && !anyTrashed && assets.every(asset => asset.mediaType === 'video' || VIDEO.has(asset.ext));
+  const canTranscode = assets.length > 0 && !anyTrashed && assets.every(asset =>
+    asset.mediaType === undefined ? VIDEO.has(asset.ext) : asset.mediaType === 'video');
   const item = (id, label, enabled = true) => ({ id, label, enabled, click: () => choose(id) });
   return [
     item('preview', '预览', one),

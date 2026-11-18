@@ -26,3 +26,10 @@ test('transcoding cannot start from empty, mixed-media or trashed selections', (
   }
   assert.equal(menu([video('legacy', { mediaType: undefined, ext: 'dxv' })]).item.enabled, true);
 });
+
+test('an Ogg music asset never offers video transcoding while legacy Ogg videos remain eligible', () => {
+  assert.equal(menu([video('music', { mediaType: 'audio', ext: 'ogg' })]).item.enabled, false);
+  assert.equal(menu([video('movie', { mediaType: 'video', ext: 'ogg' })]).item.enabled, true);
+  assert.equal(menu([video('legacy', { mediaType: undefined, ext: 'ogg' })]).item.enabled, true);
+  assert.equal(menu([video('movie'), video('music', { mediaType: 'audio', ext: 'ogg' })]).item.enabled, false);
+});

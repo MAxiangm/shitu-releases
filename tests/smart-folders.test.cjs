@@ -12,7 +12,7 @@ test('smart folder rules normalize supported fields without retaining input refe
   assert.deepEqual(Smart.validateRule({}), Smart.DEFAULT_RULE);
   assert.deepEqual(Smart.validateRule({ colorLabel: '#AbC', search: '  字体\n  Bold  ' }), { ...Smart.DEFAULT_RULE, colorLabel: '#aabbcc', search: '字体 Bold' });
   const first = Smart.validateRule({}); first.mediaType = 'font'; assert.equal(Smart.DEFAULT_RULE.mediaType, 'all');
-  for (const value of [null, [], 'font', 7, new Date(), { folderId: 'real-folder' }, { mediaType: 'audio' }, { colorLabel: undefined }, { colorLabel: 'rgb(0,0,0)' },
+  for (const value of [null, [], 'font', 7, new Date(), { folderId: 'real-folder' }, { mediaType: 'unknown' }, { colorLabel: undefined }, { colorLabel: 'rgb(0,0,0)' },
     { recentDays: -1 }, { recentDays: 1.5 }, { recentDays: '7' }, { recentDays: 3651 }, { search: null }, { search: 'x'.repeat(501) }, { favorite: 1 }]) assert.throws(() => Smart.validateRule(value), undefined, JSON.stringify(value));
   assert.equal(Smart.validateName('  常用字体  '), '常用字体');
   for (const value of ['', ' ', null, 'a'.repeat(101), 'a\nb']) assert.throws(() => Smart.validateName(value));
@@ -68,4 +68,16 @@ test('smart folder core loads in browser and describes rules as plain text', () 
   assert.equal(context.ShituSmartFolders.matches(asset({}), { mediaType: 'video', colorLabel: 'red' }, now), true);
   const description = Smart.describe({ mediaType: 'font', recentDays: 7, favorite: true, search: '<img onerror=evil>' });
   assert.match(description, /字体.*最近 7 天导入.*已收藏.*<img onerror=evil>/);
+});
+
+test('music filters and search use audio metadata while keeping Ogg video distinct', () => {
+  const music = asset({ mediaType: 'audio', ext: 'ogg', audio: { title: 'Forest', artist: 'Mosaic Artist', album: 'Night' } });
+  assert.equal(Smart.matches(music, { mediaType: 'audio', search: 'artist night' }, now), true);
+  assert.equal(Smart.matches(music, { mediaType: 'video' }, now), false);
+  assert.equal(Smart.matches(asset({ ext: 'ogg', mediaType: 'video' }), { mediaType: 'audio' }, now), false);
+  assert.equal(Smart.matches(asset({ ext: 'ogg', mediaType: undefined }), { mediaType: 'video' }, now), true);
+  for (const ext of ['mp3', 'mp2', 'wav', 'wave', 'flac', 'm4a', 'm4b', 'aac', 'oga', 'opus', 'aif', 'aiff', 'aifc', 'ape', 'wma', 'alac', 'amr', 'ac3', 'eac3', 'dts', 'mka', 'au', 'snd', 'wv', 'tta', 'dsf', 'dff', 'caf', 'w64']) {
+    assert.equal(Smart.matches(asset({ ext, mediaType: undefined }), { mediaType: 'audio' }, now), true, ext);
+  }
+  assert.equal(Smart.describe({ mediaType: 'audio' }), '音乐');
 });

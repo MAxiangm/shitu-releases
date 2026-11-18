@@ -136,6 +136,46 @@ test('a library change rejects stale completion before import and validation rej
   assert.deepEqual(await fs.readdir(f.workDir), []);
 });
 
+test('Ogg audio is rejected before encoding but a legacy Ogg asset without a media type remains supported', async t => {
+  const f = await fixture(t, { count: 1 });
+  const snapshot = f.library.snapshot.bind(f.library);
+  let type = 'audio';
+  f.library.snapshot = () => {
+    const value = snapshot();
+    value.assets = value.assets.map(asset => asset.id === f.sources[0].id ? { ...asset, ext: 'ogg', mediaType: type } : asset);
+    return value;
+  };
+  assert.throws(() => f.service.start(f.request()), /请选择有效.*视频/);
+  assert.equal(f.calls.length, 0);
+  type = undefined;
+  f.service.start(f.request());
+  const state = await f.finish();
+  assert.equal(state.status, 'completed');
+  assert.equal(state.imported, 1);
+  assert.equal(f.calls.length, 1);
+});
+
+test('a video reclassified as Ogg music during encoding is not imported as a video derivative', async t => {
+  const entered = gate(), resume = gate();
+  const f = await fixture(t, { count: 1, transcode: async (_source, destination) => {
+    entered.resolve(); await resume.promise; await fs.writeFile(destination, 'completed-video'); return {};
+  } });
+  const snapshot = f.library.snapshot.bind(f.library);
+  let type = 'video';
+  f.library.snapshot = () => {
+    const value = snapshot();
+    value.assets = value.assets.map(asset => asset.id === f.sources[0].id ? { ...asset, ext: 'ogg', mediaType: type } : asset);
+    return value;
+  };
+  f.service.start(f.request()); await entered.promise;
+  type = 'audio'; resume.resolve();
+  const state = await f.finish();
+  assert.equal(state.imported, 0);
+  assert.equal(state.failed, 1);
+  assert.match(state.errors[0].error, /源视频已变化/);
+  assert.deepEqual(await fs.readdir(f.workDir), []);
+});
+
 test('metadata save failures report an imported partial result instead of hiding the failure', async t => {
   const f = await fixture(t, { count: 1 });
   const original = f.library.updateAssets.bind(f.library);

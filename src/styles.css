@@ -402,6 +402,42 @@ h1 { font-size:34px; line-height:1.35; font-weight:300; letter-spacing:-.5px; ma
 .project-ae-glyph { display:inline-grid; place-items:center; width:76px; height:76px; font:500 40px/1 "Segoe UI",sans-serif; color:#a49bff; background:#16133a; border:1px solid #8b81d866; border-radius:14px; }
 .asset-project-placeholder { gap:18px; }
 .preview-project { position:absolute; inset:75px 76px 66px; z-index:4; overflow:auto; padding:24px; background:#111116; border:1px solid #ffffff18; border-radius:12px; }
+.asset-audio-placeholder { width:100%; height:100%; min-height:120px; background:radial-gradient(ellipse at 50% 40%,#32323b,#18181d 78%); color:#c8c6d3; gap:15px; }
+.asset-audio-placeholder>.icon { width:54px; height:54px; stroke-width:1.25; }
+.asset-audio-placeholder>span { color:#9995a9; font-size:10px; letter-spacing:1px; }
+.cylinder-audio-placeholder { min-height:0; }
+.cylinder-audio-placeholder>.icon { width:40%; height:40%; max-width:66px; max-height:66px; }
+.preview-audio { position:absolute; inset:86px 76px 66px; z-index:5; width:calc(100% - 152px); max-width:960px; max-height:570px; margin:auto; padding:clamp(22px,4vw,52px); display:grid; grid-template-columns:minmax(170px,300px) minmax(0,1fr); grid-template-rows:minmax(0,1fr) auto auto; align-items:center; gap:22px 38px; overflow:auto; background:#16161d; border:1px solid #ffffff20; border-radius:16px; box-shadow:0 16px 60px #0005; }
+.audio-preview-cover { width:100%; aspect-ratio:1; position:relative; overflow:hidden; border-radius:10px; background:radial-gradient(circle at 50% 45%,#45424f,#292631 60%,#201f27); }
+.audio-preview-cover>img { width:100%; height:100%; object-fit:contain; display:block; }
+.audio-preview-placeholder { position:absolute; inset:0; display:grid; place-items:center; color:#d9d4e4; }
+.audio-preview-placeholder::before { content:""; position:absolute; width:70%; aspect-ratio:1; border:1px solid #ffffff12; border-radius:50%; box-shadow:0 0 0 18px #ffffff04,0 0 0 36px #ffffff03; }
+.audio-preview-placeholder>.icon { width:31%; height:31%; stroke-width:1.1; }
+.audio-preview-info { min-width:0; align-self:center; }
+.audio-preview-kicker { color:#9e99b1; font-size:11px; letter-spacing:3px; }
+.audio-preview-info h2 { color:#eeeaf5; font-size:clamp(19px,2.5vw,30px); font-weight:400; line-height:1.45; margin:15px 0 14px; overflow-wrap:anywhere; }
+.audio-preview-info p { color:#bcb7cb; font-size:14px; line-height:1.7; margin:4px 0; overflow-wrap:anywhere; }
+.audio-preview-info .audio-preview-album { color:#928b9e; font-size:12px; }
+.audio-preview-info .audio-preview-meta { color:#827d90; font-size:11px; line-height:1.9; margin-top:20px; }
+.preview-audio>audio { grid-column:1/-1; width:100%; height:46px; color-scheme:dark; }
+.audio-preview-footer { grid-column:1/-1; display:flex; flex-wrap:wrap; align-items:center; gap:12px; color:#92909b; font-size:11px; line-height:1.6; }
+.audio-preview-footer>label { display:flex; align-items:center; gap:6px; white-space:nowrap; color:#bdb9ca; }
+.audio-preview-footer input { accent-color:#b5a9cf; }
+.audio-preview-status { flex:1; min-width:160px; text-align:right; }
+.audio-preview-status.is-error { color:#e3aaa6; }
+.audio-preview-footer .text-button { color:#c8bfd9; text-decoration:underline; text-underline-offset:3px; }
+.is-audio-preview .cylinder-viewport { visibility:hidden; }
+.is-audio-preview #previewDensity,.is-audio-preview #previewMotion,.is-audio-preview #previewZoomReset,.is-audio-preview #previewBack { display:none; }
+@media (max-width:720px),(max-height:600px) {
+  .preview-audio { inset:75px 54px 56px; width:calc(100% - 108px); max-height:none; padding:20px; grid-template-columns:minmax(100px,160px) minmax(0,1fr); gap:16px 22px; }
+  .audio-preview-info h2 { font-size:18px; margin:10px 0; }
+  .audio-preview-info .audio-preview-meta { margin-top:10px; }
+  .audio-preview-status { text-align:left; }
+}
+@media (max-width:480px) {
+  .preview-audio { grid-template-columns:minmax(0,1fr); }
+  .audio-preview-cover { width:150px; justify-self:center; }
+}
 .project-preview-layout { display:flex; flex-direction:column; min-height:100%; gap:18px; }
 .project-preview-surface { position:relative; flex:1 0 220px; min-height:220px; display:grid; place-items:center; background:#0a0a0d; border-radius:8px; overflow:hidden; }
 .project-preview-surface img { position:absolute; inset:0; width:100%; height:100%; object-fit:contain; }

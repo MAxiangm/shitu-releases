@@ -21,7 +21,7 @@
     heading.append(headingText, closeButton);
     const description = el('p', 'sf-description', '自动汇总符合全部条件的素材。新导入或修改素材后，列表会随规则更新；原文件不会移动。'); description.id = 'smartFolderEditorDescription';
     const name = input('smartFolderName'); name.maxLength = SmartFolders.NAME_LIMIT; name.autocomplete = 'off'; name.required = true; name.placeholder = '例如：红色标记的视频';
-    const type = select('smartFolderType', [['all', '所有素材'], ['image', '图片'], ['video', '视频'], ['font', '字体'], ['model', '3D 模型'], ['project', 'AE 工程']]);
+    const type = select('smartFolderType', [['all', '所有素材'], ['image', '图片'], ['video', '视频'], ['audio', '音乐'], ['font', '字体'], ['model', '3D 模型'], ['project', 'AE 工程']]);
     const color = select('smartFolderColor', [['all', '不限颜色'], ...ColorLabels.palette.map(item => [item.id, item.name]), ['custom', '自定义颜色…']]);
     const colorFields = el('div', 'sf-custom-color hidden'); colorFields.id = 'smartFolderCustomColor';
     const colorPicker = input('smartFolderColorPicker', 'color'); colorPicker.value = '#789fe8'; colorPicker.setAttribute('aria-label', '选择筛选颜色');

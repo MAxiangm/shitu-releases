@@ -48,6 +48,8 @@ contextBridge.exposeInMainWorld('shitu', Object.freeze({
     return () => ipcRenderer.removeListener('shitu:history', listener);
   },
   prepareVideo: (id, expectedRoot, requestToken, profile = 'full', requestSerial) => call('prepare-video', id, expectedRoot, requestToken, profile, requestSerial),
+  prepareAudioPreview: (id, expectedRoot, requestToken) => call('prepare-audio', id, expectedRoot, requestToken),
+  cancelAudioPreview: requestToken => call('cancel-audio', requestToken),
   findVideoFrame: (id, root, key, time, direction) => call('find-video-frame', id, root, key, time, direction),
   saveVideoThumbnail: (id, root, key, bytes) => call('save-video-thumbnail', id, root, key, bytes),
   onVideoPreview: callback => {

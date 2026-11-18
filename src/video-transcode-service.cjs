@@ -9,6 +9,10 @@ const MAX_ITEMS = 256;
 const clone = value => structuredClone(value);
 const abortError = () => Object.assign(new Error('视频转码已取消'), { name: 'AbortError' });
 const isAbort = error => error?.name === 'AbortError' || error?.code === 'ABORT_ERR';
+// Containers such as Ogg can hold either music or video. A classified asset's
+// media type takes precedence over its extension; older indexes may omit it.
+const isVideoAsset = asset => Boolean(asset &&
+  (asset.mediaType === undefined ? VIDEO.has(asset.ext) : asset.mediaType === 'video'));
 function checkedExecutionPlan(value, format, count) {
   if (value === undefined) return { mode: 'cpu', lanes: [{ id: 'cpu', label: 'CPU', device: { type: 'cpu' } }], notice: null };
   if (!value || typeof value !== 'object' || !['auto', 'cpu', 'gpu', 'hybrid'].includes(value.mode) ||
@@ -68,7 +72,7 @@ function createVideoTranscodeService({ getLibrary, engine, workDir, onEvent = ()
     const owner = getLibrary();
     if (owner !== job.library || owner?.root !== job.root) throw new Error('素材库已切换，已停止转码');
     const asset = owner.snapshot().assets.find(item => item.id === source.id);
-    if (!asset || asset.trashedAt || asset.hash !== source.hash || !VIDEO.has(asset.ext)) throw new Error('源视频已变化或移入回收站，已跳过');
+    if (!isVideoAsset(asset) || asset.trashedAt || asset.hash !== source.hash) throw new Error('源视频已变化或移入回收站，已跳过');
     return asset;
   }
   function check(job) {
@@ -209,7 +213,7 @@ function createVideoTranscodeService({ getLibrary, engine, workDir, onEvent = ()
     const byId = new Map(library.snapshot().assets.map(asset => [asset.id, asset]));
     const sources = settings.ids.map(id => {
       const asset = byId.get(id);
-      if (!asset || asset.trashedAt || !VIDEO.has(asset.ext)) throw new Error('请选择有效且未移入回收站的视频');
+      if (!isVideoAsset(asset) || asset.trashedAt) throw new Error('请选择有效且未移入回收站的视频');
       return { id, name: asset.name, hash: asset.hash };
     });
     const job = { ...settings, library, root: library.root, sources, controller: new AbortController(), promise: null,

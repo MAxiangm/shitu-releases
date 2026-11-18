@@ -16,6 +16,8 @@ const { createAppUpdater } = require('./app-updater.cjs');
 const { createUpdateTransport } = require('./update-transport.cjs');
 const { createUpdateScheduler, updateIntervalMs } = require('./update-scheduler.cjs');
 const { createVideoEngine } = require('./video-engine.cjs');
+const { createAudioEngine } = require('./audio-engine.cjs');
+const { createAudioPreviewService } = require('./audio-preview-service.cjs');
 const { createVideoTranscoder } = require('./video-transcode.cjs');
 const { createVideoTranscodeService } = require('./video-transcode-service.cjs');
 const { createTranscodeDeviceManager } = require('./transcode-devices.cjs');
@@ -32,7 +34,7 @@ const { createAEProjectCollector } = require('./ae-projects.cjs');
 const { createBundleRepair } = require('./bundle-repair.cjs');
 const { createAEPreviewEngine } = require('./ae-preview.cjs');
 const { createAEPreviewService } = require('./ae-preview-service.cjs');
-const { VIDEO, MODEL, PROJECT, FONT, SUPPORTED } = require('./media-formats.cjs');
+const { AUDIO, VIDEO, MODEL, PROJECT, FONT, SUPPORTED } = require('./media-formats.cjs');
 const crypto = require('node:crypto');
 const { spawn } = require('node:child_process');
 const updateConfig = require('../update-config.json');
@@ -63,6 +65,8 @@ let draggingAssets=false;
 let movingAssets=0;
 let imagePlugins;
 let videoEngine;
+let audioEngine;
+let audioPreviewService;
 let videoTranscoder;
 let videoTranscodeService;
 let transcodeDevices;
@@ -228,6 +232,7 @@ async function switchLibrary(mode) {
   }
     videoRequests.abortAll();
     videoPreviews.clear();
+    audioPreviewService?.invalidate();
     modelService?.invalidate();
     similarImages?.invalidate();
     fontService?.invalidate();
@@ -246,6 +251,14 @@ async function createThumbnail(source, destination, options) {
   if (PROJECT.has(path.extname(source).slice(1).toLowerCase())) return {};
   if (MODEL.has(path.extname(source).slice(1).toLowerCase())) return modelService.thumbnail(source, destination, options);
   if (FONT.has(path.extname(source).slice(1).toLowerCase())) return fontService.thumbnail(source, destination, options);
+  if (AUDIO.has(path.extname(source).slice(1).toLowerCase())) {
+    try { return await audioEngine.thumbnail(source, destination, options); }
+    catch (error) {
+      // Ogg can contain music or video. Only an actual moving-image stream
+      // falls through to the video engine; embedded album art remains music.
+      if (error.code !== 'AUDIO_HAS_VIDEO' || !VIDEO.has(path.extname(source).slice(1).toLowerCase())) throw error;
+    }
+  }
   if (VIDEO.has(path.extname(source).slice(1).toLowerCase())) return videoEngine.thumbnail(source, destination, options);
   try {
     const metadata = await sharp(source, { limitInputPixels: 80_000_000 }).metadata();
@@ -272,7 +285,7 @@ function checkedHandler(channel, handler) {
   ipcMain.handle(`shitu:${channel}`, async (event, ...args) => {
     assertTrustedSender(event);
     if (installingUpdate && channel !== 'update-state') throw new Error('正在安装更新，请稍候');
-    if (channel.startsWith('update-') || ['prepare-video', 'cancel-video', 'release-video-viewer', 'find-video-frame', 'prepare-model', 'prepare-model-hover',
+    if (channel.startsWith('update-') || ['prepare-video', 'cancel-video', 'prepare-audio', 'cancel-audio', 'release-video-viewer', 'find-video-frame', 'prepare-model', 'prepare-model-hover',
       'cancel-model-hover', 'warm-model-hover', 'cancel-model-warmup', 'prepare-font', 'prepare-project-preview',
       'project-preview-state', 'find-similar-images', 'cancel-similar-images'].includes(channel)) return handler(...args);
     activeOperations++;
@@ -322,6 +335,7 @@ async function installDownloadedUpdate({ filePath }) {
   installingUpdate = true;
   try {
     similarImages?.invalidate();
+    audioPreviewService?.invalidate();
     await library?.flush();
     await new Promise((resolve, reject) => {
       const child = spawn(filePath, ['/S', '/SHITUUPDATE'], {
@@ -331,7 +345,7 @@ async function installDownloadedUpdate({ filePath }) {
       child.once('error', reject);
       child.once('spawn', () => { child.unref(); resolve(); });
     });
-    await Promise.allSettled([imagePlugins?.shutdown(), collector?.close(), videoEngine?.shutdown(), modelService?.shutdown(), fontService?.shutdown(), aeProjects?.shutdown(), aePreviewService?.shutdown()]);
+    await Promise.allSettled([imagePlugins?.shutdown(), collector?.close(), videoEngine?.shutdown(), audioEngine?.shutdown(), modelService?.shutdown(), fontService?.shutdown(), aeProjects?.shutdown(), aePreviewService?.shutdown()]);
     setTimeout(() => { mayClose = true; app.quit(); }, 150);
   } catch (error) {
     installingUpdate = false;
@@ -427,7 +441,7 @@ async function moveAssetsToFolder(ids, folderId, expectedRoot) {
 
 async function copyAssetImage(id, expectedRoot) {
   const { assets, files } = resolveAssetFiles(requireLibrary(), [id], expectedRoot);
-  if (assets[0].mediaType !== 'image') throw new Error('请选择图片复制为位图，视频、模型、字体和工程可拖出或导出原文件');
+  if (assets[0].mediaType !== 'image') throw new Error('请选择图片复制为位图，音乐、视频、模型、字体和工程可拖出或导出原文件');
   const bitmap = nativeImage.createFromPath(files[0]);
   if (bitmap.isEmpty()) throw new Error('此图片格式暂不支持复制位图，请拖出或导出原文件');
   const png = bitmap.toPNG();
@@ -508,6 +522,8 @@ function bindHandlers() {
     return transcodePresets.remove(id);
   });
   checkedHandler('prepare-video', prepareVideo);
+  checkedHandler('prepare-audio', (id, expectedRoot, requestToken) => audioPreviewService.prepare(id, expectedRoot, requestToken));
+  checkedHandler('cancel-audio', requestToken => audioPreviewService.cancel(requestToken));
   checkedHandler('find-video-frame', findVideoFrame);
   checkedHandler('save-video-thumbnail', saveVideoThumbnail);
   checkedHandler('cancel-video', (id, expectedRoot, requestToken) => videoRequests.cancel(id, expectedRoot, requestToken));
@@ -610,7 +626,7 @@ function bindHandlers() {
   checkedHandler('import-files', async folderId => {
     requireLibrary();
     if (historyBusy || closing) throw new Error('正在保存撤销或重做，请稍后再导入');
-    const result = await dialog.showOpenDialog(mainWindow, { title: '导入图片、视频、模型、字体或 AE 工程', properties: ['openFile', 'multiSelections'], filters: [{ name: '支持的素材', extensions: [...SUPPORTED] }, { name: '字体', extensions: [...FONT] }, { name: 'AE 工程', extensions: [...PROJECT] }, { name: '3D 模型', extensions: [...MODEL] }] });
+    const result = await dialog.showOpenDialog(mainWindow, { title: '导入图片、视频、音乐、模型、字体或 AE 工程', properties: ['openFile', 'multiSelections'], filters: [{ name: '支持的素材', extensions: [...SUPPORTED] }, { name: '音乐与音频', extensions: [...AUDIO] }, { name: '字体', extensions: [...FONT] }, { name: 'AE 工程', extensions: [...PROJECT] }, { name: '3D 模型', extensions: [...MODEL] }] });
     return result.canceled ? { snapshot: library.snapshot(), cancelled: true } : importPaths(result.filePaths, folderId);
   });
   checkedHandler('import-folder', async folderId => {
@@ -661,12 +677,12 @@ function bindHandlers() {
   });
   checkedHandler('reveal-asset', id => {
     const file = requireLibrary().getAssetPath(id, 'original');
-    if (!file) throw new Error('找不到图片');
+    if (!file) throw new Error('找不到素材原文件');
     shell.showItemInFolder(file);
   });
   checkedHandler('open-asset', async id => {
     const file = requireLibrary().getAssetPath(id, 'original');
-    if (!file) throw new Error('找不到图片');
+    if (!file) throw new Error('找不到素材原文件');
     const error = await shell.openPath(file);
     if (error) throw new Error(error);
   });
@@ -723,8 +739,9 @@ async function createWindow() {
     }
     if (closing) return;
     closing = true;
+    audioPreviewService?.invalidate();
     similarImages?.invalidate();
-    Promise.resolve(videoTranscodeService?.shutdown()).then(() => Promise.all([transcodeSettings?.flush(), transcodePresets?.flush()])).then(() => library?.flush()).then(() => Promise.allSettled([transcodeDevices?.shutdown?.(), videoTranscoder?.shutdown(), modelService?.shutdown(), fontService?.shutdown(), aeProjects?.shutdown(), aePreviewService?.shutdown()])).then(() => { mayClose = true; mainWindow.close(); }).catch(error => {
+    Promise.resolve(videoTranscodeService?.shutdown()).then(() => Promise.all([transcodeSettings?.flush(), transcodePresets?.flush()])).then(() => library?.flush()).then(() => Promise.allSettled([transcodeDevices?.shutdown?.(), videoTranscoder?.shutdown(), audioEngine?.shutdown(), modelService?.shutdown(), fontService?.shutdown(), aeProjects?.shutdown(), aePreviewService?.shutdown()])).then(() => { mayClose = true; mainWindow.close(); }).catch(error => {
       closing = false;
       dialog.showErrorBox('保存未完成', error.message);
     });
@@ -738,6 +755,10 @@ else {
   app.on('second-instance', () => { if (mainWindow) { if (mainWindow.isMinimized()) mainWindow.restore(); mainWindow.focus(); } });
   app.whenReady().then(async () => {
     videoEngine = createVideoEngine({ runtimeDir: path.join(__dirname, '..', 'video-runtime'), cacheDir: path.join(app.getPath('userData'), 'video-previews') });
+    audioEngine = createAudioEngine({ runtimeDir: path.join(__dirname, '..', 'video-runtime'), cacheDir: path.join(app.getPath('userData'), 'audio-previews') });
+    audioPreviewService = createAudioPreviewService({ engine: audioEngine,
+      getLibrary: () => closing || switchingLibrary ? null : library,
+      onChanged: owner => { if (owner === library) sendActionEvent('library-changed'); } });
     transcodeDevices = createTranscodeDeviceManager({ runtimeDir: path.join(__dirname, '..', 'video-runtime') });
     videoTranscoder = createVideoTranscoder({ runtimeDir: path.join(__dirname, '..', 'video-runtime'), deviceManager: transcodeDevices });
     transcodeSettings = createTranscodeSettings({ filePath: path.join(app.getPath('userData'), 'transcode-settings.json') });
@@ -824,6 +845,7 @@ else {
         if (url.hostname === 'model') return modelService.response(request);
         if (url.hostname === 'model-hover') return modelService.hoverResponse(request);
         if (url.hostname === 'font') return fontService.response(request);
+        if (url.hostname === 'audio') return audioPreviewService.response(request);
         if (url.hostname === 'project-preview') return aePreviewService.response(request);
         if (request.method !== 'GET' || url.hostname !== 'asset') return new Response(null, { status: 404 });
         const id = decodeURIComponent(url.pathname.slice(1));
@@ -866,8 +888,9 @@ else {
     uiRecovery?.dispose();
     updateScheduler?.dispose(); appUpdater?.dispose();
     videoRequests.abortAll();
+    audioPreviewService?.invalidate();
     videoTranscodeService?.shutdown().catch(()=>{}); videoTranscoder?.shutdown().catch(()=>{});
     Promise.resolve(transcodeDevices?.shutdown?.()).catch(()=>{});
-    imagePlugins?.shutdown().catch(()=>{}); collector?.close().catch(()=>{}); videoEngine?.shutdown().catch(()=>{}); modelService?.shutdown().catch(()=>{}); fontService?.shutdown().catch(()=>{}); aeProjects?.shutdown().catch(()=>{}); aePreviewService?.shutdown().catch(()=>{});
+    imagePlugins?.shutdown().catch(()=>{}); collector?.close().catch(()=>{}); videoEngine?.shutdown().catch(()=>{}); Promise.resolve(audioEngine?.shutdown()).catch(()=>{}); modelService?.shutdown().catch(()=>{}); fontService?.shutdown().catch(()=>{}); aeProjects?.shutdown().catch(()=>{}); aePreviewService?.shutdown().catch(()=>{});
   });
 }

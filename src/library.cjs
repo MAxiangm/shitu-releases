@@ -3,14 +3,16 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { createReadStream } = require('node:fs');
 
-const { VIDEO, MODEL, MODEL_NATIVE, PROJECT, FONT, SUPPORTED } = require('./media-formats.cjs');
+const { VIDEO, AUDIO, MODEL, MODEL_NATIVE, PROJECT, FONT, SUPPORTED } = require('./media-formats.cjs');
 const { collectModelBundle, copyModelBundle, validateModelBundle, isSafeBundlePath } = require('./model-bundle.cjs');
 const { validateProjectBundle, copyProjectBundle } = require('./project-bundle.cjs');
 const FolderTree = require('./folder-tree.js');
 const ColorLabels = require('./color-labels.js');
 const { MetadataHistory, sameField } = require('./metadata-history.cjs');
 const SmartFolders = require('./smart-folders.js');
-const mediaType = ext => PROJECT.has(ext) ? 'project' : MODEL.has(ext) ? 'model' : VIDEO.has(ext) ? 'video' : FONT.has(ext) ? 'font' : 'image';
+const mediaType = (ext, stored) => PROJECT.has(ext) ? 'project' : MODEL.has(ext) ? 'model'
+  : (AUDIO.has(ext) && (!VIDEO.has(ext) || stored === 'audio')) ? 'audio'
+    : VIDEO.has(ext) ? 'video' : FONT.has(ext) ? 'font' : 'image';
 const bundleRelative = (id, ext) => `originals/${id}.${PROJECT.has(ext) ? 'project' : 'model'}`;
 const isBundle = ext => MODEL.has(ext) || PROJECT.has(ext);
 const assetBundle = asset => PROJECT.has(asset.ext) ? asset.projectBundle : asset.modelBundle;
@@ -59,6 +61,28 @@ const VIDEO_PREVIEW_METADATA = Object.freeze({
   colorSpace: value => typeof value === 'string' && /^[a-zA-Z0-9_.-]{0,80}$/.test(value),
   rotation: value => Number.isFinite(value) && value >= -360 && value <= 360
 });
+const AUDIO_METADATA = Object.freeze({
+  sampleRate: value => Number.isInteger(value) && value >= 0 && value <= 50000000,
+  channels: value => Number.isInteger(value) && value >= 0 && value <= 64,
+  bitrate: value => Number.isInteger(value) && value >= 0 && value <= 1000000000,
+  bitsPerSample: value => Number.isInteger(value) && value >= 0 && value <= 64
+});
+const AUDIO_TAGS = new Set(['title', 'artist', 'album', 'albumArtist', 'genre', 'track', 'date']);
+function audioTags(value, strict = false) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    if (strict) throw new Error('音乐标签无效');
+    return undefined;
+  }
+  const result = {};
+  for (const [key, text] of Object.entries(value)) {
+    if (!AUDIO_TAGS.has(key) || typeof text !== 'string' || !text.trim() || text.length > 512 || /[\x00-\x1f\x7f]/.test(text)) {
+      if (strict) throw new Error('音乐标签无效');
+      continue;
+    }
+    result[key] = text;
+  }
+  return result;
+}
 const FONT_METADATA = Object.freeze({
   family: value => typeof value === 'string' && value.trim().length > 0 && value.length <= 256 && !/[\x00-\x1f\x7f]/.test(value),
   style: value => typeof value === 'string' && value.trim().length > 0 && value.length <= 256 && !/[\x00-\x1f\x7f]/.test(value),
@@ -80,7 +104,7 @@ function fontMetadata(value, strict = false) {
   }
   return Object.keys(result).length ? result : undefined;
 }
-function mediaMetadata(value = {}, video = false) {
+function mediaMetadata(value = {}, video = false, audio = false) {
   const result = {};
   for (const key of ['width', 'height', 'duration']) {
     const number = Number(value[key]);
@@ -89,6 +113,11 @@ function mediaMetadata(value = {}, video = false) {
   if (typeof value.codec === 'string' && /^[a-zA-Z0-9_.-]{1,80}$/.test(value.codec)) result.codec = value.codec;
   for (const key of ['hasAudio', 'hasAlpha']) if (typeof value[key] === 'boolean') result[key] = value[key];
   if (video) for (const [key, valid] of Object.entries(VIDEO_PREVIEW_METADATA)) if (valid(value[key])) result[key] = value[key];
+  if (audio) {
+    for (const [key, valid] of Object.entries(AUDIO_METADATA)) if (valid(value[key])) result[key] = value[key];
+    if (VIDEO_PREVIEW_METADATA.audioCodec(value.audioCodec)) result.audioCodec = value.audioCodec;
+    const tags = audioTags(value.audio); if (tags) result.audio = tags;
+  }
   return result;
 }
 const clone = value => structuredClone(value);
@@ -253,9 +282,15 @@ class Library {
         if (path.posix.extname(asset.modelBundle.entry).slice(1).toLowerCase() !== asset.ext || asset.modelBundle.hash !== asset.hash || asset.modelBundle.size !== asset.size || asset.filename !== `${bundleRelative(asset.id)}/${asset.modelBundle.entry}` || 'projectBundle' in asset) throw new Error('模型包索引无效');
       } else if (asset.filename !== `originals/${asset.id}.${asset.ext}` || 'modelBundle' in asset || 'projectBundle' in asset) throw new Error('素材路径无效');
       if (asset.thumbnail !== null && asset.thumbnail !== `thumbnails/${asset.id}.jpg`) throw new Error('缩略图路径无效');
-      if ('videoThumbnailRevision' in asset && (!VIDEO.has(asset.ext) || !asset.thumbnail ||
+      if ('videoThumbnailRevision' in asset && (mediaType(asset.ext, asset.mediaType) !== 'video' || !asset.thumbnail ||
           typeof asset.videoThumbnailRevision !== 'string' || !/^[a-f0-9-]{36}$/.test(asset.videoThumbnailRevision))) throw new Error('视频封面记录无效');
-      if ('mediaType' in asset && asset.mediaType !== mediaType(asset.ext)) throw new Error('素材媒体类型无效');
+      if ('mediaType' in asset && asset.mediaType !== mediaType(asset.ext, asset.mediaType)) throw new Error('素材媒体类型无效');
+      if ('audio' in asset) {
+        if (mediaType(asset.ext, asset.mediaType) !== 'audio') throw new Error('音乐信息素材类型无效');
+        audioTags(asset.audio, true);
+      }
+      for (const [key, valid] of Object.entries(AUDIO_METADATA)) if (key in asset &&
+          (mediaType(asset.ext, asset.mediaType) !== 'audio' || !valid(asset[key]))) throw new Error('音乐技术信息无效');
       if ('font' in asset) {
         if (!FONT.has(asset.ext)) throw new Error('字体信息素材类型无效');
         fontMetadata(asset.font, true);
@@ -339,7 +374,7 @@ class Library {
 
   snapshot() {
     this._ready();
-    const assets = clone(this.data.assets).map(asset => ({ ...asset, mediaType: mediaType(asset.ext), colorLabel: ColorLabels.normalize(asset.colorLabel) }));
+    const assets = clone(this.data.assets).map(asset => ({ ...asset, mediaType: mediaType(asset.ext, asset.mediaType), colorLabel: ColorLabels.normalize(asset.colorLabel) }));
     const active = assets.filter(asset => !asset.trashedAt);
     const tagCounts = new Map();
     for (const asset of active) for (const tag of asset.tags) tagCounts.set(tag, (tagCounts.get(tag) || 0) + 1);
@@ -544,7 +579,8 @@ class Library {
                 const timestamp = now();
                 const copyInfo = await fs.stat(copied);
                 const font = FONT.has(ext) ? fontMetadata(dimensions.font) : undefined;
-                draft.assets.push({ id, name: path.basename(absolute, path.extname(absolute)), ext, mediaType: mediaType(ext), size: copyInfo.size, width: Number(dimensions.width) || 0, height: Number(dimensions.height) || 0, ...mediaMetadata(dimensions, VIDEO.has(ext)), ...(font ? { font } : {}), hash: copyHash, createdAt: timestamp, updatedAt: timestamp, tags: [], folderId, rating: 0, notes: '', trashedAt: null, filename, thumbnail, ...sourceMetadata });
+                const type = mediaType(ext, dimensions.mediaType);
+                draft.assets.push({ id, name: path.basename(absolute, path.extname(absolute)), ext, mediaType: type, size: copyInfo.size, width: Number(dimensions.width) || 0, height: Number(dimensions.height) || 0, ...mediaMetadata(dimensions, type === 'video', type === 'audio'), ...(font ? { font } : {}), hash: copyHash, createdAt: timestamp, updatedAt: timestamp, tags: [], folderId, rating: 0, notes: '', trashedAt: null, filename, thumbnail, ...sourceMetadata });
                 hashes.add(copyHash);
                 created.push({ path: copied });
                 if (thumbnail) created.push({ path: thumbnailPath });
@@ -1100,7 +1136,7 @@ class Library {
   setVideoThumbnail(id, { expectedHash, jpeg }) {
     return this._mutate(async () => {
       const current = this.data.assets.find(asset => asset.id === id);
-      if (!current || current.trashedAt || !VIDEO.has(current.ext) || current.hash !== expectedHash) throw new Error('视频已变化，请重新打开预览');
+      if (!current || current.trashedAt || mediaType(current.ext, current.mediaType) !== 'video' || current.hash !== expectedHash) throw new Error('视频已变化，请重新打开预览');
       const relative = `thumbnails/${id}.jpg`;
       await this._checkManagedParent(relative);
       const destination = path.join(this.root, relative);
@@ -1131,6 +1167,23 @@ class Library {
     });
   }
 
+  setAudioMetadata(id, expectedHash, metadata) {
+    return this._mutate(async () => {
+      const current = this.data.assets.find(asset => asset.id === id);
+      if (!current || current.trashedAt || !AUDIO.has(current.ext) || current.hash !== expectedHash || metadata?.mediaType !== 'audio') {
+        throw new Error('音乐已变化，请重新打开预览');
+      }
+      const information = mediaMetadata(metadata, false, true);
+      if (current.mediaType === 'audio' && Object.entries(information).every(([key, value]) => JSON.stringify(current[key]) === JSON.stringify(value))) return this.snapshot();
+      const draft = clone(this.data);
+      const asset = draft.assets.find(item => item.id === id);
+      Object.assign(asset, information, { mediaType: 'audio' });
+      delete asset.videoThumbnailRevision;
+      await this._persist(draft);
+      return this.snapshot();
+    });
+  }
+
   refreshVideoMetadata(ids, { signal } = {}) {
     return this._mutate(async () => {
       signal?.throwIfAborted();
@@ -1140,7 +1193,7 @@ class Library {
       const errors = [];
       for (const asset of draft.assets) {
         signal?.throwIfAborted();
-        if (!selected.has(asset.id) || !VIDEO.has(asset.ext) || !this.createThumbnail) continue;
+        if (!selected.has(asset.id) || mediaType(asset.ext, asset.mediaType) !== 'video' || !this.createThumbnail) continue;
         if (asset.videoThumbnailRevision || (asset.thumbnail && asset.codec && asset.width > 0 && asset.height > 0)) continue;
         try {
           await this._checkManagedParent(asset.filename);
@@ -1219,4 +1272,4 @@ class Library {
   }
 }
 
-module.exports = { Library, SUPPORTED, VIDEO, MODEL, PROJECT, FONT };
+module.exports = { Library, SUPPORTED, VIDEO, AUDIO, MODEL, PROJECT, FONT };

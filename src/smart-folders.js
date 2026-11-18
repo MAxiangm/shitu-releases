@@ -5,13 +5,14 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function (ColorLabels) {
   'use strict';
   const NAME_LIMIT = 100;
-  const MEDIA_TYPES = Object.freeze(['all', 'image', 'video', 'font', 'model', 'project']);
+  const MEDIA_TYPES = Object.freeze(['all', 'image', 'video', 'audio', 'font', 'model', 'project']);
   const DEFAULT_RULE = Object.freeze({ mediaType: 'all', colorLabel: null, recentDays: 0, search: '', favorite: false });
   const fields = new Set(Object.keys(DEFAULT_RULE));
-  const names = Object.freeze({ all: '所有素材', image: '图片', video: '视频', font: '字体', model: '3D 模型', project: 'AE 工程' });
+  const names = Object.freeze({ all: '所有素材', image: '图片', video: '视频', audio: '音乐', font: '字体', model: '3D 模型', project: 'AE 工程' });
   const groups = {
     image: new Set(['jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp', 'tif', 'tiff', 'svg', 'avif']),
     video: new Set(['mp4', 'm4v', 'mov', 'qt', 'webm', 'ogv', 'ogg', 'mkv', 'avi', 'wmv', 'asf', 'mpg', 'mpeg', 'mpe', 'm1v', 'm2v', 'mts', 'm2ts', 'ts', 'm2t', 'vob', 'flv', 'f4v', 'mxf', '3gp', '3g2', 'divx', 'dxv', 'rm', 'rmvb', 'dv']),
+    audio: new Set(['mp3', 'mp2', 'wav', 'wave', 'flac', 'm4a', 'm4b', 'aac', 'oga', 'opus', 'aif', 'aiff', 'aifc', 'ape', 'wma', 'alac', 'amr', 'ac3', 'eac3', 'dts', 'mka', 'au', 'snd', 'wv', 'tta', 'dsf', 'dff', 'caf', 'w64']),
     font: new Set(['ttf', 'otf', 'woff', 'woff2', 'ttc', 'otc']),
     model: new Set(['glb', 'gltf', 'obj', 'fbx', 'stl', 'ply', 'blend', 'c4d', 'max']),
     project: new Set(['aep', 'aepx'])
@@ -60,7 +61,7 @@
         if (!Number.isFinite(imported) || imported < cutoff || imported > instant) return false;
       }
       if (terms.length) {
-        const haystack = [asset.name, asset.font?.family, asset.font?.fullName, asset.font?.style,
+        const haystack = [asset.name, asset.font?.family, asset.font?.fullName, asset.font?.style, asset.audio?.title, asset.audio?.artist, asset.audio?.album,
           ...(Array.isArray(asset.tags) ? asset.tags : []), asset.notes, asset.sourceUrl, asset.pageUrl]
           .filter(item => typeof item === 'string').join(' ').toLocaleLowerCase();
         if (!terms.every(term => haystack.includes(term))) return false;
