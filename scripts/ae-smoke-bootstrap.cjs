@@ -76,7 +76,7 @@ module.exports = function configureAESmoke({ root, base }) {
   });
   dialog.showErrorBox = (title, message) => failures.push(`${title}: ${message}`);
   dialog.showOpenDialog = async (_window, options) => {
-    assert.equal(options.title, '选择导出文件夹', 'Unexpected native file picker');
+    assert.equal(options.title, '选择导出保存位置', 'Unexpected native file picker');
     dialogExports++;
     return { canceled: false, filePaths: [fixture.exportedDirectory] };
   };
@@ -159,7 +159,7 @@ module.exports = function configureAESmoke({ root, base }) {
           if (Date.now() > deadline) throw new Error('AE folder export button did not produce a directory');
           await new Promise(resolve => setTimeout(resolve, 25));
         }
-        await window.webContents.executeJavaScript(`(async () => { const deadline = Date.now() + 5000; while (!document.getElementById('toastStack').textContent.includes('已导出 AE 工程与素材文件夹')) { if (Date.now() > deadline) throw new Error('AE export did not complete'); await new Promise(resolve => setTimeout(resolve, 20)); } })()`);
+        await window.webContents.executeJavaScript(`(async () => { const deadline = Date.now() + 5000; while (!document.getElementById('toastStack').textContent.includes('素材导出完成')) { if (Date.now() > deadline) throw new Error('AE export did not complete'); await new Promise(resolve => setTimeout(resolve, 20)); } })()`);
         assert.equal(hash(await fs.readFile(fixture.source)), fixture.sourceHash, 'Source project was modified');
         assert.equal(path.relative(base, fixture.sourceDirectory), 'source');
         await fs.rm(fixture.sourceDirectory, { recursive: true, force: true });
@@ -179,8 +179,19 @@ module.exports = function configureAESmoke({ root, base }) {
         })()`);
         const library = new Library({ root: imported.root }); await library.init();
         const exportNames = await fs.readdir(fixture.exportedDirectory);
-        assert.equal(exportNames.length, 1);
-        const exported = path.join(fixture.exportedDirectory, exportNames[0]);
+        assert.equal(exportNames.length, 2);
+        assert.ok(exportNames.includes('Mosaic 导出报告.json'), 'AE export did not include the complete diagnostic report');
+        const exportedName = exportNames.find(name => name !== 'Mosaic 导出报告.json');
+        const exported = path.join(fixture.exportedDirectory, exportedName);
+        assert.ok((await fs.stat(exported)).isDirectory(), 'AE export package is not a directory');
+        const report = JSON.parse(await fs.readFile(path.join(fixture.exportedDirectory, 'Mosaic 导出报告.json'), 'utf8'));
+        assert.equal(report.exportedAssets, 1);
+        assert.equal(report.packages.length, 1);
+        assert.equal(report.packages[0].directory, exportedName);
+        assert.equal(report.packages[0].entry, imported.manifest.entry);
+        assert.deepEqual(report.packages[0].missing, []);
+        assert.deepEqual(report.packages[0].warnings, imported.manifest.warnings);
+        assert.deepEqual(report.packages[0].files, imported.manifest.files.map(file => ({ path: file.path, size: file.size, sha256: file.hash })));
         for (const file of imported.manifest.files) {
           const destination = path.join(exported, file.path);
           assert.equal(hash(await fs.readFile(destination)), file.hash, 'Exported AE package file mismatch: ' + file.path);
@@ -203,7 +214,7 @@ module.exports = function configureAESmoke({ root, base }) {
           previewBoundaryMocked: true, automaticCompositionThumbnail: imported.automaticCompositionThumbnail,
           staticCompositionPreview: imported.staticCompositionPreview, sameNameCompositionSwitch: imported.sameNameCompositionSwitch,
           staticPreviewAfterSourceRemoval: true, videoRenderingRequired: false,
-          exportButtonProducedFolder: true, exportedFilesMatchManifest: true, sourcesRemovedAfterImport: true,
+          exportButtonProducedFolder: true, exportedFilesMatchManifest: true, exportDiagnosticReportVerified: true, sourcesRemovedAfterImport: true,
           managedDependenciesIndependent: true, dragContainsFullFolder: true, imagePluginsExcludeProjects: true,
           sourceProjectUnchanged: true, stagingCleaned: true, browserNetworkRequests: 0, screenshotCaptured, userData: app.getPath('userData') };
         await fs.writeFile(resultPath, JSON.stringify(result, null, 2));

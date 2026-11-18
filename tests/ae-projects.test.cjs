@@ -6,6 +6,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 const { createHash } = require('node:crypto');
 const { createAEProjectCollector, sequenceFiles, readBridgeReport, projectYear, launchAfterEffects, listAfterEffectsTools } = require('../src/ae-projects.cjs');
+const { copyProjectBundle, validateProjectBundle } = require('../src/project-bundle.cjs');
 const testsRoot = path.resolve(__dirname, '..', '.recovery', 'tests');
 async function fixture(t) {
   await fs.mkdir(testsRoot, { recursive: true });
@@ -56,6 +57,15 @@ test('AE collection uses a fresh instance, copies and relinks footage, preserves
   assert.equal(prepared.manifest.entry, path.basename(item.source));
   assert.equal(prepared.manifest.collectedWithVersion, '17.0.1x52');
   assert.equal(prepared.manifest.files.length, 2);
+  assert.deepEqual(prepared.manifest.warnings, []);
+  assert.deepEqual(prepared.manifest.notes, ['字体、第三方插件、表达式动态引用及部分专用格式内部链接需在原软件中核对。']);
+  const copiedManifest = await copyProjectBundle(prepared, path.join(item.base, 'Copied project'));
+  assert.deepEqual(copiedManifest.notes, prepared.manifest.notes);
+  assert.deepEqual(copiedManifest.warnings, []);
+  for (const notes of [null, 'invalid', [42], ['x'.repeat(4097)], Array(100001).fill('note')]) {
+    assert.throws(() => validateProjectBundle({ ...prepared.manifest, notes }), /提示信息无效/);
+  }
+  assert.doesNotThrow(() => validateProjectBundle({ ...prepared.manifest, notes: undefined }));
   assert.ok(prepared.sourceFiles.includes(item.image));
   await fs.rename(item.sourceDirectory, path.join(item.base, 'Source hidden'));
   const copiedImage = prepared.manifest.files.find(file => file.path.endsWith('.png'));
@@ -83,7 +93,22 @@ test('missing AE footage remains explicit and same-name footage in separate fold
   const instance = collector(t, item, launcher(records));
   const prepared = await instance.prepareProjectBundle(item.source); t.after(() => prepared.cleanup());
   assert.deepEqual(prepared.manifest.missing, [missing]);
+  assert.deepEqual(prepared.manifest.warnings, []);
+  assert.equal(prepared.manifest.notes.length, 1);
   assert.equal(prepared.manifest.files.filter(file => file.path.endsWith('.png')).length, 2);
+});
+
+test('AE version compatibility warnings remain actionable warnings beside collection notes', async t => {
+  const item = await fixture(t);
+  await fs.writeFile(item.source, '<xmp:CreatorTool>Adobe After Effects 2020 (Windows)</xmp:CreatorTool>');
+  const instance = createAEProjectCollector({ cacheDir: path.join(item.base, 'cache'),
+    toolLocator: async () => ({ executable: process.execPath, year: 2025 }), launch: launcher([]) });
+  t.after(() => instance.shutdown());
+  const prepared = await instance.prepareProjectBundle(item.source); t.after(() => prepared.cleanup());
+  assert.equal(prepared.manifest.warnings.length, 1);
+  assert.match(prepared.manifest.warnings[0], /源工程来自 AE 2020.*AE 2025/);
+  assert.equal(prepared.manifest.notes.length, 1);
+  assert.deepEqual(prepared.manifest.missing, []);
 });
 
 test('confirmed AE repairs rewrite the missing source and verify it opens from the rebuilt package', async t => {

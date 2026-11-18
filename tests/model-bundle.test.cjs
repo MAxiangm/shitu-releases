@@ -23,6 +23,38 @@ function glb(json) {
   bytes.write('glTF'); bytes.writeUInt32LE(2, 4); bytes.writeUInt32LE(bytes.length, 8); bytes.writeUInt32LE(length, 12); bytes.writeUInt32LE(0x4e4f534a, 16); text.copy(bytes, 20);
   return bytes;
 }
+function binaryFbx(nodes, version = 7400) {
+  const wide = version >= 7500, headerSize = wide ? 25 : 13;
+  const uint = (bytes, value, offset) => wide ? bytes.writeBigUInt64LE(BigInt(value), offset) : bytes.writeUInt32LE(value, offset);
+  function property(value) {
+    if (typeof value === 'bigint') { const bytes = Buffer.alloc(9); bytes[0] = 76; bytes.writeBigInt64LE(value, 1); return bytes; }
+    const raw = Buffer.isBuffer(value), bytes = raw ? value : Buffer.from(value), header = Buffer.alloc(5);
+    header[0] = raw ? 82 : 83; header.writeUInt32LE(bytes.length, 1); return Buffer.concat([header, bytes]);
+  }
+  function node(spec, offset) {
+    const name = Buffer.from(spec.name), properties = Buffer.concat((spec.properties || []).map(property));
+    const head = Buffer.alloc(headerSize); head[headerSize - 1] = name.length;
+    uint(head, (spec.properties || []).length, wide ? 8 : 4); uint(head, properties.length, wide ? 16 : 8);
+    const parts = [head, name, properties]; let cursor = offset + headerSize + name.length + properties.length;
+    for (const child of spec.children || []) { const bytes = node(child, cursor); parts.push(bytes); cursor += bytes.length; }
+    if (spec.children?.length) { parts.push(Buffer.alloc(headerSize)); cursor += headerSize; }
+    uint(head, cursor, 0); return Buffer.concat(parts);
+  }
+  const header = Buffer.alloc(27); header.write('Kaydara FBX Binary  \0\x1a\0', 'binary'); header.writeUInt32LE(version, 23);
+  const parts = [header]; let cursor = 27;
+  for (const spec of nodes) { const bytes = node(spec, cursor); parts.push(bytes); cursor += bytes.length; }
+  parts.push(Buffer.alloc(headerSize)); return Buffer.concat(parts);
+}
+function binaryMedia({ external = false, empty = false, connection = true } = {}) {
+  const leaf = (name, ...properties) => ({ name, properties });
+  const objects = [
+    { name: 'Texture', properties: [9007199254740993n, 'Paint\0\x01Texture', ''], children: [leaf('Media', 'Paint\0\x01Video'), leaf('RelativeFilename', 'asset.fbm/paint.png')] },
+    { name: 'Video', properties: [9007199254740995n, 'Paint\0\x01Video', 'Clip'], children: [leaf('Filename', 'Z:\\old\\paint.png'), leaf('RelativeFilename', 'asset.fbm/paint.png'), leaf('Content', Buffer.from(empty ? [] : [1, 2, 3]))] }
+  ];
+  if (external) objects.push({ name: 'Video', properties: [3n, 'Normal\0\x01Video', 'Clip'], children: [leaf('RelativeFilename', 'other/normal.png')] },
+    { name: 'Texture', properties: [4n, 'Normal\0\x01Texture', ''], children: [leaf('Media', 'Normal\0\x01Video'), leaf('RelativeFilename', 'other/normal.png')] });
+  return [{ name: 'Objects', children: objects }, { name: 'Connections', children: connection ? [leaf('C', 'OO', 9007199254740995n, 9007199254740993n), ...(external ? [leaf('C', 'OO', 3n, 4n)] : [])] : [] }];
+}
 test('OBJ material and spaced texture references form an independent package without changing sources', async t => {
   const root = await fixture(t), source = path.join(root, 'source');
   const obj = await write(source, 'model.obj', 'mtllib surface materials.mtl\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n');
@@ -105,6 +137,73 @@ test('FBX binary node strings collect linked textures while embedded media stays
   await write(root, 'tex/color.png', 'image');
   const plan = await collectModelBundle(source);
   assert.equal(plan.files.length, 2); assert.deepEqual(plan.missing, []);
+});
+test('ASCII FBX embedded media satisfies its Texture aliases without hiding another missing texture', async t => {
+  const root = await fixture(t);
+  const source = await write(root, 'asset.fbx', `; FBX 7.4.0
+Objects: {
+  Texture: 9007199254740993, "Texture::Paint", "" { Media: "Video::Paint" RelativeFilename: "asset.fbm/paint.png" }
+  Video: 9007199254740995, "Video::Paint", "Clip" {
+    Filename: "Z:\\old\\paint.png"
+    RelativeFilename: "asset.fbm/paint.png"
+    Content: ,
+      "YWJj"
+  }
+}
+Connections: { C: "OO", 9007199254740995, 9007199254740993 }
+`);
+  let plan = await collectModelBundle(source);
+  assert.deepEqual(plan.missing, []); assert.deepEqual(plan.warnings, []); assert.equal(plan.files.length, 1);
+  await fs.appendFile(source, `
+Objects: {
+  Video: 3, "Video::Normal", "Clip" { RelativeFilename: "other/normal.png" }
+  Texture: 4, "Texture::Normal", "" { Media: "Video::Normal" RelativeFilename: "other/normal.png" }
+}
+Connections: { C: "OO", 3, 4 }
+`);
+  plan = await collectModelBundle(source);
+  assert.deepEqual(plan.missing, ['other/normal.png']);
+  assert.deepEqual(plan.warnings, []);
+});
+test('ASCII FBX empty Content and unassociated same-name paths are still missing', async t => {
+  const root = await fixture(t), source = await write(root, 'asset.fbx', `
+Objects: {
+  Video: 1, "Video::embedded", "Clip" { RelativeFilename: "inside/paint.png" Content: , "YWJj" }
+  Video: 2, "Video::empty", "Clip" { RelativeFilename: "empty.png" Content: , "" }
+  Texture: 3, "Texture::external", "" { RelativeFilename: "outside/paint.png" }
+}
+`);
+  const plan = await collectModelBundle(source);
+  assert.deepEqual(plan.missing, ['empty.png', 'outside/paint.png']);
+});
+for (const version of [7400, 7500]) {
+  test(`binary FBX ${version} embedded Video connections and Media names resolve repeated Texture references`, async t => {
+    const root = await fixture(t), source = await write(root, 'asset.fbx', binaryFbx(binaryMedia(), version));
+    for (const connection of [true, false]) {
+      await fs.writeFile(source, binaryFbx(binaryMedia({ connection }), version));
+      const plan = await collectModelBundle(source);
+      assert.deepEqual(plan.missing, []); assert.deepEqual(plan.warnings, []); assert.equal(plan.files.length, 1);
+    }
+  });
+  test(`binary FBX ${version} mixed and empty embedded media report only real missing dependencies`, async t => {
+    const root = await fixture(t), source = await write(root, 'asset.fbx', binaryFbx(binaryMedia({ external: true }), version));
+    let plan = await collectModelBundle(source);
+    assert.deepEqual(plan.missing, ['other/normal.png']); assert.deepEqual(plan.warnings, []);
+    await fs.writeFile(source, binaryFbx(binaryMedia({ empty: true }), version));
+    plan = await collectModelBundle(source);
+    assert.deepEqual(plan.missing, ['asset.fbm/paint.png']);
+    await write(root, 'tex/paint.png', 'external image');
+    plan = await collectModelBundle(source);
+    assert.deepEqual(plan.missing, []); assert.equal(plan.files.length, 2);
+    assert.ok(plan.warnings.some(message => message.includes('附近')));
+  });
+}
+test('malformed binary FBX embedded Content cannot suppress dependency diagnostics', async t => {
+  const root = await fixture(t), bytes = binaryFbx(binaryMedia());
+  const content = bytes.indexOf(Buffer.from('Content')) + 'Content'.length;
+  bytes.writeUInt32LE(1024, content + 1);
+  const source = await write(root, 'asset.fbx', bytes), plan = await collectModelBundle(source);
+  assert.ok(plan.warnings.some(message => message.includes('FBX 贴图引用未能完整读取')));
 });
 test('native model projects keep nearby resources and a same-name preview sidecar', async t => {
   const root = await fixture(t), source = await write(root, 'object.c4d', 'native-project');

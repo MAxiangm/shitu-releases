@@ -4,6 +4,7 @@ const fs = require('node:fs/promises');
 const { createReadStream, constants } = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const { readFbxDependencies } = require('./fbx-dependencies.cjs');
 
 const MODEL_EXTENSIONS = new Set(['glb', 'gltf', 'obj', 'fbx', 'stl', 'ply', 'c4d', 'blend', 'max']);
 const NATIVE_EXTENSIONS = new Set(['c4d', 'blend', 'max']);
@@ -97,46 +98,6 @@ async function gltfReferences(filename, binary) {
     ...(Array.isArray(data.images) ? data.images.filter(value => typeof value.uri === 'string').map(value => ({ reference: value.uri, kind: 'texture' })) : [])
   ];
 }
-async function fbxReferences(filename) {
-  const handle = await fs.open(filename, 'r');
-  try {
-    const header = Buffer.alloc(27); await handle.read(header, 0, 27, 0);
-    if (!header.subarray(0, 23).equals(Buffer.from('Kaydara FBX Binary  \0\x1a\0', 'binary'))) {
-      const text = await readText(filename);
-      return { references: [...text.matchAll(/(?:RelativeFilename|FileName|Filename)\s*:\s*"([^"\r\n]+)"/g)].map(match => match[1].replace(/\\\\/g, '\\')), embedded: /Content\s*:\s*(?:,|"[^"]+")/.test(text) };
-    }
-    const length = (await handle.stat()).size;
-    const wide = header.readUInt32LE(23) >= 7500, nodeLength = wide ? 25 : 13;
-    const uint = (buffer, offset) => wide ? Number(buffer.readBigUInt64LE(offset)) : buffer.readUInt32LE(offset);
-    const stack = [{ position: 27, end: length }], references = [];
-    let embedded = false, remaining = 250000;
-    while (stack.length) {
-      if (--remaining < 0) throw new Error('FBX 节点过多');
-      const frame = stack.at(-1);
-      if (frame.position + nodeLength > frame.end) { stack.pop(); continue; }
-      const node = Buffer.alloc(nodeLength);
-      await handle.read(node, 0, node.length, frame.position);
-      const end = uint(node, 0), propertyLength = uint(node, wide ? 16 : 8), nameLength = node[nodeLength - 1];
-      if (!end) { stack.pop(); continue; }
-      const content = frame.position + nodeLength + nameLength, children = content + propertyLength;
-      if (!Number.isSafeInteger(end) || end <= frame.position || end > frame.end || children > end) throw new Error('FBX 节点长度无效');
-      const nameBytes = Buffer.alloc(nameLength); await handle.read(nameBytes, 0, nameLength, frame.position + nodeLength);
-      const name = nameBytes.toString('utf8');
-      if (['RelativeFilename', 'FileName', 'Filename', 'Content'].includes(name) && propertyLength >= 5) {
-        const propertyHeader = Buffer.alloc(5); await handle.read(propertyHeader, 0, 5, content);
-        const type = String.fromCharCode(propertyHeader[0]), size = propertyHeader.readUInt32LE(1);
-        if (name === 'Content' && type === 'R' && size > 0) embedded = true;
-        if (type === 'S' && name !== 'Content' && size > 0 && size < 65536 && size + 5 <= propertyLength) {
-          const bytes = Buffer.alloc(size); await handle.read(bytes, 0, size, content + 5); references.push(bytes.toString('utf8'));
-        }
-      }
-      frame.position = end;
-      if (children + nodeLength <= end) stack.push({ position: children, end });
-    }
-    return { references, embedded };
-  } finally { await handle.close(); }
-}
-
 async function collectModelBundle(source, { allowedRoots, repair } = {}) {
   if (typeof source !== 'string' || !path.isAbsolute(source) || !MODEL_EXTENSIONS.has(ext(source))) throw new Error('请选择支持的 3D 模型文件');
   source = path.resolve(source);
@@ -186,7 +147,7 @@ async function collectModelBundle(source, { allowedRoots, repair } = {}) {
     repairedFiles.set(actual.toLowerCase(), match.hash);
     return actual;
   }
-  async function reference(raw, from, kind = 'texture', fallback = false, embedded = false) {
+  async function reference(raw, from, kind = 'texture', fallback = false, optional = false) {
     if (typeof raw !== 'string' || !raw.trim()) return null;
     raw = raw.trim();
     if (/^data:/i.test(raw)) return null;
@@ -195,8 +156,11 @@ async function collectModelBundle(source, { allowedRoots, repair } = {}) {
     decoded = decoded.replace(/\\/g, '/');
     const remote = /^(?:[a-z][a-z0-9+.-]*:|\/\/|\/)/i.test(decoded);
     if (remote && !fallback) { missing.add(raw); warnings.add(`已跳过外部或绝对路径引用：${raw}`); return null; }
-    if (decoded.includes('\0') || decoded.length > 4096) { missing.add(raw.slice(0, 4096)); return null; }
-    if (kind === 'texture' && !TEXTURES.has(ext(decoded))) { missing.add(raw); warnings.add(`贴图格式未自动收集：${raw}`); return null; }
+    if (decoded.includes('\0') || decoded.length > 4096) { if (!optional) missing.add(raw.slice(0, 4096)); return null; }
+    if (kind === 'texture' && !TEXTURES.has(ext(decoded))) {
+      if (!optional) { missing.add(raw); warnings.add(`贴图格式未自动收集：${raw}`); }
+      return null;
+    }
     const options = remote ? [] : [path.resolve(path.dirname(from), decoded)];
     if (fallback) {
       const name = path.posix.basename(decoded);
@@ -216,8 +180,8 @@ async function collectModelBundle(source, { allowedRoots, repair } = {}) {
     }
     const restored = await restoredReference(raw, options, from, fallback);
     if (restored) return restored;
-    if (!embedded) missing.add(raw);
-    if (lastError && !['ENOENT', 'ENOTDIR'].includes(lastError.code)) warnings.add(`未收集引用 ${raw}：${lastError.message}`);
+    if (!optional) missing.add(raw);
+    if (!optional && lastError && !['ENOENT', 'ENOTDIR'].includes(lastError.code)) warnings.add(`未收集引用 ${raw}：${lastError.message}`);
     return null;
   }
   async function resourceFolder(directory, depth = 0) {
@@ -260,9 +224,15 @@ async function collectModelBundle(source, { allowedRoots, repair } = {}) {
     } else if (type === 'fbx' || NATIVE_EXTENSIONS.has(type)) {
       if (type === 'fbx') {
         try {
-          const data = await fbxReferences(filename);
-          for (const item of data.references) await reference(item, filename, 'texture', true, data.embedded);
-          if (data.embedded) warnings.add('FBX 含内嵌资源，同时保留找到的外置贴图；混合引用请在预览中核对。');
+          for (const media of await readFbxDependencies(filename)) {
+            let found = false;
+            // Filename and RelativeFilename are aliases of one media item.
+            // A payload in another Video cannot satisfy this item's lookup.
+            for (const item of media.references) {
+              if (await reference(item, filename, 'texture', true, true)) { found = true; break; }
+            }
+            if (!media.embedded && !found && media.references.length) await reference(media.references[0], filename, 'texture', true);
+          }
         } catch (error) {
           if (repair) throw error;
           warnings.add(`FBX 贴图引用未能完整读取：${error.message}`);

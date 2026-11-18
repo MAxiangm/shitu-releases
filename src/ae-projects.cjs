@@ -193,7 +193,7 @@ function createAEProjectCollector({ cacheDir, timeoutMs = 180000, toolLocator = 
     try {
       const scan = await runBridge(tool, work, control, { token, mode: 'scan', source, reportProject: path.join(work, 'scan-report.aepx') }, signal);
       if (!Array.isArray(scan.report.sources)) throw new Error('AE 工程资源清单无效');
-      const missing = [], warnings = ['字体、第三方插件、表达式动态引用及部分专用格式内部链接需在原软件中核对。'];
+      const missing = [], warnings = [], notes = ['字体、第三方插件、表达式动态引用及部分专用格式内部链接需在原软件中核对。'];
       if (sourceYear && tool.year && tool.year !== sourceYear) warnings.push(`源工程来自 AE ${sourceYear}，本包由 AE ${tool.year} 收集，导出需对应或更新版本打开。`);
       const sources = [source], relocations = new Map(), sequenceDirectories = new Map(), identity = [], copied = new Map();
       const sourceKey = (record, index) => `${record.itemId ?? record.itemIndex ?? index}\0${record.role}`;
@@ -275,7 +275,7 @@ function createAEProjectCollector({ cacheDir, timeoutMs = 180000, toolLocator = 
       }
       if (await digest(source, signal) !== originalHash) throw new Error('源 AE 工程在收集期间发生变化，请重试');
       const sourceIdentity = crypto.createHash('sha256').update(JSON.stringify({ source: originalHash, dependencies: identity.sort((a, b) => a.source.localeCompare(b.source)) })).digest('hex');
-      const files = await scanFiles(directory, signal), manifest = { version: 1, entry, files, missing: [...new Set(missing)], warnings: [...new Set(warnings)], sourceIdentity,
+      const files = await scanFiles(directory, signal), manifest = { version: 1, entry, files, missing: [...new Set(missing)], warnings: [...new Set(warnings)], notes, sourceIdentity,
         compositions: final.report.compositions || [],
         collectedWithVersion: String(final.report.version || scan.report.version || tool.year || ''), size: files.reduce((sum, file) => sum + file.size, 0), hash: projectBundleHash(files, entry) };
       validateProjectBundle(manifest);

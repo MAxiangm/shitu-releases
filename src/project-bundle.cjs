@@ -41,7 +41,7 @@ function validateProjectBundle(value) {
     names.add(file.path.toLowerCase()); size += file.size;
   }
   if (!value.files.some(file => file.path === value.entry) || !Number.isSafeInteger(size)) throw new Error('AE 工程包入口无效');
-  for (const key of ['missing', 'warnings']) if (!Array.isArray(value[key]) || value[key].length > MAX_FILES || value[key].some(item => typeof item !== 'string' || item.length > 4096)) throw new Error('AE 工程包提示信息无效');
+  for (const key of ['missing', 'warnings', ...(value.notes === undefined ? [] : ['notes'])]) if (!Array.isArray(value[key]) || value[key].length > MAX_FILES || value[key].some(item => typeof item !== 'string' || item.length > 4096)) throw new Error('AE 工程包提示信息无效');
   if (value.size !== size || value.hash !== projectBundleHash(value.files, value.entry)) throw new Error('AE 工程包校验值或大小无效');
   if (value.sourceIdentity !== undefined && !/^[a-f0-9]{64}$/.test(value.sourceIdentity)) throw new Error('AE 工程源校验值无效');
   if (value.collectedWithVersion !== undefined && (typeof value.collectedWithVersion !== 'string' || value.collectedWithVersion.length > 80)) throw new Error('AE 收集版本信息无效');

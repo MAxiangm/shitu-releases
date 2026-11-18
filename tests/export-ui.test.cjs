@@ -74,6 +74,18 @@ test('cancelled export has no success message and incomplete results are surface
   assert.equal(h.notices.length, 2); assert.match(h.notices[1][0], /名称中的非法字符已替换/);
 });
 
+test('reported export issues use a short notice and distinguish missing files from review notes', async () => {
+  const h = harness();
+  const warnings = Array.from({ length: 6 }, (_, index) => `素材 ${index}：需核对`);
+  h.context.api.exportFolder = async () => ({ count: 6, folders: 2, path: 'export', reportPath: 'export/Mosaic 导出报告.json', warnings, missingDependencies: 0 });
+  await h.context.exportLibraryItems('folder', 'folder-a', 'library-a');
+  assert.match(h.notices[1][0], /6 项需核对/); assert.match(h.notices[1][0], /Mosaic 导出报告.json/);
+  assert.doesNotMatch(h.notices[1][0], /素材 0/); assert.equal(h.notices[1][1], false);
+  h.context.api.exportFolder = async () => ({ count: 1, folders: 1, path: 'export', reportPath: 'export/Mosaic 导出报告.json', warnings: ['缺少贴图'], missingDependencies: 1 });
+  await h.context.exportLibraryItems('folder', 'folder-a', 'library-a');
+  assert.equal(h.notices[3][1], true);
+});
+
 test('progress distinguishes thumbnail preparation from copying and ignores events for another library', async () => {
   const h = harness(), operation = deferred(), started = deferred(); h.context.api.exportAssets = () => { started.resolve(); return operation.promise; };
   const exporting = h.context.exportLibraryItems('assets', ['one'], 'library-a'); await started.promise;

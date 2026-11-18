@@ -662,7 +662,10 @@ async function exportLibraryItems(kind, value, expectedRoot = state.library.root
     const title = kind === 'folder' ? `已按层级导出「${folder.name}」` : '素材导出完成';
     toast(`${title}\n${count} 个素材${kind === 'folder' && folders !== null ? ` · ${folders} 个分类文件夹` : ''}${result.path ? `\n${result.path}` : ''}`, false, 10000);
     const warnings = Array.isArray(result.warnings) ? result.warnings.map(item => typeof item === 'string' ? item : item?.message).filter(Boolean) : [];
-    if (warnings.length) toast(`导出提醒（${warnings.length} 项）：${warnings.slice(0, 3).join('；')}${warnings.length > 3 ? '；其余提醒请检查导出文件' : ''}`, true, 14000);
+    if (warnings.length) {
+      const reportName = typeof result.reportPath === 'string' ? result.reportPath.split(/[\\/]/).pop() : '';
+      toast(reportName ? `导出已完成，${warnings.length} 项需核对。\n完整内容见导出目录中的「${reportName}」` : `导出提醒：${warnings.join('；')}`, result.missingDependencies > 0, 14000);
+    }
     return result;
   } catch (error) { messageError(error); return null; }
   finally {

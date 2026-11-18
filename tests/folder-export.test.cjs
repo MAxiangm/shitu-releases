@@ -188,6 +188,83 @@ test('pre-existing missing dependencies remain explicit export warnings', async 
   assert.ok((await fs.stat(result.items[0].thumbnail)).isFile());
 });
 
+test('nested bundle exports include a portable report with file hashes and all missing dependencies', async t => {
+  const f = await fixture(t), parent = await f.folder('项目'), child = await f.folder('模型', parent);
+  const missing = Array.from({ length: 7 }, (_, index) => `missing-${index}.png`);
+  const filename = path.join(f.base, 'warning.gltf');
+  await fs.writeFile(filename, JSON.stringify({ asset: { version: '2.0' }, images: missing.map(uri => ({ uri })) }));
+  const imported = await f.library.importPaths([filename], { folderId: child }); assert.equal(imported.imported, 1);
+  const result = await f.library.exportFolder(parent, path.join(f.base, 'exports'));
+  const report = JSON.parse(await fs.readFile(result.reportPath, 'utf8'));
+  assert.equal(path.dirname(result.reportPath), result.path);
+  assert.equal(result.missingDependencies, 7);
+  assert.equal(report.packages[0].directory, '模型/warning');
+  assert.equal(report.packages[0].status, 'missing-dependencies');
+  assert.deepEqual(report.packages[0].missing, missing);
+  for (const file of report.packages[0].files) {
+    assert.equal(file.sha256, digest(await fs.readFile(path.join(result.path, report.packages[0].directory, file.path))));
+  }
+});
+
+test('legacy AE format caveats are report notes while actual warnings and missing resources remain explicit', async t => {
+  const f = await fixture(t), id = await f.project('工程');
+  const asset = f.library.data.assets.find(item => item.id === id);
+  const note = '字体、第三方插件、表达式动态引用及部分专用格式内部链接需在原软件中核对。';
+  asset.projectBundle.warnings = [note];
+  const destination = path.join(f.base, 'exports'); await fs.mkdir(destination);
+  const oldReport = path.join(destination, 'Mosaic 导出报告.json'); await fs.writeFile(oldReport, 'previous report');
+  const first = await f.library.exportAssets([id], destination);
+  assert.deepEqual(first.warnings, []); assert.equal(first.missingDependencies, 0);
+  assert.notEqual(first.reportPath, oldReport); assert.equal(await fs.readFile(oldReport, 'utf8'), 'previous report');
+  const firstReport = JSON.parse(await fs.readFile(first.reportPath, 'utf8'));
+  assert.deepEqual(firstReport.packages[0].notes, [note]);
+  assert.equal(firstReport.packages[0].status, 'collected');
+  asset.projectBundle.warnings.push('源工程来自较新 AE 版本');
+  asset.projectBundle.missing.push('missing.mov');
+  const second = await f.library.exportAssets([id], destination);
+  assert.equal(second.warnings.length, 2); assert.equal(second.missingDependencies, 1);
+  const secondReport = JSON.parse(await fs.readFile(second.reportPath, 'utf8'));
+  assert.deepEqual(secondReport.packages[0].warnings, ['源工程来自较新 AE 版本']);
+  assert.deepEqual(secondReport.packages[0].missing, ['missing.mov']);
+});
+
+test('export refreshes stale FBX manifests so embedded textures stay quiet and unrelated missing textures are reported', async t => {
+  const f = await fixture(t), source = path.join(f.base, 'model.fbx');
+  await fs.writeFile(source, `Objects: {
+    Video: 1, "Video::Paint", "Clip" { RelativeFilename: "model.fbm/paint.png" Content: , "YWJj" }
+    Texture: 2, "Texture::Paint", "" { RelativeFilename: "model.fbm/paint.png" }
+    Video: 3, "Video::External", "Clip" { RelativeFilename: "other/normal.png" }
+  }
+  Connections: { C: "OO", 1, 2 }
+  `);
+  const imported = await f.library.importPaths([source]); assert.equal(imported.imported, 1);
+  const asset = f.library.data.assets.find(item => item.id === imported.assetIds[0]);
+  asset.modelBundle.missing = [];
+  asset.modelBundle.warnings = ['FBX 含内嵌资源，同时保留找到的外置贴图；混合引用请在预览中核对。'];
+  const before = f.library.snapshot();
+  const result = await f.library.exportAssets(imported.assetIds, path.join(f.base, 'exports'));
+  assert.equal(result.missingDependencies, 1);
+  assert.equal(result.warnings.length, 1); assert.match(result.warnings[0], /other\/normal.png/);
+  assert.doesNotMatch(result.warnings[0], /内嵌资源|paint.png/);
+  const report = JSON.parse(await fs.readFile(result.reportPath, 'utf8'));
+  assert.deepEqual(report.packages[0].missing, ['other/normal.png']);
+  assert.deepEqual(f.library.snapshot(), before);
+});
+
+test('FBX export refresh allows parent-relative textures inside a bundle with a nested entry', async t => {
+  const f = await fixture(t), directory = path.join(f.base, 'nested-model');
+  await fs.mkdir(path.join(directory, 'models'), { recursive: true });
+  await fs.mkdir(path.join(directory, 'textures'));
+  await fs.writeFile(path.join(directory, 'models', 'object.fbx'), 'Video: 1, "Video::Paint", "Clip" { RelativeFilename: "../textures/paint.png" }');
+  await fs.writeFile(path.join(directory, 'textures', 'paint.png'), f.preview);
+  const imported = await f.library.importPaths([directory]); assert.equal(imported.imported, 1);
+  const asset = f.library.data.assets.find(item => item.id === imported.assetIds[0]);
+  assert.equal(asset.modelBundle.entry, 'models/object.fbx');
+  const result = await f.library.exportAssets(imported.assetIds, path.join(f.base, 'exports'));
+  assert.deepEqual(result.warnings, []); assert.equal(result.missingDependencies, 0);
+  assert.deepEqual(await fs.readFile(path.join(result.items[0].path, 'textures', 'paint.png')), f.preview);
+});
+
 test('rollback never follows an export root replaced with a junction', async t => {
   const f = await fixture(t), parent = await f.folder('项目'); await f.image('第一', parent); await f.image('第二', parent);
   const destination = path.join(f.base, 'exports'), outside = path.join(f.base, 'outside'); await fs.mkdir(outside);

@@ -7,11 +7,12 @@ const crypto = require('node:crypto');
 const sharp = require('sharp');
 const FolderTree = require('./folder-tree.js');
 const { MODEL, PROJECT } = require('./media-formats.cjs');
-const { validateModelBundle, isSafeBundlePath } = require('./model-bundle.cjs');
+const { validateModelBundle, isSafeBundlePath, collectModelBundle } = require('./model-bundle.cjs');
 const { validateProjectBundle } = require('./project-bundle.cjs');
 
 const MAX_THUMBNAIL_BYTES = 32 * 1024 * 1024;
 const MAX_THUMBNAIL_PIXELS = 16 * 1024 * 1024;
+const LEGACY_AE_NOTE = '字体、第三方插件、表达式动态引用及部分专用格式内部链接需在原软件中核对。';
 const key = value => value.normalize('NFC').toLowerCase();
 function inside(parent, filename) {
   const a = process.platform === 'win32' ? parent.toLowerCase() : parent;
@@ -160,9 +161,19 @@ async function preflightAsset(library, asset, options) {
   let thumbnail;
   try { thumbnail = await readThumbnail(supplied || library.getAssetPath(asset.id, 'thumbnail')); }
   catch (error) { throw fail(`“${asset.name}”的缩略图尚未准备好，请先生成预览后重试`, error); }
-  const warnings = [...new Set((manifest.warnings || []).map(message => `${asset.name}：${message}`))];
-  if (manifest.missing?.length) warnings.push(`${asset.name}：有 ${manifest.missing.length} 个依赖未收集：${manifest.missing.slice(0, 5).join('、')}${manifest.missing.length > 5 ? '…' : ''}`);
-  return { asset, files, bundled: true, thumbnail, warnings, occupiedRootNames: new Set(manifest.files.map(file => key(file.path.split('/')[0]))) };
+  // Older FBX manifests treated any embedded image as proof that all textures
+  // were embedded. Reinspect the stored bundle so those libraries also benefit
+  // from per-texture checks without changing their originals or metadata.
+  const dependencies = path.extname(manifest.entry).toLowerCase() === '.fbx'
+    ? await collectModelBundle(path.join(source, manifest.entry), { allowedRoots: [source] }) : manifest;
+  abort(options.signal);
+  const missing = [...new Set(dependencies.missing || [])];
+  const notes = PROJECT.has(asset.ext) ? [...new Set([...(manifest.notes || []), ...(manifest.warnings.includes(LEGACY_AE_NOTE) ? [LEGACY_AE_NOTE] : [])])] : [];
+  const issues = [...new Set((dependencies.warnings || []).filter(message => !PROJECT.has(asset.ext) || message !== LEGACY_AE_NOTE))];
+  const warnings = issues.map(message => `${asset.name}：${message}`);
+  if (missing.length) warnings.push(`${asset.name}：有 ${missing.length} 个依赖未收集：${missing.slice(0, 5).join('、')}${missing.length > 5 ? '…' : ''}`);
+  return { asset, files, bundled: true, thumbnail, warnings, missing, notes, issues,
+    occupiedRootNames: new Set(manifest.files.map(file => key(file.path.split('/')[0]))) };
 }
 async function copyChecked(file, target, created, signal) {
   abort(signal);
@@ -254,6 +265,34 @@ async function exportOne(item, parent, reserved, created, options) {
 function progress(options, completed, total, asset) {
   try { options.onProgress?.({ phase: 'exporting', completed, total, name: asset?.name || '' }); } catch {}
 }
+async function exportReport(directory, prepared, items, created, options) {
+  const bundles = prepared.filter(item => item.bundled);
+  if (!bundles.length) return {};
+  abort(options.signal);
+  const relative = filename => path.relative(directory, filename).split(path.sep).join('/');
+  const report = {
+    version: 1, exportedAt: new Date().toISOString(), exportedAssets: items.length,
+    description: '资源包内的文件已逐一复制并校验 SHA-256。missing 为确认未收集的依赖，warnings 为需要核对的问题，notes 为格式说明。内嵌贴图保存在模型文件中，无需外置贴图目录。',
+    packages: bundles.map(item => {
+      const output = items.find(value => value.assetId === item.asset.id);
+      return { name: item.asset.name, format: item.asset.ext, directory: relative(output.path),
+        entry: item.asset.modelBundle?.entry || item.asset.projectBundle.entry,
+        status: item.missing.length ? 'missing-dependencies' : item.issues.length ? 'needs-review' : 'collected',
+        files: item.files.map(file => ({ path: file.relative, size: file.size, sha256: file.hash })),
+        missing: item.missing, warnings: item.issues, notes: item.notes };
+    })
+  };
+  const bytes = Buffer.from(JSON.stringify(report, null, 2) + '\n');
+  const reserved = await namesAt(directory);
+  for (;;) {
+    const reportPath = path.join(directory, chooseName('Mosaic 导出报告', reserved, { extension: '.json' }));
+    try {
+      await writeExclusive(reportPath, bytes, created);
+      abort(options.signal);
+      return { reportPath, missingDependencies: bundles.reduce((sum, item) => sum + item.missing.length, 0) };
+    } catch (error) { if (error.code !== 'EEXIST') throw error; }
+  }
+}
 async function exportAssets(library, assets, destDir, options = {}) {
   const destination = await destinationPath(library.root, destDir), prepared = [];
   for (const asset of assets) {
@@ -267,7 +306,8 @@ async function exportAssets(library, assets, destDir, options = {}) {
     progress(options, 0, prepared.length);
     for (const item of prepared) { items.push(await exportOne(item, destination, reserved, created, options)); progress(options, items.length, prepared.length, item.asset); }
     abort(options.signal);
-    return { exported: items.length, files: items.map(item => item.path), items, path: destination, folders: 0, warnings: prepared.flatMap(item => item.warnings) };
+    const report = await exportReport(destination, prepared, items, created, options);
+    return { exported: items.length, files: items.map(item => item.path), items, path: destination, folders: 0, warnings: prepared.flatMap(item => item.warnings), ...report };
   } catch (error) {
     const leftovers = await rollback(created);
     if (leftovers.length) throw fail('导出未完成，部分新建路径无法清理，请检查导出位置', error);
@@ -305,7 +345,8 @@ async function exportFolder(library, folderId, destDir, options = {}) {
       for (const [child, directory] of directories) await visit(child.id, directory);
     }
     await visit(folderId, output); abort(options.signal);
-    return { exported: items.length, files: items.map(item => item.path), items, path: output, folders: selected ? folders : folders - 1, warnings: [...prepared.values()].flatMap(item => item.warnings) };
+    const report = await exportReport(output, [...prepared.values()], items, created, options);
+    return { exported: items.length, files: items.map(item => item.path), items, path: output, folders: selected ? folders : folders - 1, warnings: [...prepared.values()].flatMap(item => item.warnings), ...report };
   } catch (error) {
     const leftovers = await rollback(created);
     if (leftovers.length) throw fail('导出未完成，部分新建路径无法清理，请检查导出位置', error);
