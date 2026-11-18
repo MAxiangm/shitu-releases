@@ -17,11 +17,18 @@ const transcodeSmoke = process.env.SHITU_TRANSCODE_SMOKE === '1';
 const uiRecoverySmoke = process.env.SHITU_UI_RECOVERY_SMOKE === '1';
 const undoSmoke = process.env.SHITU_UNDO_SMOKE === '1';
 const folderPanelSmoke = process.env.SHITU_FOLDER_PANEL_SMOKE === '1';
-if ([smoke, updateSmoke, videoSmoke, modelSmoke, aeSmoke, folderSmoke, colorsSmoke, hoverVideoSmoke, assetDragSmoke, transcodeSmoke, uiRecoverySmoke, undoSmoke, folderPanelSmoke].filter(Boolean).length > 1) throw new Error('Choose one smoke test mode at a time.');
-const testing = smoke || updateSmoke || videoSmoke || modelSmoke || aeSmoke || folderSmoke || colorsSmoke || hoverVideoSmoke || assetDragSmoke || transcodeSmoke || uiRecoverySmoke || undoSmoke || folderPanelSmoke;
+const fontSmoke = process.env.SHITU_FONT_SMOKE === '1';
+if ([smoke, updateSmoke, videoSmoke, modelSmoke, aeSmoke, folderSmoke, colorsSmoke, hoverVideoSmoke, assetDragSmoke, transcodeSmoke, uiRecoverySmoke, undoSmoke, folderPanelSmoke, fontSmoke].filter(Boolean).length > 1) throw new Error('Choose one smoke test mode at a time.');
+const testing = smoke || updateSmoke || videoSmoke || modelSmoke || aeSmoke || folderSmoke || colorsSmoke || hoverVideoSmoke || assetDragSmoke || transcodeSmoke || uiRecoverySmoke || undoSmoke || folderPanelSmoke || fontSmoke;
 const base = testing
   ? path.resolve(process.env.SHITU_SMOKE_DIRECTORY)
   : path.join(root, '.recovery', 'development');
+if (fontSmoke) {
+  const relative = path.relative(path.join(root, '.recovery', 'tests'), base);
+  if (!relative || relative.startsWith('..') || path.isAbsolute(relative) || fs.lstatSync(base).isSymbolicLink()) throw new Error('Font smoke directory must stay inside .recovery/tests.');
+  const marker = JSON.parse(fs.readFileSync(path.join(base, 'font-smoke-fixture.json'), 'utf8'));
+  if (!process.env.SHITU_FONT_SMOKE_TOKEN || marker.token !== process.env.SHITU_FONT_SMOKE_TOKEN) throw new Error('Font smoke marker does not match.');
+}
 if (folderPanelSmoke) {
   const relative = path.relative(path.join(root, '.recovery', 'tests'), base);
   if (!relative || relative.startsWith('..') || path.isAbsolute(relative) || fs.lstatSync(base).isSymbolicLink()) throw new Error('Folder panel smoke directory must stay inside .recovery/tests.');
@@ -495,4 +502,5 @@ function configureUpdateSmoke() {
   setTimeout(() => fail(new Error('Update smoke test timed out')), 45000).unref();
 }
 
+if (fontSmoke) require('./font-smoke-bootstrap.cjs')({ root, base });
 require(path.join(root, 'src', 'main.cjs'));

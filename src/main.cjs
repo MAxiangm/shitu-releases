@@ -22,10 +22,11 @@ const { createTranscodeSettings, executionPlan } = require('./transcode-settings
 const { createUiRecovery } = require('./ui-recovery.cjs');
 const { createVideoPreviewRequests } = require('./video-preview-requests.cjs');
 const { createModelService } = require('./model-service.cjs');
+const { createFontService } = require('./font-service.cjs');
 const { createAEProjectCollector } = require('./ae-projects.cjs');
 const { createAEPreviewEngine } = require('./ae-preview.cjs');
 const { createAEPreviewService } = require('./ae-preview-service.cjs');
-const { VIDEO, MODEL, PROJECT, SUPPORTED } = require('./media-formats.cjs');
+const { VIDEO, MODEL, PROJECT, FONT, SUPPORTED } = require('./media-formats.cjs');
 const crypto = require('node:crypto');
 const { spawn } = require('node:child_process');
 const updateConfig = require('../update-config.json');
@@ -54,6 +55,7 @@ let transcodeSettings;
 let uiRecovery;
 let uiDiagnosticWrite = Promise.resolve();
 let modelService;
+let fontService;
 let aeProjects;
 let aePreviewService;
 const videoPreviews = new Map();
@@ -180,6 +182,7 @@ async function switchLibrary(mode) {
     videoRequests.abortAll();
     videoPreviews.clear();
     modelService?.invalidate();
+    fontService?.invalidate();
     aePreviewService?.invalidate();
     library=mode==='create'?await libraryManager.create(selected):mode==='migrate'?await libraryManager.migrate(selected):await libraryManager.open(selected);
     const snapshot=librarySnapshot();
@@ -193,6 +196,7 @@ async function switchLibrary(mode) {
 async function createThumbnail(source, destination, options) {
   if (PROJECT.has(path.extname(source).slice(1).toLowerCase())) return {};
   if (MODEL.has(path.extname(source).slice(1).toLowerCase())) return modelService.thumbnail(source, destination, options);
+  if (FONT.has(path.extname(source).slice(1).toLowerCase())) return fontService.thumbnail(source, destination, options);
   if (VIDEO.has(path.extname(source).slice(1).toLowerCase())) return videoEngine.thumbnail(source, destination, options);
   try {
     const metadata = await sharp(source, { limitInputPixels: 80_000_000 }).metadata();
@@ -219,7 +223,7 @@ function checkedHandler(channel, handler) {
   ipcMain.handle(`shitu:${channel}`, async (event, ...args) => {
     assertTrustedSender(event);
     if (installingUpdate && channel !== 'update-state') throw new Error('正在安装更新，请稍候');
-    if (channel.startsWith('update-') || ['prepare-video', 'cancel-video', 'release-video-viewer', 'prepare-model', 'prepare-project-preview', 'project-preview-state'].includes(channel)) return handler(...args);
+    if (channel.startsWith('update-') || ['prepare-video', 'cancel-video', 'release-video-viewer', 'prepare-model', 'prepare-font', 'prepare-project-preview', 'project-preview-state'].includes(channel)) return handler(...args);
     activeOperations++;
     try { return await handler(...args); }
     finally { activeOperations--; }
@@ -246,7 +250,7 @@ async function installDownloadedUpdate({ filePath }) {
       child.once('error', reject);
       child.once('spawn', () => { child.unref(); resolve(); });
     });
-    await Promise.allSettled([imagePlugins?.shutdown(), collector?.close(), videoEngine?.shutdown(), modelService?.shutdown(), aeProjects?.shutdown(), aePreviewService?.shutdown()]);
+    await Promise.allSettled([imagePlugins?.shutdown(), collector?.close(), videoEngine?.shutdown(), modelService?.shutdown(), fontService?.shutdown(), aeProjects?.shutdown(), aePreviewService?.shutdown()]);
     setTimeout(() => { mayClose = true; app.quit(); }, 150);
   } catch (error) {
     installingUpdate = false;
@@ -342,7 +346,7 @@ async function moveAssetsToFolder(ids, folderId, expectedRoot) {
 
 async function copyAssetImage(id, expectedRoot) {
   const { assets, files } = resolveAssetFiles(requireLibrary(), [id], expectedRoot);
-  if (assets[0].mediaType !== 'image') throw new Error('请选择图片复制为位图，视频、模型和工程可拖出或导出原文件');
+  if (assets[0].mediaType !== 'image') throw new Error('请选择图片复制为位图，视频、模型、字体和工程可拖出或导出原文件');
   const bitmap = nativeImage.createFromPath(files[0]);
   if (bitmap.isEmpty()) throw new Error('此图片格式暂不支持复制位图，请拖出或导出原文件');
   const png = bitmap.toPNG();
@@ -405,6 +409,7 @@ function bindHandlers() {
   checkedHandler('cancel-video', (id, expectedRoot, requestToken) => videoRequests.cancel(id, expectedRoot, requestToken));
   checkedHandler('release-video-viewer', (id, expectedRoot) => videoRequests.releaseViewer(id, expectedRoot));
   checkedHandler('prepare-model', (id, expectedRoot) => modelService.prepare(requireLibrary(), id, expectedRoot));
+  checkedHandler('prepare-font', (id, expectedRoot, faceIndex = 0) => fontService.prepare(requireLibrary(), id, expectedRoot, faceIndex));
   checkedHandler('prepare-project-preview', (id, expectedRoot, compositionId) => aePreviewService.prepare(requireLibrary(), id, { expectedRoot, compositionId }));
   checkedHandler('project-preview-state', id => aePreviewService.state(requireLibrary(), id));
   checkedHandler('update-state', () => appUpdater.state());
@@ -471,7 +476,7 @@ function bindHandlers() {
   checkedHandler('import-files', async folderId => {
     requireLibrary();
     if (historyBusy || closing) throw new Error('正在保存撤销或重做，请稍后再导入');
-    const result = await dialog.showOpenDialog(mainWindow, { title: '导入图片、视频、模型或 AE 工程', properties: ['openFile', 'multiSelections'], filters: [{ name: '支持的素材', extensions: [...SUPPORTED] }, { name: 'AE 工程', extensions: [...PROJECT] }, { name: '3D 模型', extensions: [...MODEL] }] });
+    const result = await dialog.showOpenDialog(mainWindow, { title: '导入图片、视频、模型、字体或 AE 工程', properties: ['openFile', 'multiSelections'], filters: [{ name: '支持的素材', extensions: [...SUPPORTED] }, { name: '字体', extensions: [...FONT] }, { name: 'AE 工程', extensions: [...PROJECT] }, { name: '3D 模型', extensions: [...MODEL] }] });
     return result.canceled ? { snapshot: library.snapshot(), cancelled: true } : importPaths(result.filePaths, folderId);
   });
   checkedHandler('import-folder', async folderId => {
@@ -564,7 +569,7 @@ async function createWindow() {
     }
     if (closing) return;
     closing = true;
-    Promise.resolve(videoTranscodeService?.shutdown()).then(() => transcodeSettings?.flush()).then(() => library?.flush()).then(() => Promise.allSettled([transcodeDevices?.shutdown?.(), videoTranscoder?.shutdown(), modelService?.shutdown(), aeProjects?.shutdown(), aePreviewService?.shutdown()])).then(() => { mayClose = true; mainWindow.close(); }).catch(error => {
+    Promise.resolve(videoTranscodeService?.shutdown()).then(() => transcodeSettings?.flush()).then(() => library?.flush()).then(() => Promise.allSettled([transcodeDevices?.shutdown?.(), videoTranscoder?.shutdown(), modelService?.shutdown(), fontService?.shutdown(), aeProjects?.shutdown(), aePreviewService?.shutdown()])).then(() => { mayClose = true; mainWindow.close(); }).catch(error => {
       closing = false;
       dialog.showErrorBox('保存未完成', error.message);
     });
@@ -587,6 +592,7 @@ else {
       onChanged: owner => { if (owner === library) sendActionEvent('library-changed'); }
     });
     modelService = createModelService({ BrowserWindow, cacheDir: path.join(app.getPath('userData'), 'model-previews'), getLibrary: () => library });
+    fontService = createFontService({ BrowserWindow, cacheDir: path.join(app.getPath('userData'), 'font-previews'), getLibrary: () => library });
     aeProjects = createAEProjectCollector({ cacheDir: path.join(app.getPath('userData'), 'ae-projects') });
     libraryManager=new LibraryManager({configPath:path.join(app.getPath('userData'),'library-location.json'),legacyRoot,createThumbnail,
       prepareProjectBundle:(source, options)=>{
@@ -627,6 +633,7 @@ else {
       try {
         const url = new URL(request.url);
         if (url.hostname === 'model') return modelService.response(request);
+        if (url.hostname === 'font') return fontService.response(request);
         if (url.hostname === 'project-preview') return aePreviewService.response(request);
         if (request.method !== 'GET' || url.hostname !== 'asset') return new Response(null, { status: 404 });
         const id = decodeURIComponent(url.pathname.slice(1));
@@ -639,6 +646,8 @@ else {
           return mediaResponse(preview.path, request);
         }
         if(url.searchParams.get('kind') === 'editing') {
+          const asset = library.snapshot().assets.find(item => item.id === id);
+          if (!asset || asset.mediaType !== 'image') return new Response(null, { status: 404 });
           const source = library.getAssetPath(id, 'original');
           if(!source)return new Response(null,{status:404});
           const image = await sharp(source, { limitInputPixels: 100_000_000 }).rotate().png().toBuffer();
@@ -667,6 +676,6 @@ else {
     videoRequests.abortAll();
     videoTranscodeService?.shutdown().catch(()=>{}); videoTranscoder?.shutdown().catch(()=>{});
     Promise.resolve(transcodeDevices?.shutdown?.()).catch(()=>{});
-    imagePlugins?.shutdown().catch(()=>{}); collector?.close().catch(()=>{}); videoEngine?.shutdown().catch(()=>{}); modelService?.shutdown().catch(()=>{}); aeProjects?.shutdown().catch(()=>{}); aePreviewService?.shutdown().catch(()=>{});
+    imagePlugins?.shutdown().catch(()=>{}); collector?.close().catch(()=>{}); videoEngine?.shutdown().catch(()=>{}); modelService?.shutdown().catch(()=>{}); fontService?.shutdown().catch(()=>{}); aeProjects?.shutdown().catch(()=>{}); aePreviewService?.shutdown().catch(()=>{});
   });
 }

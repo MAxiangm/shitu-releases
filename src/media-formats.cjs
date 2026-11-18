@@ -6,7 +6,8 @@ const VIDEO = new Set(['mp4', 'm4v', 'mov', 'qt', 'webm', 'ogv', 'ogg', 'mkv', '
 const MODEL_NATIVE = new Set(['blend', 'c4d', 'max']);
 const MODEL = new Set(['glb', 'gltf', 'obj', 'fbx', 'stl', 'ply', ...MODEL_NATIVE]);
 const PROJECT = new Set(['aep', 'aepx']);
-const SUPPORTED = new Set([...IMAGE, ...VIDEO, ...MODEL, ...PROJECT]);
+const FONT = new Set(['ttf', 'otf', 'woff', 'woff2', 'ttc', 'otc']);
+const SUPPORTED = new Set([...IMAGE, ...VIDEO, ...MODEL, ...PROJECT, ...FONT]);
 const MIME = {
   jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp', gif: 'image/gif',
   bmp: 'image/bmp', tif: 'image/tiff', tiff: 'image/tiff', svg: 'image/svg+xml', avif: 'image/avif',
@@ -22,6 +23,8 @@ const MIME = {
   fbx: 'application/octet-stream', stl: 'model/stl', ply: 'application/octet-stream',
   blend: 'application/octet-stream', c4d: 'application/octet-stream', max: 'application/octet-stream',
   mtl: 'text/plain', bin: 'application/octet-stream', ktx2: 'image/ktx2',
-  dds: 'image/vnd-ms.dds', tga: 'image/x-tga', aep: 'application/octet-stream', aepx: 'application/xml'
+  dds: 'image/vnd-ms.dds', tga: 'image/x-tga', aep: 'application/octet-stream', aepx: 'application/xml',
+  ttf: 'font/ttf', otf: 'font/otf', woff: 'font/woff', woff2: 'font/woff2',
+  ttc: 'font/collection', otc: 'font/collection'
 };
-module.exports = { IMAGE, VIDEO, MODEL, MODEL_NATIVE, PROJECT, SUPPORTED, MIME };
+module.exports = { IMAGE, VIDEO, MODEL, MODEL_NATIVE, PROJECT, FONT, SUPPORTED, MIME };

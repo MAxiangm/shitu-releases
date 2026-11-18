@@ -51,6 +51,7 @@ contextBridge.exposeInMainWorld('shitu', Object.freeze({
   cancelVideo: (id, expectedRoot, requestToken) => call('cancel-video', id, expectedRoot, requestToken),
   releaseVideoViewer: (id, expectedRoot) => call('release-video-viewer', id, expectedRoot),
   prepareModel: (id, expectedRoot) => call('prepare-model', id, expectedRoot),
+  prepareFont: (id, expectedRoot, faceIndex = 0) => call('prepare-font', id, expectedRoot, faceIndex),
   prepareProjectPreview: (id, expectedRoot, compositionId) => call('prepare-project-preview', id, expectedRoot, compositionId),
   projectPreviewState: id => call('project-preview-state', id),
   onProjectPreview: callback => {

@@ -1,0 +1,27 @@
+.asset-font-placeholder { background:#191919; color:#bbb; }
+.font-placeholder-glyph { font-family:Georgia,serif; font-size:70px; line-height:1.2; }
+.preview-font { position:absolute; inset:75px 76px 66px; z-index:4; display:flex; flex-direction:column; min-height:0; overflow:hidden; border:1px solid #ffffff20; border-radius:12px; background:#151515; }
+.font-preview-controls { flex:none; display:grid; grid-template-columns:minmax(0,1fr) 210px; gap:16px 24px; padding:22px 26px; border-bottom:1px solid #ffffff18; }
+.font-preview-controls label { display:flex; flex-direction:column; gap:9px; min-width:0; font-size:12px; color:#a8a8a8; }
+.font-preview-controls textarea,.font-preview-controls select { width:100%; min-width:0; padding:10px 12px; border:1px solid #ffffff25; border-radius:6px; color:#eee; background:#202020; font:inherit; outline-offset:3px; }
+.font-preview-controls textarea { resize:vertical; min-height:64px; max-height:140px; line-height:1.5; }
+.font-preview-options { display:flex; flex-direction:column; gap:14px; min-width:0; }
+.font-preview-size-heading { display:flex; align-items:center; justify-content:space-between; }
+.font-preview-controls input[type=range] { width:100%; accent-color:#ddd; }
+.font-preview-controls .text-button { align-self:flex-start; font-size:12px; }
+.font-preview-stage { overflow:auto; flex:1; min-height:0; padding:30px 34px; background:#eae8e2; color:#191919; }
+.font-preview-sample { white-space:pre-wrap; overflow-wrap:anywhere; font-synthesis:none; line-height:1.55; }
+.font-preview-status { color:#555; font-size:14px; line-height:1.8; }
+.font-preview-note { flex:none; margin:0; padding:10px 24px; color:#888; font-size:11px; border-top:1px solid #ffffff18; }
+.is-font-preview .cylinder-viewport { visibility:hidden; }
+.is-font-preview #previewDensity,.is-font-preview #previewMotion,.is-font-preview #previewZoomReset,.is-font-preview #previewBack { display:none; }
+@media (max-width:900px) {
+  .preview-font { inset:75px 52px 66px; }
+  .font-preview-controls { grid-template-columns:minmax(0,1fr) 160px; padding:16px; gap:16px; }
+  .font-preview-stage { padding:22px; }
+}
+@media (max-width:650px),(max-height:620px) {
+  .font-preview-controls { padding:12px 16px; gap:12px; }
+  .font-preview-controls textarea { min-height:48px; max-height:80px; }
+  .font-preview-note { padding:8px 16px; }
+}

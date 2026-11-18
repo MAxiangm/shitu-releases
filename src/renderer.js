@@ -37,6 +37,9 @@ let videoPreviewSession = null;
 let projectPreviewView;
 let modelViewer;
 let modelViewerModule;
+let fontPreviewSession = null;
+let fontPreviewText = null;
+let fontPreviewSize = 72;
 const videoHover = window.ShituVideoHover.create({
   prepare: (id, root, token) => api.prepareVideo(id, root, token, 'hover'),
   cancel: (id, root, token) => api.cancelVideo(id, root, token),
@@ -201,7 +204,7 @@ function date(value) {
   const d = new Date(value);
   return Number.isNaN(d.getTime()) ? '—' : d.toLocaleString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false });
 }
-function dimensions(a) { return isProject(a) ? 'AE 工程' : isModel(a) ? '3D 模型' : a.width && a.height ? `${a.width} × ${a.height}` : '尺寸未知'; }
+function dimensions(a) { return isFont(a) ? (a.font?.style || '字体') : isProject(a) ? 'AE 工程' : isModel(a) ? '3D 模型' : a.width && a.height ? `${a.width} × ${a.height}` : '尺寸未知'; }
 function videoDuration(value) {
   if (!Number.isFinite(Number(value)) || Number(value) <= 0) return '';
   const seconds = Math.round(Number(value));
@@ -403,7 +406,9 @@ function isVideo(asset) { return asset.mediaType === 'video' || videoExtensions.
 const modelExtensions = new Set(['glb', 'gltf', 'obj', 'fbx', 'stl', 'ply', 'blend', 'c4d', 'max']);
 function isModel(asset) { return asset.mediaType === 'model' || modelExtensions.has((asset.ext || '').replace(/^\./, '').toLowerCase()); }
 function isProject(asset) { return asset.mediaType === 'project' || ['aep', 'aepx'].includes((asset.ext || '').replace(/^\./, '').toLowerCase()); }
+function isFont(asset) { return asset.mediaType === 'font' || ['ttf', 'otf', 'woff', 'woff2', 'ttc', 'otc'].includes((asset.ext || '').replace(/^\./, '').toLowerCase()); }
 function mimeType(asset) {
+  if (isFont(asset)) return ({ ttf: 'font/ttf', otf: 'font/otf', woff: 'font/woff', woff2: 'font/woff2', ttc: 'font/collection', otc: 'font/collection' })[asset.ext.toLowerCase()] || 'font/ttf';
   return asset.mimeType || ({ mp4: 'video/mp4', m4v: 'video/mp4', f4v: 'video/mp4', webm: 'video/webm', mov: 'video/quicktime', qt: 'video/quicktime', dxv: 'video/quicktime', ogv: 'video/ogg', ogg: 'video/ogg', avi: 'video/x-msvideo', divx: 'video/x-msvideo', mkv: 'video/x-matroska', mpg: 'video/mpeg', mpeg: 'video/mpeg', mpe: 'video/mpeg', m1v: 'video/mpeg', m2v: 'video/mpeg', mts: 'video/mp2t', m2ts: 'video/mp2t', m2t: 'video/mp2t', ts: 'video/mp2t', vob: 'video/mpeg', wmv: 'video/x-ms-wmv', asf: 'video/x-ms-asf', flv: 'video/x-flv', mxf: 'application/mxf', '3gp': 'video/3gpp', '3g2': 'video/3gpp2', rm: 'application/vnd.rn-realmedia', rmvb: 'application/vnd.rn-realmedia-vbr', dv: 'video/dv', jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', svg: 'image/svg+xml', webp: 'image/webp', avif: 'image/avif' })[(asset.ext || '').toLowerCase()] || '—';
 }
 function selectedAssets() { return state.library.assets.filter((a) => state.selected.has(a.id)); }
@@ -757,11 +762,12 @@ function filteredAssets() {
       if (state.format === 'video') { if (!isVideo(a)) return false; }
       else if (state.format === 'model') { if (!isModel(a)) return false; }
       else if (state.format === 'project') { if (!isProject(a)) return false; }
-      else if (state.format === 'images') { if (isVideo(a) || isModel(a) || isProject(a)) return false; }
-      else if (state.format === 'jpg' ? !['jpg', 'jpeg'].includes(ext) : state.format === 'other' ? ['jpg', 'jpeg', 'png', 'webp', 'gif', 'svg'].includes(ext) || isVideo(a) || isModel(a) || isProject(a) : ext !== state.format) return false;
+      else if (state.format === 'font') { if (!isFont(a)) return false; }
+      else if (state.format === 'images') { if (isVideo(a) || isModel(a) || isProject(a) || isFont(a)) return false; }
+      else if (state.format === 'jpg' ? !['jpg', 'jpeg'].includes(ext) : state.format === 'other' ? ['jpg', 'jpeg', 'png', 'webp', 'gif', 'svg'].includes(ext) || isVideo(a) || isModel(a) || isProject(a) || isFont(a) : ext !== state.format) return false;
     }
     if (terms.length) {
-      const haystack = `${a.name} ${(a.tags || []).join(' ')} ${a.notes || ''} ${a.sourceUrl || ''} ${a.pageUrl || ''}`.toLocaleLowerCase();
+      const haystack = `${a.name} ${a.font?.family || ''} ${a.font?.fullName || ''} ${a.font?.style || ''} ${(a.tags || []).join(' ')} ${a.notes || ''} ${a.sourceUrl || ''} ${a.pageUrl || ''}`.toLocaleLowerCase();
       if (!terms.every((term) => haystack.includes(term))) return false;
     }
     return true;
@@ -1014,6 +1020,12 @@ function imageFor(asset, kind, className = '', videoThumbnail = false) {
   return img;
 }
 function mediaFor(asset, kind) {
+  if (isFont(asset)) {
+    if (asset.thumbnail) return imageFor(asset, 'thumbnail');
+    const fallback = el('div', 'asset-fallback asset-font-placeholder');
+    fallback.append(el('span', 'font-placeholder-glyph', 'Aa'), el('span', '', `${asset.ext.toUpperCase()} · 字体`));
+    return fallback;
+  }
   if (isProject(asset)) {
     if (asset.thumbnail) return imageFor(asset, 'thumbnail');
     const fallback = el('div', 'asset-fallback asset-project-placeholder');
@@ -1092,9 +1104,10 @@ function renderGallery(list) {
       thumb.title = '悬停快速预览 · 双击完整播放';
       videoHover.attach(thumb, asset, state.library.root);
     }
-    if (isVideo(asset) || isModel(asset) || isProject(asset)) {
+    if (isVideo(asset) || isModel(asset) || isProject(asset) || isFont(asset)) {
       const badge = el('span', 'asset-video-badge');
-      badge.append(icon(isProject(asset) ? 'folder' : isModel(asset) ? 'grid' : 'video'), document.createTextNode(isProject(asset) ? 'AE 工程' : isModel(asset) ? '3D 模型' : '视频'));
+      if (!isFont(asset)) badge.append(icon(isProject(asset) ? 'folder' : isModel(asset) ? 'grid' : 'video'));
+      badge.append(document.createTextNode(isFont(asset) ? '字体' : isProject(asset) ? 'AE 工程' : isModel(asset) ? '3D 模型' : '视频'));
       thumb.append(badge);
     }
     const info = el('div', 'asset-card-info');
@@ -1105,7 +1118,7 @@ function renderGallery(list) {
     if (mark) nameRow.append(mark);
     nameRow.append(name);
     const subline = el('div', 'asset-subline');
-    subline.append(el('span', '', asset.width && asset.height ? dimensions(asset) : isVideo(asset) ? '视频素材' : '尺寸未知'));
+    subline.append(el('span', '', isFont(asset) ? (asset.font?.family || '字体素材') : asset.width && asset.height ? dimensions(asset) : isVideo(asset) ? '视频素材' : '尺寸未知'));
     if (asset.rating) subline.append(el('span', 'asset-stars', '★'.repeat(asset.rating)));
     else subline.append(el('span', '', size(asset.size)));
     info.append(nameRow, subline);
@@ -1338,7 +1351,7 @@ async function openPluginCenter(pluginId, ids = [...state.selected]) {
   if (!await waitForMetadata()) return;
   if (state.previewId) closePreview();
   window.shituPlugins.open({
-    assets: state.library.assets.filter(asset => !asset.trashedAt && !isVideo(asset) && !isModel(asset) && !isProject(asset)),
+    assets: state.library.assets.filter(asset => !asset.trashedAt && !isVideo(asset) && !isModel(asset) && !isProject(asset) && !isFont(asset)),
     selectedIds: ids, libraryRoot: state.library.root, pluginId
   });
 }
@@ -1507,7 +1520,7 @@ function renderDetails() {
     preview.dataset.assetId = asset.id;
     preview.append(mediaFor(asset, 'thumb'));
     preview.addEventListener('click', () => openPreview(asset.id));
-    preview.title = isProject(asset) ? '查看已打包的 AE 工程' : isModel(asset) ? '点击旋转预览 3D 模型' : isVideo(asset) ? '点击播放视频' : '点击预览原图';
+    preview.title = isFont(asset) ? '点击预览字体与自定义文字' : isProject(asset) ? '查看已打包的 AE 工程' : isModel(asset) ? '点击旋转预览 3D 模型' : isVideo(asset) ? '点击播放视频' : '点击预览原图';
     box.append(preview);
   } else {
     const preview = el('div', 'detail-preview multi-preview');
@@ -1590,7 +1603,12 @@ function renderDetails() {
   notes.maxLength = 20000;
   notes.addEventListener('change', () => saveTextInput(notes, 'notes'));
   box.append(field('备注', notes), el('div', 'detail-save-note', '修改后自动保存到本地素材库。'), el('div', 'detail-separator'));
-  const metadata = one ? [['类型', isProject(asset) ? 'AE 工程' : isModel(asset) ? '3D 模型' : isVideo(asset) ? '视频' : '图片'], ['格式', asset.ext.toUpperCase()], ['MIME', isProject(asset) ? '工程资源包' : isModel(asset) ? '模型资源包' : mimeType(asset)], [isModel(asset) || isProject(asset) ? '包内文件' : '尺寸', isProject(asset) ? `${asset.projectBundle?.files?.length || 1} 个` : isModel(asset) ? `${asset.modelBundle?.files?.length || 1} 个` : dimensions(asset)], ['文件大小', size(asset.size)], ['导入时间', date(asset.createdAt)]] : [['已选素材', `${assets.length} 个`], ['总大小', size(assets.reduce((n, a) => n + a.size, 0))]];
+  const metadata = one ? [['类型', isFont(asset) ? '字体' : isProject(asset) ? 'AE 工程' : isModel(asset) ? '3D 模型' : isVideo(asset) ? '视频' : '图片'], ['格式', asset.ext.toUpperCase()], ['MIME', isProject(asset) ? '工程资源包' : isModel(asset) ? '模型资源包' : mimeType(asset)], [isFont(asset) ? '字形样式' : isModel(asset) || isProject(asset) ? '包内文件' : '尺寸', isProject(asset) ? `${asset.projectBundle?.files?.length || 1} 个` : isModel(asset) ? `${asset.modelBundle?.files?.length || 1} 个` : dimensions(asset)], ['文件大小', size(asset.size)], ['导入时间', date(asset.createdAt)]] : [['已选素材', `${assets.length} 个`], ['总大小', size(assets.reduce((n, a) => n + a.size, 0))]];
+  if (one && isFont(asset)) {
+    if (asset.font?.family) metadata.push(['字体家族', asset.font.family]);
+    if (asset.font?.fullName) metadata.push(['字体名称', asset.font.fullName]);
+    if (asset.font?.faceCount > 1) metadata.push(['合集字体', `${asset.font.faceCount} 款`]);
+  }
   if (one && isProject(asset)) {
     if (asset.projectPreview?.composition) metadata.push(['封面合成', asset.projectPreview.composition.name], ['合成尺寸', `${asset.projectPreview.width} × ${asset.projectPreview.height}`]);
     if (asset.projectBundle?.compositions?.length) metadata.push(['合成数量', `${asset.projectBundle.compositions.length} 个`]);
@@ -1900,6 +1918,7 @@ const cylinderPreview = new window.ShituCylinderPreview({
   viewport: $('previewCylinder'), ring: $('previewCylinderRing'), parking: $('previewMediaParking'),
   media: [$('previewImage'), $('previewVideo'), $('previewFallback')],
   createThumbnail: asset => {
+    if (isFont(asset)) return asset.thumbnail ? imageFor(asset, 'thumbnail', 'cylinder-thumb') : el('div', 'cylinder-video-placeholder font-placeholder-glyph', 'Aa');
     if (isProject(asset)) return asset.thumbnail ? imageFor(asset, 'thumbnail', 'cylinder-thumb') : el('div', 'cylinder-video-placeholder project-ae-glyph', 'Ae');
     if (isModel(asset)) return asset.thumbnail ? imageFor(asset, 'thumbnail', 'cylinder-thumb') : el('div', 'cylinder-video-placeholder', `3D 模型 · ${asset.ext.toUpperCase()}`);
     if (isVideo(asset)) return asset.thumbnail ? imageFor(asset, 'thumbnail', 'cylinder-thumb', true) : el('div', 'cylinder-video-placeholder', `视频 · ${(asset.ext || '').toUpperCase()}`);
@@ -1916,6 +1935,12 @@ const cylinderPreview = new window.ShituCylinderPreview({
     $('previewHelp').textContent = single ? '滚轮缩放 · 中键拖动 · ← → 切图 · Esc 返回阵列' : '双击单图查看 · 滚轮转动 · Ctrl＋滚轮调整行数';
     if (isModel(state.library.assets.find(asset => asset.id === state.previewId) || {})) $('previewHelp').textContent = '左键旋转 · 滚轮缩放 · 右键平移 · ← → 切换模型';
     if (isProject(state.library.assets.find(asset => asset.id === state.previewId) || {})) $('previewHelp').textContent = '工程与素材已打包 · 导出后保留完整文件夹';
+    if (isFont(state.library.assets.find(asset => asset.id === state.previewId) || {})) {
+      $('preview').setAttribute('aria-label', '字体预览');
+      $('previewPrev').setAttribute('aria-label', '上一份素材');
+      $('previewNext').setAttribute('aria-label', '下一份素材');
+      $('previewHelp').textContent = '输入文字试排 · 调整字号 · ← → 切换素材';
+    }
   },
 });
 function displayProjectPreview(asset) {
@@ -2129,6 +2154,68 @@ async function startQuickVideoPreview(asset) {
     }
   }
 }
+function fontSessionCurrent(session) {
+  return session === fontPreviewSession && session.serial === videoPreviewSerial && state.previewId === session.asset.id && state.library.root === session.root;
+}
+function renderFontSample() {
+  if (!fontPreviewSession) return;
+  $('fontPreviewSample').textContent = $('fontPreviewText').value;
+  $('fontPreviewSample').style.fontSize = `${fontPreviewSize}px`;
+  $('fontPreviewSizeValue').textContent = `${fontPreviewSize} px`;
+}
+async function loadFontPreviewFace(faceIndex = 0) {
+  const session = fontPreviewSession;
+  if (!session) return;
+  const request = ++session.request;
+  $('fontPreviewStatus').textContent = '正在载入字体…';
+  $('fontPreviewStatus').classList.remove('hidden');
+  $('fontPreviewSample').classList.add('hidden');
+  delete $('previewFont').dataset.ready;
+  let loadedFace, timer;
+  const current = () => fontSessionCurrent(session) && request === session.request;
+  try {
+    const prepared = await api.prepareFont(session.asset.id, session.root, faceIndex);
+    if (!current()) return;
+    const source = new URL(prepared.url);
+    if (source.protocol !== 'shitu:' || source.hostname !== 'font' || source.username || source.password || source.port) throw new Error('字体预览地址无效');
+    const family = `shitu-preview-${session.serial}-${request}`;
+    loadedFace = new FontFace(family, `url(${JSON.stringify(source.href)})`);
+    await Promise.race([loadedFace.load(), new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('字体加载超时，请重试')), 15000); })]);
+    if (!current()) return;
+    if (session.face) document.fonts.delete(session.face);
+    document.fonts.add(loadedFace); session.face = loadedFace;
+    session.prepared = prepared;
+    $('fontPreviewSample').style.fontFamily = `"${family}", sans-serif`;
+    const faces = prepared.faces || [];
+    $('fontPreviewFace').replaceChildren(...faces.map((face, index) => {
+      const option = el('option', '', `${face.family || prepared.family || '字体'} · ${face.style || face.fullName || `样式 ${index + 1}`}`);
+      option.value = String(face.index ?? index); return option;
+    }));
+    $('fontPreviewFace').value = String(prepared.faceIndex ?? faceIndex);
+    $('fontPreviewFace').disabled = faces.length < 2;
+    $('fontPreviewFaceField').classList.toggle('hidden', faces.length < 2);
+    $('fontPreviewText').value = fontPreviewText === null ? (prepared.sampleText || 'Aa Bb Cc\n0123456789') : fontPreviewText;
+    $('fontPreviewSize').value = String(fontPreviewSize);
+    renderFontSample();
+    $('fontPreviewStatus').classList.add('hidden');
+    $('fontPreviewSample').classList.remove('hidden');
+    $('previewFont').dataset.ready = 'true';
+    $('previewFont').dataset.faceIndex = String(prepared.faceIndex ?? faceIndex);
+    $('previewMeta').textContent = [session.asset.ext.toUpperCase(), prepared.fullName || prepared.family, prepared.style, faces.length > 1 ? `${faces.length} 款字体` : '', size(session.asset.size)].filter(Boolean).join('  ·  ');
+  } catch (error) {
+    if (!current()) return;
+    $('fontPreviewStatus').textContent = `暂时无法预览：${transcodeMessage(error)}。原字体文件已保留，可导出或用系统应用打开。`;
+    $('fontPreviewStatus').classList.remove('hidden');
+  } finally { clearTimeout(timer); }
+}
+function displayFontPreview(asset) {
+  fontPreviewSession = { asset, root: state.library.root, serial: videoPreviewSerial, request: 0, face: null, prepared: null };
+  $('preview').classList.add('is-font-preview');
+  $('previewFont').classList.remove('hidden');
+  $('fontPreviewFaceField').classList.add('hidden');
+  $('previewHelp').textContent = '输入文字试排 · 调整字号 · ← → 切换素材';
+  void loadFontPreviewFace();
+}
 function displayPreviewAsset(asset, index, total) {
   resetPreviewMedia();
   state.previewId = asset.id;
@@ -2137,7 +2224,9 @@ function displayPreviewAsset(asset, index, total) {
   $('previewMeta').textContent = `${asset.ext.toUpperCase()}  ·  ${dimensions(asset)}  ·  ${size(asset.size)}`;
   $('previewIndex').textContent = `${index + 1} / ${total}`;
   $('previewFallback').classList.add('hidden');
-  if (isProject(asset)) {
+  if (isFont(asset)) {
+    displayFontPreview(asset);
+  } else if (isProject(asset)) {
     $('preview').classList.add('is-project-preview');
     displayProjectPreview(asset);
     $('previewHelp').textContent = '合成静态预览 · ← → 切换素材 · 导出保留工程与素材文件夹';
@@ -2190,6 +2279,14 @@ function openPreview(id) {
   $('previewClose').focus();
 }
 function resetPreviewMedia() {
+  if (fontPreviewSession?.face) document.fonts.delete(fontPreviewSession.face);
+  fontPreviewSession = null;
+  $('previewFont').classList.add('hidden');
+  delete $('previewFont').dataset.ready;
+  delete $('previewFont').dataset.faceIndex;
+  $('fontPreviewSample').style.removeProperty('font-family');
+  $('fontPreviewSample').textContent = '';
+  $('preview').classList.remove('is-font-preview');
   const session = videoPreviewSession;
   if (session) {
     session.controller.abort(); session.cover?.remove();
@@ -2521,11 +2618,19 @@ $('previewBack').addEventListener('click', () => cylinderPreview.exitSingle());
 $('previewPrev').addEventListener('click', () => movePreview(-1));
 $('previewNext').addEventListener('click', () => movePreview(1));
 $('previewOpen').addEventListener('click', () => run(() => api.openAsset(state.previewId)));
+$('fontPreviewText').addEventListener('input', () => { fontPreviewText = $('fontPreviewText').value.slice(0, 2000); renderFontSample(); });
+$('fontPreviewSize').addEventListener('input', () => { fontPreviewSize = Math.max(16, Math.min(160, Number($('fontPreviewSize').value) || 72)); renderFontSample(); });
+$('fontPreviewFace').addEventListener('change', () => { void loadFontPreviewFace(Number($('fontPreviewFace').value)); });
+$('fontPreviewReset').addEventListener('click', () => {
+  fontPreviewText = null;
+  $('fontPreviewText').value = fontPreviewSession?.prepared?.sampleText || 'Aa Bb Cc\n0123456789';
+  renderFontSample();
+});
 $('preview').addEventListener('contextmenu', event => {
   if (!state.previewId) return;
   const target = event.target instanceof Element ? event.target : event.target.parentElement;
   const card = target?.closest('.cylinder-card[data-asset-id]');
-  const focusedImage = target?.closest('#previewFocusContent,#previewImage,#previewVideo,#previewFallback,#previewProject');
+  const focusedImage = target?.closest('#previewFocusContent,#previewImage,#previewVideo,#previewFallback,#previewProject,#fontPreviewSample');
   if (card || focusedImage) assetContextMenuEvent(event, card?.dataset.assetId || state.previewId);
 }, true);
 $('detailsContent').addEventListener('contextmenu', event => {
@@ -2535,7 +2640,7 @@ $('detailsContent').addEventListener('contextmenu', event => {
 }, true);
 $('previewImage').addEventListener('error', () => {
   const asset = state.library.assets.find((item) => item.id === state.previewId);
-  if (asset && !isVideo(asset) && !isModel(asset) && !isProject(asset)) {
+  if (asset && !isVideo(asset) && !isModel(asset) && !isProject(asset) && !isFont(asset)) {
     $('previewImage').classList.add('hidden');
     $('previewFallback').textContent = '此图片格式无法在窗口中预览，可使用右上角按钮在系统应用中打开。';
     $('previewFallback').classList.remove('hidden');
@@ -2552,7 +2657,7 @@ $('previewVideo').addEventListener('error', () => {
 });
 $('previewImage').addEventListener('load', () => {
   const asset = state.library.assets.find((item) => item.id === state.previewId);
-  if (asset && !isVideo(asset) && !isModel(asset) && !isProject(asset)) { $('previewImage').classList.remove('hidden'); $('previewFallback').classList.add('hidden'); }
+  if (asset && !isVideo(asset) && !isModel(asset) && !isProject(asset) && !isFont(asset)) { $('previewImage').classList.remove('hidden'); $('previewFallback').classList.add('hidden'); }
 });
 $('previewVideo').addEventListener('loadeddata', () => {
   const asset = state.library.assets.find((item) => item.id === state.previewId);
@@ -2622,14 +2727,16 @@ document.addEventListener('keydown', (e) => {
     return;
   }
   if (state.previewId) {
-    if (e.key === 'Escape') { e.preventDefault(); if (cylinderPreview.singleMode && !$('preview').classList.contains('is-model-preview') && !$('preview').classList.contains('is-project-preview')) cylinderPreview.exitSingle(); else closePreview(); return; }
+    if (editing && e.key !== 'Escape') return;
+    if ([' ', 'Enter'].includes(e.key) && document.activeElement?.closest('button')) return;
+    if (e.key === 'Escape') { e.preventDefault(); if (cylinderPreview.singleMode && !$('preview').classList.contains('is-model-preview') && !$('preview').classList.contains('is-project-preview') && !$('preview').classList.contains('is-font-preview')) cylinderPreview.exitSingle(); else closePreview(); return; }
     if (e.key === ' ') {
       e.preventDefault();
       const asset = state.library.assets.find((item) => item.id === state.previewId);
       if (asset && isVideo(asset) && !$('previewVideo').classList.contains('hidden')) {
         if ($('previewVideo').paused) $('previewVideo').play().catch(messageError);
         else $('previewVideo').pause();
-      } else if (!asset || (!isModel(asset) && !isProject(asset))) closePreview();
+      } else if (!asset || (!isModel(asset) && !isProject(asset) && !isFont(asset))) closePreview();
     }
     if (e.key === 'ArrowLeft') { e.preventDefault(); movePreview(-1); }
     if (e.key === 'ArrowRight') { e.preventDefault(); movePreview(1); }

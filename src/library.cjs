@@ -3,13 +3,13 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { createReadStream } = require('node:fs');
 
-const { VIDEO, MODEL, MODEL_NATIVE, PROJECT, SUPPORTED } = require('./media-formats.cjs');
+const { VIDEO, MODEL, MODEL_NATIVE, PROJECT, FONT, SUPPORTED } = require('./media-formats.cjs');
 const { collectModelBundle, copyModelBundle, validateModelBundle, isSafeBundlePath } = require('./model-bundle.cjs');
 const { validateProjectBundle, copyProjectBundle } = require('./project-bundle.cjs');
 const FolderTree = require('./folder-tree.js');
 const ColorLabels = require('./color-labels.js');
 const { MetadataHistory, sameField } = require('./metadata-history.cjs');
-const mediaType = ext => PROJECT.has(ext) ? 'project' : MODEL.has(ext) ? 'model' : VIDEO.has(ext) ? 'video' : 'image';
+const mediaType = ext => PROJECT.has(ext) ? 'project' : MODEL.has(ext) ? 'model' : VIDEO.has(ext) ? 'video' : FONT.has(ext) ? 'font' : 'image';
 const bundleRelative = (id, ext) => `originals/${id}.${PROJECT.has(ext) ? 'project' : 'model'}`;
 const isBundle = ext => MODEL.has(ext) || PROJECT.has(ext);
 const assetBundle = asset => PROJECT.has(asset.ext) ? asset.projectBundle : asset.modelBundle;
@@ -58,6 +58,27 @@ const VIDEO_PREVIEW_METADATA = Object.freeze({
   colorSpace: value => typeof value === 'string' && /^[a-zA-Z0-9_.-]{0,80}$/.test(value),
   rotation: value => Number.isFinite(value) && value >= -360 && value <= 360
 });
+const FONT_METADATA = Object.freeze({
+  family: value => typeof value === 'string' && value.trim().length > 0 && value.length <= 256 && !/[\x00-\x1f\x7f]/.test(value),
+  style: value => typeof value === 'string' && value.trim().length > 0 && value.length <= 256 && !/[\x00-\x1f\x7f]/.test(value),
+  fullName: value => typeof value === 'string' && value.trim().length > 0 && value.length <= 256 && !/[\x00-\x1f\x7f]/.test(value),
+  postscriptName: value => typeof value === 'string' && value.trim().length > 0 && value.length <= 256 && !/[\x00-\x1f\x7f]/.test(value),
+  faceCount: value => Number.isInteger(value) && value >= 1 && value <= 128
+});
+function fontMetadata(value, strict = false) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    if (strict) throw new Error('字体信息无效');
+    return undefined;
+  }
+  const result = {};
+  if (strict && Object.keys(value).some(key => !Object.hasOwn(FONT_METADATA, key))) throw new Error('字体信息包含无效属性');
+  for (const [key, valid] of Object.entries(FONT_METADATA)) {
+    if (!Object.hasOwn(value, key)) continue;
+    if (valid(value[key])) result[key] = value[key];
+    else if (strict) throw new Error('字体信息无效');
+  }
+  return Object.keys(result).length ? result : undefined;
+}
 function mediaMetadata(value = {}, video = false) {
   const result = {};
   for (const key of ['width', 'height', 'duration']) {
@@ -218,6 +239,10 @@ class Library {
       } else if (asset.filename !== `originals/${asset.id}.${asset.ext}` || 'modelBundle' in asset || 'projectBundle' in asset) throw new Error('素材路径无效');
       if (asset.thumbnail !== null && asset.thumbnail !== `thumbnails/${asset.id}.jpg`) throw new Error('缩略图路径无效');
       if ('mediaType' in asset && asset.mediaType !== mediaType(asset.ext)) throw new Error('素材媒体类型无效');
+      if ('font' in asset) {
+        if (!FONT.has(asset.ext)) throw new Error('字体信息素材类型无效');
+        fontMetadata(asset.font, true);
+      }
       if ('duration' in asset && (!Number.isFinite(asset.duration) || asset.duration < 0)) throw new Error('视频时长无效');
       if ('projectPreview' in asset) {
         if (!PROJECT.has(asset.ext)) throw new Error('AE 预览素材类型无效');
@@ -479,14 +504,19 @@ class Library {
                 if (this.createThumbnail) {
                   thumbnailPath = path.join(this.root, 'thumbnails', `${id}.jpg`);
                   try {
-                    dimensions = await this.createThumbnail(copied, thumbnailPath) || {};
+                    dimensions = await this.createThumbnail(copied, thumbnailPath,
+                      FONT.has(ext) ? { originalName: path.basename(absolute, path.extname(absolute)) } : undefined) || {};
                     await fs.access(thumbnailPath);
                     thumbnail = `thumbnails/${id}.jpg`;
-                  } catch { await fs.rm(thumbnailPath, { force: true }).catch(() => {}); thumbnailPath = null; }
+                  } catch (error) {
+                    await fs.rm(thumbnailPath, { force: true }).catch(() => {}); thumbnailPath = null;
+                    if (FONT.has(ext)) report.warnings.push({ path: absolute, message: `字体已收录，暂时无法生成预览：${String(error?.message || '字体无法解码').slice(0, 600)}` });
+                  }
                 }
                 const timestamp = now();
                 const copyInfo = await fs.stat(copied);
-                draft.assets.push({ id, name: path.basename(absolute, path.extname(absolute)), ext, mediaType: VIDEO.has(ext) ? 'video' : 'image', size: copyInfo.size, width: Number(dimensions.width) || 0, height: Number(dimensions.height) || 0, ...mediaMetadata(dimensions, VIDEO.has(ext)), hash: copyHash, createdAt: timestamp, updatedAt: timestamp, tags: [], folderId, rating: 0, notes: '', trashedAt: null, filename, thumbnail, ...sourceMetadata });
+                const font = FONT.has(ext) ? fontMetadata(dimensions.font) : undefined;
+                draft.assets.push({ id, name: path.basename(absolute, path.extname(absolute)), ext, mediaType: mediaType(ext), size: copyInfo.size, width: Number(dimensions.width) || 0, height: Number(dimensions.height) || 0, ...mediaMetadata(dimensions, VIDEO.has(ext)), ...(font ? { font } : {}), hash: copyHash, createdAt: timestamp, updatedAt: timestamp, tags: [], folderId, rating: 0, notes: '', trashedAt: null, filename, thumbnail, ...sourceMetadata });
                 hashes.add(copyHash);
                 created.push({ path: copied });
                 if (thumbnail) created.push({ path: thumbnailPath });
@@ -972,4 +1002,4 @@ class Library {
   }
 }
 
-module.exports = { Library, SUPPORTED, VIDEO, MODEL, PROJECT };
+module.exports = { Library, SUPPORTED, VIDEO, MODEL, PROJECT, FONT };
