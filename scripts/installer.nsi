@@ -92,17 +92,19 @@ Section "Install"
     RMDir "$SMPROGRAMS\拾图"
   ${EndIf}
   CreateDirectory "$SMPROGRAMS\${PRODUCT_NAME}"
-  CreateShortcut "$SMPROGRAMS\${PRODUCT_NAME}\${PRODUCT_NAME}.lnk" "$INSTDIR\${PRODUCT_EXE}"
-  CreateShortcut "$SMPROGRAMS\${PRODUCT_NAME}\卸载${PRODUCT_NAME}.lnk" "$INSTDIR\卸载${PRODUCT_NAME}.exe"
-  CreateShortcut "$DESKTOP\${PRODUCT_NAME}.lnk" "$INSTDIR\${PRODUCT_EXE}"
+  ; A dedicated icon path avoids reusing a cached icon from an older EXE.
+  CreateShortcut "$SMPROGRAMS\${PRODUCT_NAME}\${PRODUCT_NAME}.lnk" "$INSTDIR\${PRODUCT_EXE}" "" "$INSTDIR\resources\app\assets\icon.ico" 0
+  CreateShortcut "$SMPROGRAMS\${PRODUCT_NAME}\卸载${PRODUCT_NAME}.lnk" "$INSTDIR\卸载${PRODUCT_NAME}.exe" "" "$INSTDIR\resources\app\assets\icon.ico" 0
+  CreateShortcut "$DESKTOP\${PRODUCT_NAME}.lnk" "$INSTDIR\${PRODUCT_EXE}" "" "$INSTDIR\resources\app\assets\icon.ico" 0
   WriteRegStr HKCU "Software\local.shitu.desktop" "InstallDir" "$INSTDIR"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\local.shitu.desktop" "DisplayName" "${PRODUCT_NAME}"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\local.shitu.desktop" "DisplayVersion" "${PRODUCT_VERSION}"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\local.shitu.desktop" "InstallLocation" "$INSTDIR"
-  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\local.shitu.desktop" "DisplayIcon" "$INSTDIR\${PRODUCT_EXE}"
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\local.shitu.desktop" "DisplayIcon" "$INSTDIR\resources\app\assets\icon.ico,0"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\local.shitu.desktop" "UninstallString" '"$INSTDIR\卸载${PRODUCT_NAME}.exe"'
   WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\local.shitu.desktop" "NoModify" 1
   WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\local.shitu.desktop" "NoRepair" 1
+  System::Call 'shell32::SHChangeNotify(i 0x08000000, i 0, p 0, p 0)'
 SectionEnd
 
 Section "Uninstall"

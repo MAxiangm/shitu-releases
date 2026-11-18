@@ -1,3 +1,8 @@
+## Mosaic 0.29.13
+
+- 修复桌面与开始菜单快捷方式可能沿用旧 Electron 图标的问题，安装与升级后明确使用 Mosaic 图标并通知 Windows 刷新。
+- 修复“已安装的应用”中可能显示旧图标的问题。
+
 ## Mosaic 0.29.12
 
 - 在 Pinterest、Instagram、X 和 Vimeo 的视频画面上按 **Alt＋右键**，可将支持的视频保存到素材库。
