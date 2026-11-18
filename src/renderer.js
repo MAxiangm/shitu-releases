@@ -7,7 +7,7 @@ const folderTree = window.ShituFolders;
 const folderNavigation = window.ShituFolderNavigation.create({ limit: 80 });
 const colorLabels = window.ShituColorLabels;
 const historyControls = window.ShituHistoryUi;
-const state = { library: { assets: [], folders: [], tags: [], stats: {}, root: null, needsLibrary: true }, view: 'all', folder: null, tag: null, selected: new Set(), selectionMode: false, anchor: null, search: '', format: 'all', sort: 'newest', limit: 240, previewId: null, details: false, busy: false, libraryChanging: false };
+const state = { library: { assets: [], folders: [], smartFolders: [], tags: [], stats: {}, root: null, needsLibrary: true }, view: 'all', folder: null, smartFolder: null, tag: null, selected: new Set(), selectionMode: false, anchor: null, search: '', format: 'all', sort: 'newest', limit: 240, previewId: null, details: false, busy: false, libraryChanging: false };
 let modalResolve = null;
 let modalHasParent = false;
 let modalHasColor = false;
@@ -44,7 +44,7 @@ const videoHover = window.ShituVideoHover.create({
   prepare: (id, root, token) => api.prepareVideo(id, root, token, 'hover'),
   cancel: (id, root, token) => api.cancelVideo(id, root, token),
   allowed: () => !state.selectionMode && !state.previewId && !state.busy && !state.libraryChanging &&
-    !draggingAssets && !deletingAssets && !closing && !document.hidden &&
+    !draggingAssets && !deletingAssets && !closing && !document.hidden && !featureDialogOpen() &&
     !document.querySelector('.modal-overlay:not(.hidden),.preview:not(.hidden),.sp-overlay:not([hidden])') &&
     $('folderContextMenu').classList.contains('hidden'),
   current: (asset, root) => state.library.root === root && state.library.assets.some(item => item.id === asset.id && item.hash === asset.hash)
@@ -69,6 +69,43 @@ const updateUi = {
 const transcodeUi = { snapshot: null, ids: [], root: null, pending: false, error: '', previousFocus: null, notified: new Set() };
 const transcodeSettingsUi = { settings: { mode: 'auto', cpuThreads: 1, gpuId: 'auto' }, draft: null, devices: null, loading: false, saving: false, error: '', previousFocus: null, returnToTranscode: false, revision: 0 };
 const historyUi = { snapshot: null, pending: false, revision: 0, seen: new Set(), warning: '' };
+const skinPickerUi = window.ShituSkinPicker.create({ skins: window.ShituSkins });
+const smartFolders = window.ShituSmartFolders;
+const batchRenameUi = window.ShituBatchRename.create({
+  apply: (changes, root) => api.batchRenameAssets(changes, root),
+  onApplied: (snapshot, detail) => { if (snapshot.root === state.library.root) { applyLibrary(snapshot); toast(`已重命名 ${detail.changedCount} 个素材，可撤销`); } },
+  onError: messageError
+});
+const fontCompareUi = window.ShituFontCompare.create({ prepare: (id, root, face) => api.prepareFont(id, root, face), onError: messageError });
+const smartFoldersUi = window.ShituSmartFoldersUi.create({
+  save: (value, root) => api.saveSmartFolder(value, root),
+  remove: (id, root) => api.deleteSmartFolder(id, root),
+  onApplied: snapshot => { if (snapshot.root === state.library.root) applyLibrary(snapshot); }, onError: messageError,
+  getContext: () => ({ root: state.library.root })
+});
+function featureDialogOpen() { return skinPickerUi.isOpen() || batchRenameUi.isOpen() || fontCompareUi.isOpen() || smartFoldersUi.isOpen(); }
+function activeSmartFolder() { return (state.library.smartFolders || []).find(folder => folder.id === state.smartFolder) || null; }
+async function openBatchRename(ids = [...state.selected]) {
+  const root = state.library.root;
+  if (!await waitForMetadata() || root !== state.library.root) return;
+  const wanted = new Set(ids), assets = filteredAssets().filter(asset => wanted.has(asset.id) && !asset.trashedAt);
+  if (!assets.length) return;
+  closePreview(); videoHover.stop(); batchRenameUi.open(assets, root);
+}
+async function openFontCompare(ids = [...state.selected]) {
+  const root = state.library.root;
+  if (!await waitForMetadata() || root !== state.library.root) return;
+  const wanted = new Set(ids), assets = filteredAssets().filter(asset => wanted.has(asset.id) && !asset.trashedAt && isFont(asset));
+  if (assets.length < 2) { toast('请选择至少两份字体进行对比'); return; }
+  closePreview(); videoHover.stop(); fontCompareUi.open(assets, root);
+}
+async function openSmartFolderEditor(item = null) {
+  const root = state.library.root;
+  if (!await waitForMetadata() || root !== state.library.root) return;
+  closePreview(); videoHover.stop();
+  const mediaType = state.format === 'images' ? 'image' : ['video', 'font', 'model', 'project'].includes(state.format) ? state.format : 'all';
+  smartFoldersUi.open(item, root, { mediaType, colorLabel: null, recentDays: state.view === 'recent' ? 7 : 0, search: state.search, favorite: state.view === 'favorites' });
+}
 
 function el(tag, className, text) {
   const node = document.createElement(tag);
@@ -415,6 +452,7 @@ function selectedAssets() { return state.library.assets.filter((a) => state.sele
 function currentFolder() { return state.folder || null; }
 function hasLibrary() { return Boolean(state.library.root) && !state.library.needsLibrary; }
 function viewName() {
+  if (activeSmartFolder()) return activeSmartFolder().name;
   if (state.folder) return state.library.folders.find((f) => f.id === state.folder)?.name || '文件夹';
   return { all: '全部素材', recent: '最近导入', favorites: '收藏', unfiled: '未分类', trash: '回收站' }[state.view] || '全部素材';
 }
@@ -507,7 +545,7 @@ async function waitForMetadata() {
 }
 function historyBlocked() {
   return !hasLibrary() || state.libraryChanging || state.busy || draggingAssets || nativeAssetDrag || assetFolderDrag.pending || deletingAssets || closing ||
-    Boolean(state.previewId || modalResolve || window.shituPlugins?.isOpen() || document.querySelector('.modal-overlay:not(.hidden),.preview:not(.hidden),.sp-overlay:not([hidden]),#dropOverlay:not(.hidden)'));
+    Boolean(state.previewId || modalResolve || featureDialogOpen() || window.shituPlugins?.isOpen() || document.querySelector('.modal-overlay:not(.hidden),.preview:not(.hidden),.sp-overlay:not([hidden]),#dropOverlay:not(.hidden)'));
 }
 function hasHistoryDrafts() {
   return pendingSaves.size > 0 || [...$('detailsContent').querySelectorAll('input[data-saved-value],textarea[data-saved-value]')].some(input => !input.disabled && input.value !== input.dataset.savedValue);
@@ -716,12 +754,14 @@ function applyLibrary(library, preserveSelection = true) {
   libraryRefreshSerial += 1;
   const rootChanged = (state.library.root || '').toLowerCase() !== (library.root || '').toLowerCase();
   if (rootChanged) {
+    batchRenameUi.close(true); fontCompareUi.close(); smartFoldersUi.close(); skinPickerUi.close();
     closeFolderMenu();
     collapsedFolders.clear();
     closePreview();
     state.selectionMode = false;
     state.view = 'all';
     state.folder = null;
+    state.smartFolder = null;
     state.tag = null;
     state.search = '';
     state.format = 'all';
@@ -736,6 +776,7 @@ function applyLibrary(library, preserveSelection = true) {
     $('detailsContent').dataset.selectionKey = '';
   }
   state.library = library;
+  if (state.smartFolder && !activeSmartFolder()) state.smartFolder = null;
   if (library.history) receiveHistory({ ...library.history, root: library.root });
   else if (rootChanged) { historyUi.snapshot = null; historyUi.seen.clear(); historyUi.warning = ''; historyUi.revision++; }
   if (state.folder && !library.folders.some((f) => f.id === state.folder)) state.folder = null;
@@ -750,7 +791,10 @@ function applyLibrary(library, preserveSelection = true) {
 function filteredAssets() {
   const terms = state.search.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
   const weekAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
+  const smart = activeSmartFolder();
+  const matchSmart = smart ? smartFolders.compile(smart.rule, Date.now()) : null;
   const list = state.library.assets.filter((a) => {
+    if (matchSmart && !matchSmart(a)) return false;
     if (state.view === 'trash' ? !a.trashedAt : Boolean(a.trashedAt)) return false;
     if (state.folder && a.folderId !== state.folder) return false;
     if (!state.folder && state.view === 'recent' && new Date(a.createdAt).getTime() < weekAgo) return false;
@@ -781,13 +825,14 @@ function filteredAssets() {
   };
   return list.sort(comparators[state.sort]);
 }
-function changeView(view, folder = null, tag = null) {
+function changeView(view, folder = null, tag = null, smartFolder = null) {
   assetFolderDrag.cancel();
   flushDetailDrafts();
   videoHover.stop();
   closeFolderMenu();
   state.view = view;
   state.folder = folder;
+  state.smartFolder = smartFolder;
   if (folder) {
     const folders = new Map(state.library.folders.map(item => [item.id, item]));
     for (let current = folders.get(folder), visited = new Set(); current && !visited.has(current.id); current = folders.get(folderTree.parentId(current))) {
@@ -801,7 +846,7 @@ function changeView(view, folder = null, tag = null) {
   $('galleryScroller').scrollTop = 0;
   render();
 }
-function folderLocation() { return { view: state.view, folder: state.folder, tag: state.tag }; }
+function folderLocation() { return { view: state.view, folder: state.folder, tag: state.tag, ...(state.smartFolder ? { smartFolder: state.smartFolder } : {}) }; }
 function setFolderPanelMode(mode, { persist = true, open = false, focus = false } = {}) {
   if (!['dropdown', 'sidebar'].includes(mode) || draggingAssets || assetFolderDrag.active) return false;
   const panel = $('folderPanel'), browser = $('folderBrowser'), sidebar = $('folderSidebar');
@@ -831,14 +876,14 @@ function setFolderPanelMode(mode, { persist = true, open = false, focus = false 
   return true;
 }
 function directChildFolders() {
-  if (!hasLibrary() || state.view !== 'all' || state.tag) return [];
+  if (!hasLibrary() || state.view !== 'all' || state.tag || state.smartFolder) return [];
   return state.library.folders.filter(folder => folderTree.parentId(folder) === currentFolder());
 }
-function canNavigateFolders() { return hasLibrary() && !state.libraryChanging && !state.busy && !draggingAssets && !deletingAssets && !closing; }
+function canNavigateFolders() { return hasLibrary() && !state.libraryChanging && !state.busy && !draggingAssets && !deletingAssets && !closing && !featureDialogOpen(); }
 function navigateFolderHistory(direction) {
   if (!canNavigateFolders()) return;
-  const destination = folderNavigation.travel(direction, state.library.root, state.library.folders);
-  if (destination) changeView(destination.view, destination.folder, destination.tag);
+  const destination = folderNavigation.travel(direction, state.library.root, state.library.folders, state.library.smartFolders || []);
+  if (destination) changeView(destination.view, destination.folder, destination.tag, destination.smartFolder || null);
 }
 function navigateFolderUp() {
   if (!canNavigateFolders()) return;
@@ -847,13 +892,13 @@ function navigateFolderUp() {
 }
 function renderFolderNavigation() {
   const ready = hasLibrary(), enabled = canNavigateFolders();
-  folderNavigation.record(ready ? state.library.root : null, folderLocation(), state.library.folders);
-  const history = folderNavigation.state(ready ? state.library.root : null, state.library.folders);
+  folderNavigation.record(ready ? state.library.root : null, folderLocation(), state.library.folders, state.library.smartFolders || []);
+  const history = folderNavigation.state(ready ? state.library.root : null, state.library.folders, state.library.smartFolders || []);
   const parent = window.ShituFolderNavigation.parent(folderLocation(), state.library.folders);
   $('folderBack').disabled = !enabled || !history.canBack;
   $('folderForward').disabled = !enabled || !history.canForward;
   $('folderUp').disabled = !enabled || !parent;
-  $('createFolderHere').disabled = !enabled;
+  $('createFolderHere').disabled = !enabled || Boolean(state.smartFolder);
   $('createFolderHere').title = state.folder ? `在「${viewName()}」中新建子文件夹` : '在素材库中新建文件夹';
   const breadcrumbs = $('folderBreadcrumbs');
   breadcrumbs.replaceChildren();
@@ -868,7 +913,7 @@ function renderFolderNavigation() {
     if (current) button.setAttribute('aria-current', 'page');
     breadcrumbs.append(button);
   };
-  const currentIsRoot = !state.folder && state.view === 'all';
+  const currentIsRoot = !state.folder && state.view === 'all' && !state.smartFolder;
   addCrumb('全部素材', null, currentIsRoot, 'folder');
   if (state.folder) {
     const folders = new Map(state.library.folders.map(folder => [folder.id, folder]));
@@ -894,10 +939,10 @@ function renderNavigation() {
     ['trash', 'trash', '回收站', state.library.assets.length - active.length],
   ];
   $('mainNav').replaceChildren(...rows.map(([key, glyph, label, count]) => {
-    const item = action('', `nav-item${!state.folder && state.view === key ? ' active' : ''}`, () => changeView(key), glyph);
+    const item = action('', `nav-item${!state.folder && !state.smartFolder && state.view === key ? ' active' : ''}`, () => changeView(key), glyph);
     item.dataset.view = key;
     item.append(el('span', 'nav-name', label), el('span', 'nav-count', count.toLocaleString()));
-    if (!state.folder && state.view === key) item.setAttribute('aria-current', 'page');
+    if (!state.folder && !state.smartFolder && state.view === key) item.setAttribute('aria-current', 'page');
     return item;
   }));
   const counts = new Map();
@@ -964,7 +1009,23 @@ function renderNavigation() {
     if (children && !expanded) collapsedDepth = folder.depth;
   }
   $('folderNav').replaceChildren(...folderRows);
-  $('folderBrowserLabel').textContent = state.folder ? viewName() : '文件夹';
+  $('smartFolderNav').replaceChildren(...(state.library.smartFolders || []).map(folder => {
+    const row = el('div', 'smart-folder-row');
+    const item = action('', `nav-item${state.smartFolder === folder.id ? ' active' : ''}`, () => {
+      state.search = ''; state.format = 'all'; $('searchInput').value = ''; $('formatFilter').value = 'all';
+      changeView('all', null, null, folder.id);
+      if (folderPanelMode === 'dropdown') $('folderBrowser').open = false;
+    }, 'search');
+    item.dataset.smartFolderId = folder.id; item.title = smartFolders.describe(folder.rule);
+    if (state.smartFolder === folder.id) item.setAttribute('aria-current', 'page');
+    const matches = smartFolders.compile(folder.rule, Date.now());
+    item.append(el('span', 'nav-name', folder.name), el('span', 'nav-count', state.library.assets.filter(matches).length.toLocaleString()));
+    const edit = action('···', 'smart-folder-edit', () => run(() => openSmartFolderEditor(folder)));
+    edit.title = `编辑智能文件夹：${folder.name}`; edit.setAttribute('aria-label', edit.title);
+    row.append(item, edit); return row;
+  }));
+  $('smartFolderHint').classList.toggle('hidden', Boolean(state.library.smartFolders?.length));
+  $('folderBrowserLabel').textContent = state.folder || state.smartFolder ? viewName() : '文件夹';
   $('folderBrowserLabel').title = state.folder ? folderTree.path(state.library.folders, state.folder) : '文件夹';
   $('folderHint').classList.toggle('hidden', state.library.folders.length > 0);
   const tags = state.library.tags.map((tag) => typeof tag === 'string' ? { name: tag } : tag);
@@ -990,7 +1051,7 @@ function renderHeader(list) {
   $('breadcrumbCurrent').textContent = folderPath;
   $('breadcrumbCurrent').title = folderPath;
   $('pageTitle').replaceChildren(document.createTextNode(name), el('span', 'title-dot', '.'));
-  $('pageSubtitle').textContent = state.folder ? '把相关的灵感放在一起。' : { all: '收集值得留下的灵感。', recent: '过去 7 天，为灵感留个位置。', favorites: '四星及以上的素材，值得再次回看。', unfiled: '为散落的灵感，找到一个位置。', trash: '暂时放下的素材，随时可以恢复。' }[state.view];
+  $('pageSubtitle').textContent = activeSmartFolder() ? smartFolders.describe(activeSmartFolder().rule) : state.folder ? '把相关的灵感放在一起。' : { all: '收集值得留下的灵感。', recent: '过去 7 天，为灵感留个位置。', favorites: '四星及以上的素材，值得再次回看。', unfiled: '为散落的灵感，找到一个位置。', trash: '暂时放下的素材，随时可以恢复。' }[state.view];
   const childCount = directChildFolders().length;
   $('resultCount').textContent = `${childCount ? `${childCount} 个文件夹 · ` : ''}${list.length.toLocaleString()} 个素材${state.search || state.format !== 'all' || state.tag ? ' · 素材筛选结果' : ''}`;
   $('importFiles').disabled = state.busy || state.libraryChanging || !hasLibrary();
@@ -1082,7 +1143,7 @@ function renderGallery(list) {
   stopMarquee();
   const childFolders = renderFolderChildren();
   $('assetSectionTitle').classList.toggle('hidden', !childFolders.length || !list.length);
-  $('assetSectionTitle').textContent = state.folder ? '当前文件夹素材' : '全部素材';
+  $('assetSectionTitle').textContent = state.smartFolder ? '匹配素材' : state.folder ? '当前文件夹素材' : '全部素材';
   const frag = document.createDocumentFragment();
   list.slice(0, state.limit).forEach((asset) => {
     const card = el('article', `asset-card${state.selected.has(asset.id) ? ' selected' : ''}`);
@@ -1180,7 +1241,7 @@ function beginAssetDrag(event, asset) {
   event.stopPropagation();
 }
 function canStartAssetFolderDrag() {
-  return hasLibrary() && !state.busy && !state.libraryChanging && !state.previewId && !draggingAssets && !closing && !deletingAssets &&
+  return hasLibrary() && !state.busy && !state.libraryChanging && !state.previewId && !draggingAssets && !closing && !deletingAssets && !featureDialogOpen() &&
     !document.querySelector('.modal-overlay:not(.hidden),.preview:not(.hidden),.sp-overlay:not([hidden])');
 }
 function prepareAssetFolderDrag(id) {
@@ -1298,8 +1359,10 @@ async function showAssetContextMenu(id) {
   const checkRoot = () => { if (state.library.root !== root) throw new Error('素材库已切换，请重新选择素材'); };
   // Metadata and filtering actions must remain visible and must not leave a
   // stale preview pointing at an item that moved out of the current view.
-  if (state.previewId && ['rename', 'tags', 'folder', 'favorite', 'unfavorite', 'trash', 'restore'].includes(result.action)) closePreview();
+  if (state.previewId && ['rename', 'batch-rename', 'font-compare', 'tags', 'folder', 'favorite', 'unfavorite', 'trash', 'restore'].includes(result.action)) closePreview();
   switch (result.action) {
+    case 'batch-rename': await openBatchRename(ids); break;
+    case 'font-compare': await openFontCompare(ids); break;
     case 'video-transcode': openVideoTranscode(ids); break;
     case 'plugin': await openPluginCenter(result.pluginId, ids); break;
     case 'preview': openPreview(first.id); break;
@@ -1359,6 +1422,12 @@ function renderEmpty() {
   const box = $('emptyState');
   const isNew = state.library.assets.length === 0;
   box.replaceChildren();
+  if (activeSmartFolder()) {
+    const glyph = el('div', 'empty-small-icon'); glyph.append(icon('search'));
+    box.append(glyph, el('h2', '', '暂时没有符合条件的素材'), el('p', '', '导入新素材或修改素材信息后，这里会自动更新。'),
+      action('编辑筛选条件', 'secondary-button', () => run(() => openSmartFolderEditor(activeSmartFolder()))));
+    return;
+  }
   if (isNew) {
     const art = el('div', 'empty-art');
     const back = el('div', 'empty-card back'); back.append(icon('image'));
@@ -1484,6 +1553,17 @@ function renderSelection() {
   $('trashSelection').classList.toggle('hidden', state.view === 'trash');
   $('restoreSelection').classList.toggle('hidden', state.view !== 'trash');
   $('deleteSelection').classList.toggle('hidden', state.view !== 'trash');
+  $('batchRenameSelection').classList.toggle('hidden', count < 2 || state.view === 'trash');
+  const fonts = selectedAssets().filter(asset => isFont(asset) && !asset.trashedAt);
+  $('compareFontsSelection').classList.toggle('hidden', fonts.length < 2);
+  $('compareFontsSelection').textContent = `字体对比 (${fonts.length})`;
+  requestAnimationFrame(positionSelectionNotices);
+}
+function positionSelectionNotices() {
+  const bar = $('selectionBar'), stack = $('toastStack');
+  if (!bar.classList.contains('hidden') && !state.previewId && !featureDialogOpen()) {
+    stack.style.bottom = `${Math.max(25, innerHeight - bar.getBoundingClientRect().top + 12)}px`;
+  } else stack.style.removeProperty('bottom');
 }
 function field(label, control, help) {
   const container = el('div', 'detail-field');
@@ -1663,6 +1743,7 @@ function renderLibraryState() {
   $('setupAppUpdate').classList.toggle('hidden', ready);
   document.querySelector('.app-shell').inert = !ready || state.libraryChanging;
   $('newFolder').disabled = !ready || state.libraryChanging;
+  $('newSmartFolder').disabled = !ready || state.libraryChanging;
   $('backupButton').disabled = !ready || state.libraryChanging;
   $('collectorButton').disabled = !ready || state.libraryChanging;
   $('pluginCenterButton').disabled = !ready || state.libraryChanging;
@@ -2335,7 +2416,7 @@ async function showCapturedAssets(result) {
   const asset = snapshot.assets.find(item => ids.includes(item.id));
   closePreview();
   state.view = asset?.trashedAt ? 'trash' : 'all';
-  state.folder = null; state.tag = null; state.search = ''; state.format = 'all'; state.sort = 'newest';
+  state.folder = null; state.smartFolder = null; state.tag = null; state.search = ''; state.format = 'all'; state.sort = 'newest';
   $('searchInput').value = ''; $('formatFilter').value = 'all'; $('sortSelect').value = 'newest';
   applyLibrary(snapshot, false);
   if (asset) {
@@ -2541,6 +2622,7 @@ $('appUpdateClose').addEventListener('click', closeAppUpdate);
 $('appUpdateOverlay').addEventListener('click', event => { if (event.target === $('appUpdateOverlay')) closeAppUpdate(); });
 $('videoTranscodeButton').addEventListener('click', () => openVideoTranscode());
 $('settingsButton').addEventListener('click', openTranscodeSettings);
+$('skinButton').addEventListener('click', () => { videoHover.stop(); skinPickerUi.open(); });
 $('videoTranscodeSettings').addEventListener('click', openTranscodeSettings);
 $('transcodeSettingsClose').addEventListener('click', closeTranscodeSettings);
 $('transcodeSettingsCancel').addEventListener('click', closeTranscodeSettings);
@@ -2665,6 +2747,10 @@ $('previewVideo').addEventListener('loadeddata', () => {
 });
 $('previewVideoRetry').addEventListener('click', () => { if (videoPreviewSession) void requestCompleteVideo(videoPreviewSession); });
 window.addEventListener('pagehide', resetPreviewMedia);
+window.addEventListener('pagehide', () => { batchRenameUi.close(true); fontCompareUi.close(); smartFoldersUi.close(); skinPickerUi.close(); });
+$('batchRenameSelection').addEventListener('click', () => run(() => openBatchRename()));
+$('compareFontsSelection').addEventListener('click', () => run(() => openFontCompare()));
+$('newSmartFolder').addEventListener('click', () => run(() => openSmartFolderEditor()));
 $('galleryScroller').addEventListener('click', (e) => { if (performance.now() >= suppressAssetClickUntil && (e.target === $('galleryScroller') || e.target === $('gallery'))) { flushDetailDrafts(); state.selected.clear(); updateSelectionClasses(); renderSelection(); renderDetails(); } });
 
 document.addEventListener('keydown', (e) => {
@@ -2701,7 +2787,7 @@ document.addEventListener('keydown', (e) => {
     }
     return;
   }
-  if (window.shituPlugins?.isOpen()) return;
+  if (window.shituPlugins?.isOpen() || featureDialogOpen()) return;
   const editing = ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName) || document.activeElement?.isContentEditable;
   if (!$('libraryManagerOverlay').classList.contains('hidden')) { if (e.key === 'Escape') { e.preventDefault(); closeLibraryManager(); } return; }
   if (!$('collectorOverlay').classList.contains('hidden')) { if (e.key === 'Escape') { e.preventDefault(); closeCollector(); } return; }
@@ -2865,3 +2951,15 @@ if (api.onVideoPreview) api.onVideoPreview(event => {
   if (Number.isFinite(event.progress)) session.progress = Math.max(0, Math.min(100, event.progress));
   renderVideoPreviewStatus(session);
 });
+function refreshSmartFolderTime() {
+  if (!activeSmartFolder()?.rule.recentDays || document.hidden || state.busy || state.libraryChanging || state.previewId ||
+      featureDialogOpen() || pendingSaves.size || hasHistoryDrafts() || draggingAssets || ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName)) return;
+  const visible = new Set(filteredAssets().map(asset => asset.id));
+  state.selected = new Set([...state.selected].filter(id => visible.has(id)));
+  render();
+}
+const smartFolderRefresh = setInterval(refreshSmartFolderTime, 60000);
+new ResizeObserver(positionSelectionNotices).observe($('selectionBar'));
+window.addEventListener('resize', positionSelectionNotices);
+window.addEventListener('focus', refreshSmartFolderTime);
+window.addEventListener('pagehide', () => clearInterval(smartFolderRefresh), { once: true });

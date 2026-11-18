@@ -1,0 +1,11 @@
+.smart-folder-heading { margin-top:20px; padding-top:16px; border-top:1px solid #ffffff15; }
+#smartFolderNav { max-height:30vh; overflow:auto; flex:none; }
+.smart-folder-row { display:flex; align-items:center; min-width:0; gap:3px; }
+.smart-folder-row .nav-item { flex:1; min-width:0; }
+.smart-folder-edit { padding:5px 6px; color:#888; background:none; border:0; cursor:pointer; flex:none; font-size:17px; }
+.smart-folder-edit:hover { color:#eee; }
+.selection-bar { flex-wrap:wrap; border-radius:14px; }
+.selection-bar .selection-action { white-space:nowrap; }
+.sf-overlay { z-index:1100; }
+.toast { pointer-events:none; }
+.toast button,.toast a { pointer-events:auto; }

@@ -1,0 +1,47 @@
+.skin-picker-overlay { position:fixed; inset:0; z-index:1300; display:grid; place-items:center; padding:24px; background:#0009; backdrop-filter:blur(9px); }
+.skin-picker-overlay[hidden] { display:none; }
+.skin-picker-dialog { display:flex; flex-direction:column; width:min(940px,100%); max-height:calc(100vh - 48px); border:1px solid var(--skin-border-strong,#444); border-radius:var(--skin-radius,16px); overflow:hidden; background:var(--skin-surface,#151515); color:var(--skin-text,#eee); box-shadow:var(--skin-panel-shadow,0 24px 90px #0009); }
+.skin-picker-heading { display:flex; align-items:flex-start; justify-content:space-between; gap:24px; padding:24px 28px 19px; border-bottom:1px solid var(--skin-border,#333); flex:none; }
+.skin-picker-eyebrow { color:var(--skin-muted,#999); font-size:10px; letter-spacing:.18em; }
+.skin-picker-heading h2 { font-size:25px; font-weight:500; margin:6px 0 8px; }
+.skin-picker-heading p { color:var(--skin-muted,#999); font-size:12px; line-height:1.7; margin:0; }
+.skin-picker-close { color:inherit; background:none; width:32px; height:32px; font-size:26px; flex:none; border-radius:var(--skin-control-radius,50%); }
+.skin-picker-close:hover { background:var(--skin-hover,#ffffff12); }
+.skin-picker-grid { overflow:auto; min-height:0; display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:16px; padding:22px 28px; }
+.skin-choice { position:relative; text-align:left; min-width:0; padding:10px; border:2px solid var(--skin-border,#333); border-radius:var(--skin-control-radius,10px); background:var(--skin-surface-2,#202020); color:inherit; cursor:pointer; }
+.skin-choice:hover { border-color:var(--skin-muted,#999); }
+.skin-choice.is-selected { border-color:var(--skin-accent,#eee); box-shadow:0 0 0 1px var(--skin-accent,#eee); }
+.skin-choice-name { display:block; margin:10px 4px 3px; font-size:14px; font-weight:600; }
+.skin-choice-description { display:block; margin:0 4px 3px; font-size:10px; color:var(--skin-muted,#999); }
+.skin-choice-check { position:absolute; right:15px; bottom:25px; width:18px; height:18px; display:none; align-items:center; justify-content:center; border-radius:50%; font-size:11px; color:var(--skin-accent-ink,#111); background:var(--skin-accent,#eee); }
+.skin-choice.is-selected .skin-choice-check { display:flex; }
+.skin-miniature { height:82px; border-radius:5px; background:var(--mini-base); color:var(--mini-ink); padding:6px; overflow:hidden; border:1px solid #0003; }
+.skin-mini-head { height:12px; display:flex; align-items:center; gap:3px; padding:0 4px; background:var(--mini-surface); border-bottom:2px solid var(--mini-accent); }
+.skin-mini-head i { width:3px; height:3px; background:var(--mini-accent); border-radius:50%; }
+.skin-mini-body { display:flex; gap:6px; margin-top:5px; height:49px; }
+.skin-mini-side { width:22%; padding:4px; background:var(--mini-surface); }
+.skin-mini-side b { height:3px; display:block; margin:3px 0 6px; background:var(--mini-accent); opacity:.7; }
+.skin-mini-cards { flex:1; display:grid; gap:5px; grid-template-columns:1fr 1fr; }
+.skin-mini-cards i { display:block; background:var(--mini-surface); border:1px solid #0002; }
+.skin-miniature-famicom { border:3px solid #981f36; }
+.skin-miniature-famicom .skin-mini-head { background:#981f36; }
+.skin-miniature-famicom .skin-mini-head i { background:#eed59c; }
+.skin-miniature-psp { border-radius:15px; border:3px solid #090c13; box-shadow:inset 0 2px 2px #ffffff6b; }
+.skin-miniature-gameboy { border:7px solid #949784; border-bottom-width:10px; border-radius:6px 6px 18px 6px; }
+.skin-miniature-gameboy .skin-mini-head { background:#9eae69; }
+.skin-miniature-switch { border-left:9px solid #00c3e3; border-right:9px solid #ff4554; border-radius:12px; }
+.skin-miniature-win97,.skin-miniature-win98 { border-radius:0; box-shadow:inset 2px 2px #fff,inset -2px -2px #333; }
+.skin-miniature-win97 .skin-mini-head { background:linear-gradient(90deg,#173c68,#96bbcf); }
+.skin-miniature-win98 .skin-mini-head { background:#000080; }
+.skin-miniature-winxp .skin-mini-head { background:linear-gradient(#5c9bff,#1355d7); border-radius:5px 5px 0 0; }
+.skin-miniature-winxp .skin-mini-head i { background:#f4f6ff; }
+.skin-miniature-mac { background:linear-gradient(140deg,#c4d4eb,#f0e6ee); border-radius:9px; }
+.skin-miniature-mac .skin-mini-head { border:0; border-radius:4px; }
+.skin-miniature-mac .skin-mini-head i:nth-child(1) { background:#ff5f56; }
+.skin-miniature-mac .skin-mini-head i:nth-child(2) { background:#ffbd2e; }
+.skin-miniature-mac .skin-mini-head i:nth-child(3) { background:#27c93f; }
+.skin-picker-footer { flex:none; display:flex; justify-content:space-between; flex-wrap:wrap; gap:10px; padding:16px 28px; border-top:1px solid var(--skin-border,#333); color:var(--skin-muted,#999); font-size:11px; }
+.skin-picker-status { color:var(--skin-text,#ddd); }
+@media(max-width:700px) { .skin-picker-grid { grid-template-columns:repeat(2,minmax(0,1fr)); padding:16px; gap:12px; } .skin-picker-heading { padding:20px; } .skin-picker-footer { padding:14px 20px; } }
+@media(max-height:760px) { .skin-picker-overlay { padding:14px; } .skin-picker-dialog { max-height:calc(100vh - 28px); } .skin-picker-heading { padding:17px 24px 13px; } .skin-picker-heading h2 { font-size:22px; } .skin-picker-grid { padding:16px 24px; gap:12px; } .skin-miniature { height:70px; } .skin-mini-body { height:40px; } .skin-picker-footer { padding:13px 24px; } }
+@media(max-width:1200px) { #skinButton>span { display:none; } }

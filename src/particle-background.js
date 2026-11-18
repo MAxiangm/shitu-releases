@@ -7,6 +7,7 @@
   if (!ctx) return;
   const motionButton = document.getElementById('backgroundMotionButton');
   let motionEnabled = localStorage.getItem('shitu-background-motion') !== 'off';
+  const skinAllowsMotion = () => !document.documentElement?.dataset?.skin || document.documentElement.dataset.skin === 'default';
   const ribbons = [
     { x: .08, phase: .7, width: .16 },
     { x: .38, phase: 3.4, width: .20 },
@@ -37,6 +38,7 @@
     };
   }
   function resize(force = false) {
+    if (!skinAllowsMotion()) return;
     width = Math.max(1, innerWidth); height = Math.max(1, innerHeight);
     // The backdrop is decorative. Bound its GPU backing store on 4K/HiDPI
     // screens rather than keeping a full-resolution surface alive all day.
@@ -62,7 +64,7 @@
     resizeFrame = requestAnimationFrame(() => { resizeFrame = 0; resize(); });
   }
   function draw() {
-    if (contextLost || !ctx || ctx.isContextLost?.()) return;
+    if (!skinAllowsMotion() || contextLost || !ctx || ctx.isContextLost?.()) return;
     const started = performance.now();
     const sample = { strands: [], particles: [] };
     ctx.clearRect(0, 0, width, height);
@@ -111,7 +113,7 @@
   }
   function tick(now) {
     frame = 0;
-    if (document.hidden || !appVisible || !pageActive || !motionEnabled || contextLost) return;
+    if (document.hidden || !appVisible || !pageActive || !motionEnabled || contextLost || !skinAllowsMotion()) return;
     if (!lastDraw || now - lastDraw >= 1000 / 24) {
       elapsed += lastDraw ? Math.min(.1, (now - lastDraw) / 1000) : 0;
       lastDraw = now;
@@ -121,14 +123,15 @@
   }
   function sync() {
     cancelAnimationFrame(frame); frame = 0; lastDraw = 0;
-    canvas.dataset.status = contextLost ? 'context-lost' : document.hidden || !appVisible || !pageActive || !motionEnabled ? 'paused' : 'running';
-    if (!document.hidden && appVisible && pageActive && motionEnabled && !contextLost) frame = requestAnimationFrame(tick);
+    canvas.dataset.status = contextLost ? 'context-lost' : !skinAllowsMotion() ? 'skin-paused' : document.hidden || !appVisible || !pageActive || !motionEnabled ? 'paused' : 'running';
+    if (!document.hidden && appVisible && pageActive && motionEnabled && !contextLost && skinAllowsMotion()) frame = requestAnimationFrame(tick);
     else if (!document.hidden && appVisible && pageActive && !contextLost) draw();
   }
   function updateButton() {
     motionButton?.setAttribute('aria-pressed', String(motionEnabled));
+    if (motionButton) motionButton.disabled = !skinAllowsMotion();
     const label = document.getElementById('backgroundMotionLabel');
-    if (label) label.textContent = motionEnabled ? '动效：开' : '动效：关';
+    if (label) label.textContent = !skinAllowsMotion() ? '静态皮肤' : motionEnabled ? '动效：开' : '动效：关';
   }
   motionButton?.addEventListener('click', () => {
     motionEnabled = !motionEnabled;
@@ -136,6 +139,11 @@
     updateButton(); sync();
   });
   addEventListener('resize', scheduleResize);
+  addEventListener('shitu-skin-change', () => {
+    if (!skinAllowsMotion()) { cancelAnimationFrame(resizeFrame); resizeFrame = 0; canvas.width = canvas.height = 1; particles = []; }
+    else resize(true);
+    updateButton(); sync();
+  });
   document.addEventListener('visibilitychange', sync);
   window.shitu?.onWindowVisibility?.(visible => { appVisible = visible; sync(); });
   canvas.addEventListener('contextlost', () => {

@@ -5,8 +5,17 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' shitu: data: blob:; media-src 'self' shitu:; font-src 'self' shitu:; style-src 'self'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self' shitu: data: blob:; worker-src 'self' blob:; object-src 'none'; base-uri 'none'">
   <title></title>
+  <script src="./skins.js"></script>
   <link rel="stylesheet" href="./styles.css">
   <link rel="stylesheet" href="./font-preview.css">
+  <link rel="stylesheet" href="./batch-rename.css">
+  <link rel="stylesheet" href="./font-compare.css">
+  <link rel="stylesheet" href="./smart-folders.css">
+  <link rel="stylesheet" href="./organize-tools.css">
+  <link rel="stylesheet" href="./skins-base.css">
+  <link rel="stylesheet" href="./skins-desktop.css">
+  <link rel="stylesheet" href="./skins-consoles.css">
+  <link rel="stylesheet" href="./skin-picker.css">
 </head>
 <body>
   <canvas id="ambientParticles" aria-hidden="true"></canvas>
@@ -37,6 +46,7 @@
     <symbol id="i-folder-plus" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v10H3Z"/><path d="M12 10v6m-3-3h6"/></symbol>
     <symbol id="i-external" viewBox="0 0 24 24"><path d="M14 3h7v7m0-7L10 14M10 4H4v16h16v-6"/></symbol>
     <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m9 5 7 7-7 7"/></symbol>
+    <symbol id="i-palette" viewBox="0 0 24 24"><path d="M12 3a9 9 0 1 0 0 18h1a2 2 0 0 0 1-3.7 1.5 1.5 0 0 1 1-2.8h2a4 4 0 0 0 4-4c0-4.2-4.5-7.5-9-7.5Z"/><circle cx="7" cy="10" r="1"/><circle cx="10" cy="7" r="1"/><circle cx="15" cy="7" r="1"/></symbol>
     <symbol id="i-settings" viewBox="0 0 24 24"><path d="M4 7h16M4 17h16M8 4v6m8 4v6"/></symbol>
     <symbol id="i-pin" viewBox="0 0 24 24"><path d="M9 3h6l-1 6 4 4H6l4-4-1-6ZM12 13v8"/></symbol>
     <symbol id="i-undo" viewBox="0 0 24 24"><path d="M9 5 4 10l5 5M4 10h10a6 6 0 0 1 0 12"/></symbol>
@@ -47,7 +57,7 @@
     <header class="app-header">
       <button class="library-switch" id="libraryInfo" aria-label="管理素材库" title="管理素材库位置"><span class="library-icon"><svg class="icon"><use href="#i-folder"/></svg></span><span><strong id="libraryDisplayName">我的素材库</strong><small id="libraryDisplayStatus">本地存储 · 随时灵感</small></span><svg class="icon"><use href="#i-chevron"/></svg></button>
       <div class="brand"><div class="brand-mark"><span></span><span></span><span></span><span></span></div><div><strong>拾图</strong><span>SHITU LIBRARY</span></div></div>
-      <div class="header-actions"><button id="videoTranscodeButton" class="header-button hidden" type="button" aria-haspopup="dialog" title="查看视频转码任务"><svg class="icon"><use href="#i-video"/></svg><span id="videoTranscodeLabel">视频转码</span></button><button id="settingsButton" class="header-button" type="button" aria-haspopup="dialog" title="设置转码设备"><svg class="icon"><use href="#i-settings"/></svg><span>设置</span></button><button id="appUpdateButton" class="header-button update-button" type="button" title="检查拾图更新" aria-haspopup="dialog"><svg class="icon"><use href="#i-download"/></svg><span id="appUpdateLabel">更新</span></button><button id="pluginCenterButton" class="header-button" title="插件中心"><svg class="icon"><use href="#i-image"/></svg><span>插件</span></button><button id="backupButton" class="header-button" title="备份素材库"><svg class="icon"><use href="#i-shield"/></svg><span>备份</span></button><button id="backgroundMotionButton" class="header-button" type="button" aria-pressed="true" title="开启或暂停背景粒子与线条动画"><svg class="icon"><use href="#i-motion"/></svg><span id="backgroundMotionLabel">动效：开</span></button><button id="collectorButton" class="header-button collector-button" title="浏览器采集"><span>浏览器采集</span><svg class="icon"><use href="#i-arrow"/></svg></button><button class="icon-button" id="toggleDetails" aria-label="显示或隐藏详情面板" title="显示 / 隐藏详情" aria-pressed="false"><svg class="icon"><use href="#i-info"/></svg></button></div>
+      <div class="header-actions"><button id="videoTranscodeButton" class="header-button hidden" type="button" aria-haspopup="dialog" title="查看视频转码任务"><svg class="icon"><use href="#i-video"/></svg><span id="videoTranscodeLabel">视频转码</span></button><button id="skinButton" class="header-button" type="button" aria-haspopup="dialog" title="更换界面皮肤" aria-label="更换界面皮肤"><svg class="icon"><use href="#i-palette"/></svg><span>皮肤</span></button><button id="settingsButton" class="header-button" type="button" aria-haspopup="dialog" title="设置转码设备"><svg class="icon"><use href="#i-settings"/></svg><span>设置</span></button><button id="appUpdateButton" class="header-button update-button" type="button" title="检查拾图更新" aria-haspopup="dialog"><svg class="icon"><use href="#i-download"/></svg><span id="appUpdateLabel">更新</span></button><button id="pluginCenterButton" class="header-button" title="插件中心"><svg class="icon"><use href="#i-image"/></svg><span>插件</span></button><button id="backupButton" class="header-button" title="备份素材库"><svg class="icon"><use href="#i-shield"/></svg><span>备份</span></button><button id="backgroundMotionButton" class="header-button" type="button" aria-pressed="true" title="开启或暂停背景粒子与线条动画"><svg class="icon"><use href="#i-motion"/></svg><span id="backgroundMotionLabel">动效：开</span></button><button id="collectorButton" class="header-button collector-button" title="浏览器采集"><span>浏览器采集</span><svg class="icon"><use href="#i-arrow"/></svg></button><button class="icon-button" id="toggleDetails" aria-label="显示或隐藏详情面板" title="显示 / 隐藏详情" aria-pressed="false"><svg class="icon"><use href="#i-info"/></svg></button></div>
     </header>
     <aside id="folderSidebar" class="folder-sidebar hidden" aria-label="文件夹侧栏"></aside>
     <main class="workspace">
@@ -55,7 +65,7 @@
       <div class="collection-navigation" aria-label="素材导航">
         <nav id="mainNav" aria-label="资料库"></nav>
         <div class="collection-menus">
-          <details id="folderBrowser" class="collection-menu folder-browser"><summary id="folderBrowserToggle" aria-controls="folderNav" aria-expanded="false" title="展开文件夹列表"><svg class="icon"><use href="#i-folder"/></svg><span id="folderBrowserLabel">文件夹</span><svg class="icon tiny"><use href="#i-chevron"/></svg></summary><div id="folderPanel" class="browser-popover"><div class="section-label section-heading"><span>文件夹</span><div class="folder-panel-heading-actions"><button id="newFolder" class="icon-button" aria-label="新建文件夹" title="新建文件夹"><svg class="icon"><use href="#i-plus"/></svg></button><button id="folderPanelPin" class="folder-panel-pin" type="button" aria-label="固定到左侧" aria-pressed="false" title="固定到左侧"><svg class="icon" aria-hidden="true"><use href="#i-pin"/></svg><span id="folderPanelPinLabel">固定</span></button></div></div><nav id="folderNav" aria-label="文件夹层级"></nav><p class="sidebar-hint" id="folderHint">还没有文件夹，点击右上角 ＋ 新建</p></div></details>
+          <details id="folderBrowser" class="collection-menu folder-browser"><summary id="folderBrowserToggle" aria-controls="folderNav" aria-expanded="false" title="展开文件夹列表"><svg class="icon"><use href="#i-folder"/></svg><span id="folderBrowserLabel">文件夹</span><svg class="icon tiny"><use href="#i-chevron"/></svg></summary><div id="folderPanel" class="browser-popover"><div class="section-label section-heading"><span>文件夹</span><div class="folder-panel-heading-actions"><button id="newFolder" class="icon-button" aria-label="新建文件夹" title="新建文件夹"><svg class="icon"><use href="#i-plus"/></svg></button><button id="folderPanelPin" class="folder-panel-pin" type="button" aria-label="固定到左侧" aria-pressed="false" title="固定到左侧"><svg class="icon" aria-hidden="true"><use href="#i-pin"/></svg><span id="folderPanelPinLabel">固定</span></button></div></div><nav id="folderNav" aria-label="文件夹层级"></nav><p class="sidebar-hint" id="folderHint">还没有文件夹，点击右上角 ＋ 新建</p><div class="section-label section-heading smart-folder-heading"><span>智能文件夹</span><button id="newSmartFolder" class="icon-button" type="button" aria-label="新建智能文件夹" title="按筛选条件创建智能文件夹"><svg class="icon"><use href="#i-plus"/></svg></button></div><nav id="smartFolderNav" aria-label="智能文件夹"></nav><p class="sidebar-hint" id="smartFolderHint">保存条件，自动汇总匹配的素材</p></div></details>
           <details class="collection-menu tag-browser"><summary><svg class="icon"><use href="#i-tag"/></svg>标签<span id="tagCount" class="small-count">0</span><svg class="icon tiny"><use href="#i-chevron"/></svg></summary><div class="browser-popover"><div class="section-label">标签</div><div id="tagNav" class="tag-nav"></div><p class="sidebar-hint" id="tagHint">选择图片，为它添加第一个标签</p></div></details>
         </div>
       </div>
@@ -73,7 +83,7 @@
       <div id="activeFilter" class="active-filter hidden"></div>
       <div class="content-meta"><span id="resultCount">0 个素材</span><span id="selectionHint">Ctrl＋滚轮缩放 · 空格预览 · Ctrl 多选</span></div>
       <section id="galleryScroller" class="gallery-scroller" aria-label="文件夹与素材"><section id="folderChildren" class="folder-children hidden" aria-labelledby="folderChildrenTitle"><h2 id="folderChildrenTitle" class="gallery-section-title">文件夹</h2><div id="folderGallery" class="folder-gallery" role="list"></div></section><h2 id="assetSectionTitle" class="gallery-section-title hidden">素材</h2><div id="gallery" class="gallery" role="list"></div><div id="emptyState" class="empty-state hidden"></div><button id="loadMore" class="secondary-button load-more hidden">加载更多素材</button><div id="selectionMarquee" class="selection-marquee hidden" aria-hidden="true"></div></section>
-      <div id="selectionBar" class="selection-bar hidden"><span class="selection-badge" id="selectedCount">0</span><strong>个素材已选择</strong><button id="clearSelection" class="text-button">取消选择</button><span class="selection-spacer"></span><button id="exportSelection" class="selection-action"><svg class="icon"><use href="#i-download"/></svg>导出</button><button id="restoreSelection" class="selection-action hidden"><svg class="icon"><use href="#i-restore"/></svg>恢复</button><button id="deleteSelection" class="selection-action hidden"><svg class="icon"><use href="#i-trash"/></svg>永久删除</button><button id="trashSelection" class="selection-action"><svg class="icon"><use href="#i-trash"/></svg>移入回收站</button></div>
+      <div id="selectionBar" class="selection-bar hidden"><span class="selection-badge" id="selectedCount">0</span><strong>个素材已选择</strong><button id="clearSelection" class="text-button">取消选择</button><span class="selection-spacer"></span><button id="batchRenameSelection" class="selection-action hidden" type="button">批量重命名</button><button id="compareFontsSelection" class="selection-action hidden" type="button">字体对比</button><button id="exportSelection" class="selection-action"><svg class="icon"><use href="#i-download"/></svg>导出</button><button id="restoreSelection" class="selection-action hidden"><svg class="icon"><use href="#i-restore"/></svg>恢复</button><button id="deleteSelection" class="selection-action hidden"><svg class="icon"><use href="#i-trash"/></svg>永久删除</button><button id="trashSelection" class="selection-action"><svg class="icon"><use href="#i-trash"/></svg>移入回收站</button></div>
       <footer class="workspace-footer"><div class="breadcrumb">我的素材库 <span>/</span> <span id="breadcrumbCurrent">全部素材</span></div><div class="storage-status"><span class="status-dot"></span><span id="storageLabel">正在打开素材库…</span></div><span>保留原文件 · 本地收藏</span></footer>
     </main>
     <aside id="detailsPanel" class="details-panel hidden" aria-label="素材详情"><div class="details-top"><span>素材详情</span><button id="closeDetails" class="icon-button" title="收起详情" aria-label="收起详情"><svg class="icon"><use href="#i-close"/></svg></button></div><div id="detailsContent" class="details-content"></div><div class="details-footer"><svg class="icon"><use href="#i-shield"/></svg>原文件保留，整理更安心</div></aside>
@@ -194,6 +204,11 @@
   <script src="./video-hover.js"></script>
   <script src="./asset-folder-drag.js"></script>
   <script src="./history-ui.js"></script>
+  <script src="./batch-rename.js"></script>
+  <script src="./font-compare.js"></script>
+  <script src="./smart-folders.js"></script>
+  <script src="./smart-folders-ui.js"></script>
+  <script src="./skin-picker.js"></script>
   <script src="./renderer.js"></script>
 </body>
 </html>

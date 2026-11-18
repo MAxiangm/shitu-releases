@@ -487,6 +487,18 @@ function bindHandlers() {
   });
   checkedHandler('import-paths', importPaths);
   checkedHandler('update-assets', (ids, patch) => saveUserMetadata('updateAssets', [ids, patch], { recordHistory: true }));
+  checkedHandler('batch-rename-assets', (changes, expectedRoot) => {
+    if (typeof expectedRoot !== 'string') throw new Error('请选择有效的素材库');
+    return saveUserMetadata('batchRenameAssets', [changes], { recordHistory: true, expectedRoot });
+  });
+  checkedHandler('save-smart-folder', (value, expectedRoot) => {
+    if (typeof expectedRoot !== 'string') throw new Error('请选择有效的素材库');
+    return saveUserMetadata('saveSmartFolder', [value], { expectedRoot });
+  });
+  checkedHandler('delete-smart-folder', (id, expectedRoot) => {
+    if (typeof expectedRoot !== 'string') throw new Error('请选择有效的素材库');
+    return saveUserMetadata('deleteSmartFolder', [id], { expectedRoot });
+  });
   checkedHandler('move-assets-to-folder', moveAssetsToFolder);
   checkedHandler('set-trash', (ids, trashed) => saveUserMetadata('setTrash', [ids, trashed]));
   checkedHandler('delete-permanently', (ids, expectedRoot) => {

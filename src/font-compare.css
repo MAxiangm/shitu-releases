@@ -1,0 +1,51 @@
+.font-compare-overlay { position:fixed; inset:0; z-index:1100; display:flex; align-items:stretch; justify-content:center; padding:22px; background:#000b; backdrop-filter:blur(10px); }
+.font-compare-overlay[hidden] { display:none; }
+.font-compare-dialog { width:min(1600px,100%); min-width:0; display:flex; flex-direction:column; min-height:0; border:1px solid #ffffff24; border-radius:14px; background:#121212; color:#ddd; box-shadow:0 20px 90px #0008; overflow:hidden; }
+.font-compare-heading { flex:none; display:flex; align-items:center; gap:18px; padding:18px 24px; border-bottom:1px solid #ffffff16; }
+.font-compare-heading h2 { margin:0; color:#eee; font-size:19px; font-weight:500; }
+.font-compare-summary { flex:1; color:#969696; font-size:12px; }
+.font-compare-controls { flex:none; display:grid; grid-template-columns:minmax(0,1fr) 290px; align-items:start; gap:28px; padding:18px 24px; border-bottom:1px solid #ffffff16; }
+.font-compare-controls label { display:flex; flex-direction:column; min-width:0; gap:8px; color:#aaa; font-size:12px; }
+.font-compare-text-label textarea { box-sizing:border-box; width:100%; min-width:0; min-height:102px; max-height:150px; resize:vertical; border:1px solid #ffffff27; border-radius:6px; background:#202020; color:#eee; padding:10px 12px; font:inherit; line-height:1.6; }
+.font-compare-settings { display:grid; gap:13px; min-width:0; }
+.font-compare-setting-title { display:flex; justify-content:space-between; gap:16px; }
+.font-compare-setting-title output { color:#d4d4d4; font-variant-numeric:tabular-nums; }
+.font-compare-settings input[type=range] { accent-color:#dedede; width:100%; margin:0; }
+.font-compare-color-row { display:flex; align-items:center; gap:10px; }
+.font-compare-color-row label { flex-direction:row; align-items:center; margin-right:auto; }
+.font-compare-color-row input[type=color] { width:36px; height:25px; padding:1px; background:#292929; border:1px solid #ffffff35; border-radius:3px; cursor:pointer; }
+.font-compare-preset,.font-compare-retry { padding:5px 10px; border:1px solid #ffffff28; border-radius:5px; color:#bbb; background:transparent; cursor:pointer; font-size:12px; }
+.font-compare-preset[aria-pressed=true] { color:#f2f2f2; border-color:#ccc; }
+.font-compare-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); grid-auto-rows:max-content; align-content:start; align-items:start; gap:18px; flex:1; min-height:0; overflow:auto; padding:20px 24px; overscroll-behavior:contain; }
+.font-compare-card { min-width:0; border:1px solid #ffffff23; border-radius:9px; overflow:hidden; }
+.font-compare-card-heading { padding:14px 17px; min-height:104px; display:grid; grid-template-columns:minmax(0,1fr) auto; grid-template-rows:20px 16px 28px; gap:6px 14px; align-items:center; background:#1b1b1b; }
+.font-compare-card-heading h3 { margin:0; color:#e4e4e4; font-size:15px; font-weight:500; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.font-compare-card-meta { color:#949494; font-size:11px; }
+.font-compare-asset-name { grid-column:1/-1; min-width:0; color:#777; font-size:11px; margin:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.font-compare-face { grid-column:1/-1; display:flex; gap:8px; align-items:center; color:#999; font-size:11px; }
+.font-compare-face[hidden] { display:none; }
+.font-compare-face select { min-width:0; flex:1; color:#ccc; background:#242424; border:1px solid #ffffff25; border-radius:4px; padding:4px 7px; font:inherit; }
+.font-compare-card-body { background:var(--font-compare-background,#eae8e2); color:var(--font-compare-foreground,#161616); min-height:180px; padding:22px; overflow:auto; }
+.font-compare-sample { white-space:pre-wrap; overflow-wrap:anywhere; font-synthesis:none; font-size:var(--font-compare-size,48px); line-height:var(--font-compare-line-height,1.5); }
+.font-compare-sample[hidden],.font-compare-card-status[hidden],.font-compare-retry[hidden] { display:none; }
+.font-compare-card-status { margin:24px 0; font:13px/1.8 sans-serif; opacity:.7; }
+.font-compare-retry { border-color:currentColor; color:inherit; }
+.font-compare-note { flex:none; margin:0; padding:11px 24px; border-top:1px solid #ffffff16; color:#7f7f7f; font-size:11px; line-height:1.6; }
+@media (max-width:1100px),(max-height:760px) {
+  .font-compare-overlay { padding:12px; }
+  .font-compare-heading { padding:13px 18px; }
+  .font-compare-controls { padding:14px 18px; gap:20px; grid-template-columns:minmax(0,1fr) 260px; }
+  .font-compare-text-label textarea { min-height:94px; max-height:125px; }
+  .font-compare-grid { padding:16px 18px; gap:14px; }
+  .font-compare-card-body { padding:18px; }
+}
+@media (max-width:760px) {
+  .font-compare-heading { gap:12px; }
+  .font-compare-heading h2 { font-size:17px; }
+  .font-compare-summary { font-size:11px; }
+  .font-compare-controls { grid-template-columns:minmax(0,1fr); gap:12px; }
+  .font-compare-settings { grid-template-columns:1fr 1fr; gap:10px 18px; }
+  .font-compare-color-row { grid-column:1/-1; }
+  .font-compare-grid { grid-template-columns:minmax(0,1fr); }
+  .font-compare-text-label textarea { min-height:68px; max-height:95px; }
+}

@@ -9,6 +9,7 @@ const { validateProjectBundle, copyProjectBundle } = require('./project-bundle.c
 const FolderTree = require('./folder-tree.js');
 const ColorLabels = require('./color-labels.js');
 const { MetadataHistory, sameField } = require('./metadata-history.cjs');
+const SmartFolders = require('./smart-folders.js');
 const mediaType = ext => PROJECT.has(ext) ? 'project' : MODEL.has(ext) ? 'model' : VIDEO.has(ext) ? 'video' : FONT.has(ext) ? 'font' : 'image';
 const bundleRelative = (id, ext) => `originals/${id}.${PROJECT.has(ext) ? 'project' : 'model'}`;
 const isBundle = ext => MODEL.has(ext) || PROJECT.has(ext);
@@ -224,6 +225,17 @@ class Library {
   _validate(data) {
     if (!data || ![1, 2].includes(data.version) || !Array.isArray(data.assets) || !Array.isArray(data.folders)) throw new Error('索引格式无效或版本不受支持');
     FolderTree.validate(data.folders);
+    if ('smartFolders' in data) {
+      if (!Array.isArray(data.smartFolders) || data.smartFolders.length > 500) throw new Error('智能文件夹列表无效');
+      const ids = new Set();
+      for (const folder of data.smartFolders) {
+        if (!folder || typeof folder !== 'object' || Array.isArray(folder) || Object.keys(folder).some(key => !['id', 'name', 'rule', 'createdAt', 'updatedAt'].includes(key)) ||
+            typeof folder.id !== 'string' || !/^[a-zA-Z0-9-]{1,128}$/.test(folder.id) || ids.has(folder.id)) throw new Error('智能文件夹无效');
+        SmartFolders.validateName(folder.name); SmartFolders.validateRule(folder.rule);
+        if (![folder.createdAt, folder.updatedAt].every(value => typeof value === 'string' && Number.isFinite(Date.parse(value)))) throw new Error('智能文件夹日期无效');
+        ids.add(folder.id);
+      }
+    }
     for (const folder of data.folders) ColorLabels.normalize(folder.colorLabel);
     const folderIds = new Set(data.folders.map(folder => folder.id));
     const assetIds = new Set();
@@ -321,6 +333,7 @@ class Library {
       history: this.historyState(),
       assets,
       folders: clone(this.data.folders).map(folder => ({ ...folder, parentId: FolderTree.parentId(folder), colorLabel: ColorLabels.normalize(folder.colorLabel) })),
+      smartFolders: clone(this.data.smartFolders || []),
       tags: [...tagCounts].map(([name, count]) => ({ name, count })).sort((a, b) => a.name.localeCompare(b.name, 'zh-CN')),
       stats: { total: assets.length, active: active.length, trashed: assets.length - active.length, untagged: active.filter(a => !a.tags.length).length, unfiled: active.filter(a => !a.folderId).length, bytes: assets.reduce((sum, a) => sum + a.size, 0) }
     };
@@ -609,6 +622,57 @@ class Library {
       await this._persist(draft);
       this._history.record(entry);
       return this.snapshot();
+    });
+  }
+
+  batchRenameAssets(changes, options = {}) {
+    return this._mutate(async () => {
+      const record = this._recordHistory(options);
+      if (!Array.isArray(changes) || !changes.length || changes.length > 10000) throw new Error('请选择 1 至 10000 个素材进行批量重命名');
+      const ids = new Set(), names = new Map(), byId = new Map(this.data.assets.map(asset => [asset.id, asset]));
+      for (const change of changes) {
+        if (!change || typeof change !== 'object' || Array.isArray(change) || Object.keys(change).some(key => !['id', 'name', 'beforeName', 'hash'].includes(key)) ||
+            typeof change.id !== 'string' || ids.has(change.id) || typeof change.beforeName !== 'string' || typeof change.hash !== 'string') throw new Error('批量重命名内容无效');
+        const asset = byId.get(change.id);
+        if (!asset || asset.trashedAt || asset.name !== change.beforeName || asset.hash !== change.hash) throw new Error('素材已变化，请关闭窗口后重新选择');
+        const name = text(change.name, '名称', 240);
+        if (/[\x00-\x1f\x7f]/.test(name)) throw new Error('名称不能包含控制字符');
+        ids.add(change.id);
+        if (name !== asset.name) names.set(change.id, name);
+      }
+      if (!names.size) return this.snapshot();
+      const draft = clone(this.data), updatedAt = now();
+      for (const asset of draft.assets) if (names.has(asset.id)) Object.assign(asset, { name: names.get(asset.id), updatedAt });
+      const entry = record ? this._history.prepare(this.data, draft, 'assets', new Set(names.keys()), ['name'], `重命名 ${names.size} 个素材`) : null;
+      if (entry?.oversized) throw new Error('本次批量重命名过大，请分批操作，以保留撤销记录');
+      await this._persist(draft); this._history.record(entry);
+      return this.snapshot();
+    });
+  }
+
+  saveSmartFolder(value) {
+    return this._mutate(async () => {
+      if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some(key => !['id', 'name', 'rule'].includes(key))) throw new Error('智能文件夹内容无效');
+      const name = SmartFolders.validateName(value.name), rule = SmartFolders.validateRule(value.rule);
+      const draft = clone(this.data), folders = draft.smartFolders ||= [];
+      if (folders.some(folder => folder.id !== value.id && folder.name.toLocaleLowerCase() === name.toLocaleLowerCase())) throw new Error('已存在同名智能文件夹');
+      if (value.id !== undefined) {
+        const folder = folders.find(item => item.id === value.id);
+        if (!folder) throw new Error('智能文件夹已不存在');
+        Object.assign(folder, { name, rule, updatedAt: now() });
+      } else {
+        if (folders.length >= 500) throw new Error('智能文件夹最多可创建 500 个');
+        const timestamp = now(); folders.push({ id: crypto.randomUUID(), name, rule, createdAt: timestamp, updatedAt: timestamp });
+      }
+      await this._persist(draft); return this.snapshot();
+    });
+  }
+
+  deleteSmartFolder(id) {
+    return this._mutate(async () => {
+      if (typeof id !== 'string' || !(this.data.smartFolders || []).some(folder => folder.id === id)) throw new Error('智能文件夹已不存在');
+      const draft = clone(this.data); draft.smartFolders = draft.smartFolders.filter(folder => folder.id !== id);
+      await this._persist(draft); return this.snapshot();
     });
   }
 

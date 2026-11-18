@@ -1,7 +1,7 @@
 'use strict';
 const FolderTree = require('./folder-tree.js');
 const ColorLabels = require('./color-labels.js');
-const { VIDEO } = require('./media-formats.cjs');
+const { VIDEO, FONT } = require('./media-formats.cjs');
 
 function assetMenuTemplate(assets, folders, choose) {
   const one = assets.length === 1;
@@ -15,6 +15,7 @@ function assetMenuTemplate(assets, folders, choose) {
   const item = (id, label, enabled = true) => ({ id, label, enabled, click: () => choose(id) });
   return [
     item('preview', '预览', one),
+    item('font-compare', '对比所选字体…', assets.length >= 2 && !anyTrashed && assets.every(asset => asset.mediaType === 'font' || FONT.has(asset.ext))),
     item('open', '使用系统应用打开', one),
     item('reveal', '在资源管理器中显示', one),
     item('source', '打开来源网页', one && Boolean(first.pageUrl || first.sourceUrl)),
@@ -35,7 +36,7 @@ function assetMenuTemplate(assets, folders, choose) {
     },
     item('video-transcode', one ? '视频转码…' : '批量视频转码…', assets.length > 0 && !anyTrashed && assets.every(asset => asset.mediaType === 'video' || VIDEO.has(asset.ext))),
     { type: 'separator' },
-    item('rename', '重命名', one && !anyTrashed),
+    item(one ? 'rename' : 'batch-rename', one ? '重命名' : '批量重命名…', !anyTrashed),
     item('tags', one ? '编辑标签' : '批量添加标签', !anyTrashed),
     {
       id: 'color-label', label: '标记颜色', enabled: assets.length > 0,

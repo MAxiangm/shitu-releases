@@ -1,0 +1,242 @@
+/* Console-inspired chrome. These styles decorate controls only; original
+   images, video, model canvases and font samples keep their own pixels. */
+
+html[data-skin="famicom"] {
+  color-scheme:light;
+  --skin-color-scheme:light;
+  --skin-bg:#e9e1cf;
+  --skin-text:#382a24;
+  --skin-muted:#6a5847;
+  --skin-faint:#705b43;
+  --skin-surface:#fff9e9;
+  --skin-surface-2:#eaddbf;
+  --skin-input-bg:#fffdf4;
+  --skin-border:#b8a782;
+  --skin-border-strong:#8f753f;
+  --skin-accent:#8c263b;
+  --skin-accent-ink:#fff8e6;
+  --skin-header-bg:linear-gradient(180deg,#902f40 0%,#752032 100%);
+  --skin-header-text:#fff2d4;
+  --skin-title-bg:linear-gradient(90deg,#832438,#a53f48);
+  --skin-title-text:#fff3d4;
+  --skin-hover:#e8d5a9;
+  --skin-selected-bg:#862a3a;
+  --skin-selected-text:#fff5d8;
+  --skin-button-bg:linear-gradient(#fff9e9,#e9dbb9);
+  --skin-button-text:#5e2732;
+  --skin-button-border:#a58c56;
+  --skin-focus:#8c263b;
+  --skin-selection:#ead5a2;
+  --skin-selection-ink:#382a24;
+  --skin-radius:8px;
+  --skin-control-radius:4px;
+  --skin-inset-shadow:inset 0 1px 3px #74604226;
+  --skin-panel-shadow:0 5px 0 #c3b597,0 12px 28px #75634426;
+  --skin-shadow:var(--skin-panel-shadow);
+  --skin-font:"Segoe UI","Microsoft YaHei UI",sans-serif;
+  --skin-wallpaper:repeating-linear-gradient(0deg,#7f6d4610 0,#7f6d4610 1px,transparent 1px,transparent 5px);
+}
+html[data-skin="famicom"][data-skin][data-skin] .app-header {
+  border-bottom:3px solid #b99a56;
+  border-radius:0 0 8px 8px;
+  box-shadow:0 3px 0 #5d1a2b,0 7px 15px #7b554324;
+}
+html[data-skin="famicom"][data-skin][data-skin] .brand-mark { transform:none; gap:3px; }
+html[data-skin="famicom"][data-skin][data-skin] .brand-mark span { background:#efcf7b; border-radius:0; opacity:1; transform:none; }
+html[data-skin="famicom"][data-skin][data-skin] .library-icon {
+  background:#f6e9c9;
+  color:#7b2837;
+  border-color:#cdb06a;
+  border-radius:6px;
+  box-shadow:inset 0 1px 0 #fff9e8;
+}
+html[data-skin="famicom"][data-skin][data-skin] .app-header .library-switch .library-icon,
+html[data-skin="famicom"][data-skin][data-skin] .app-header .library-switch .library-icon .icon { color:#7b2837; }
+html[data-skin="famicom"][data-skin][data-skin] .collector-button {
+  background:#f1d699;
+  color:#612132;
+  border:1px solid #caad63;
+  box-shadow:0 2px 0 #4e1828,inset 0 1px 0 #fff3cf;
+}
+html[data-skin="famicom"][data-skin][data-skin] .primary-button,
+html[data-skin="famicom"][data-skin][data-skin] .sp-primary {
+  box-shadow:0 3px 0 #5e1d2b,inset 0 1px 0 #c56b76;
+}
+html[data-skin="famicom"][data-skin][data-skin] .folder-navigation { border-bottom-style:double; border-bottom-width:3px; }
+html[data-skin="famicom"][data-skin][data-skin] .folder-card { box-shadow:inset 0 0 0 2px #fff7df; }
+html[data-skin="famicom"][data-skin][data-skin] .eyebrow { letter-spacing:2.1px; font-weight:650; }
+
+html[data-skin="psp"] {
+  color-scheme:dark;
+  --skin-color-scheme:dark;
+  --skin-bg:#101419;
+  --skin-text:#edf3fa;
+  --skin-muted:#a9b8c9;
+  --skin-faint:#91a2b5;
+  --skin-surface:#1a222c;
+  --skin-surface-2:#242f3c;
+  --skin-input-bg:#0f151c;
+  --skin-border:#435365;
+  --skin-border-strong:#7a8da3;
+  --skin-accent:#bcd7f4;
+  --skin-accent-ink:#152433;
+  --skin-header-bg:linear-gradient(180deg,#424d59 0%,#202832 36%,#0d131a 51%,#17212d 100%);
+  --skin-header-text:#e2edf8;
+  --skin-title-bg:linear-gradient(180deg,#3b4a5c,#1b2633 54%,#17212b);
+  --skin-title-text:#eff7ff;
+  --skin-hover:#32455b;
+  --skin-selected-bg:#335572;
+  --skin-selected-text:#f4faff;
+  --skin-button-bg:linear-gradient(180deg,#485565,#283543 48%,#192432 51%,#233244);
+  --skin-button-text:#eef6ff;
+  --skin-button-border:#66798e;
+  --skin-focus:#badfff;
+  --skin-error:#ffabb7;
+  --skin-selection:#365f82;
+  --skin-radius:20px;
+  --skin-control-radius:18px;
+  --skin-inset-shadow:inset 0 2px 5px #0008;
+  --skin-panel-shadow:inset 0 1px 0 #a6b6c322,0 15px 35px #0008;
+  --skin-shadow:var(--skin-panel-shadow);
+  --skin-font:"Segoe UI","Microsoft YaHei UI",sans-serif;
+  --skin-wallpaper:radial-gradient(ellipse at 5% 80%,#2d4a6b52 0,transparent 42%),radial-gradient(ellipse at 95% 15%,#69788530 0,transparent 40%),linear-gradient(160deg,#0b0f15,#1c2734 52%,#080c11);
+}
+html[data-skin="psp"][data-skin][data-skin] .app-header {
+  border-bottom:1px solid #8192a4;
+  border-radius:0 0 26px 26px;
+  box-shadow:inset 0 -2px 0 #0b1118,inset 0 1px 0 #dce9f337,0 9px 24px #0007;
+}
+html[data-skin="psp"][data-skin][data-skin] .brand-mark { transform:none; gap:3px; }
+html[data-skin="psp"][data-skin][data-skin] .brand-mark span { background:linear-gradient(135deg,#fbffff,#8399b0); border-radius:50%; opacity:1; transform:none; }
+html[data-skin="psp"][data-skin][data-skin] .library-icon,
+html[data-skin="psp"][data-skin][data-skin] .header-actions>.icon-button {
+  background:linear-gradient(140deg,#667589,#18212e 65%);
+  border-color:#8a9aab;
+  border-radius:50%;
+  box-shadow:0 2px 4px #0009,inset 0 1px 0 #d1e0eb66;
+}
+html[data-skin="psp"][data-skin][data-skin] .collector-button { box-shadow:0 3px 7px #0008,inset 0 1px 0 #daeaff55; }
+html[data-skin="psp"][data-skin][data-skin] .folder-card,
+html[data-skin="psp"][data-skin][data-skin] .selection-bar { box-shadow:inset 0 1px 0 #c5daed1c,0 6px 18px #0004; }
+html[data-skin="psp"][data-skin][data-skin] .eyebrow { letter-spacing:3px; color:#a9bed4; }
+
+html[data-skin="gameboy"] {
+  color-scheme:light;
+  --skin-color-scheme:light;
+  --skin-bg:#abae99;
+  --skin-text:#24331d;
+  --skin-muted:#354329;
+  --skin-faint:#37442b;
+  --skin-surface:#c7d397;
+  --skin-surface-2:#afbd7b;
+  --skin-input-bg:#d4dfa8;
+  --skin-border:#718051;
+  --skin-border-strong:#3b502e;
+  --skin-accent:#79334f;
+  --skin-accent-ink:#fff0f6;
+  --skin-header-bg:linear-gradient(180deg,#d1d0c8,#b5b4ab);
+  --skin-header-text:#303d30;
+  --skin-title-bg:#46563c;
+  --skin-title-text:#e6efb4;
+  --skin-hover:#abbc76;
+  --skin-selected-bg:#42592d;
+  --skin-selected-text:#f0f4c9;
+  --skin-button-bg:linear-gradient(#d9d9cc,#b7bba5);
+  --skin-button-text:#293b23;
+  --skin-button-border:#6a735b;
+  --skin-focus:#733550;
+  --skin-selection:#91aa59;
+  --skin-selection-ink:#24331d;
+  --skin-radius:6px;
+  --skin-control-radius:2px;
+  --skin-inset-shadow:inset 2px 2px 0 #51633355,inset -1px -1px 0 #eaf0be;
+  --skin-panel-shadow:inset 0 1px 0 #f3f5d3,3px 4px 0 #747e5a66;
+  --skin-shadow:var(--skin-panel-shadow);
+  --skin-font:"Consolas","Microsoft YaHei UI",monospace;
+  --skin-wallpaper:repeating-linear-gradient(90deg,#5262370a 0,#5262370a 1px,transparent 1px,transparent 4px),repeating-linear-gradient(0deg,#5262370a 0,#5262370a 1px,transparent 1px,transparent 4px);
+}
+html[data-skin="gameboy"][data-skin][data-skin] .app-header {
+  position:relative;
+  border-bottom:3px solid #626c57;
+  border-radius:0 0 20px 5px;
+  box-shadow:inset 0 -2px 0 #e0e2ce,0 4px 0 #89917b;
+}
+html[data-skin="gameboy"][data-skin][data-skin] .app-header::after {
+  content:"";
+  position:absolute;
+  left:2px;
+  bottom:5px;
+  width:5px;
+  height:5px;
+  border-radius:50%;
+  background:#a73750;
+  box-shadow:0 0 0 1px #562b37;
+  pointer-events:none;
+}
+html[data-skin="gameboy"][data-skin][data-skin] .brand-mark { transform:none; gap:2px; }
+html[data-skin="gameboy"][data-skin][data-skin] :is(.workspace,.details-panel,.browser-popover,.modal,.sf-dialog,.batch-rename-dialog,.font-compare-dialog) { border-radius:5px 5px 20px 5px; }
+html[data-skin="gameboy"][data-skin][data-skin] .brand-mark span { background:#394f2c; border-radius:0; opacity:1; transform:none; box-shadow:1px 1px 0 #d8e4b0; }
+html[data-skin="gameboy"][data-skin][data-skin] .library-icon { border-radius:3px; background:#899878; border:2px solid #525e46; color:#21321b; box-shadow:inset 1px 1px 0 #bcc6a1; }
+html[data-skin="gameboy"][data-skin][data-skin] .collector-button,
+html[data-skin="gameboy"][data-skin][data-skin] .primary-button,
+html[data-skin="gameboy"][data-skin][data-skin] .sp-primary { border-radius:16px; box-shadow:2px 3px 0 #4e2438,inset 0 1px 0 #c67493; }
+html[data-skin="gameboy"][data-skin][data-skin] .nav-item.active .nav-name { font-weight:700; }
+html[data-skin="gameboy"][data-skin][data-skin] .folder-card { border-width:2px; box-shadow:inset 2px 2px 0 #e2edb4,inset -2px -2px 0 #829856; }
+html[data-skin="gameboy"][data-skin][data-skin] .eyebrow { letter-spacing:1.5px; font-weight:700; }
+html[data-skin="gameboy"][data-skin][data-skin] .asset-card.selected { outline-style:solid; }
+
+html[data-skin="switch"] {
+  color-scheme:dark;
+  --skin-color-scheme:dark;
+  --skin-bg:#20252a;
+  --skin-text:#f5f7f9;
+  --skin-muted:#b9c3ca;
+  --skin-faint:#9faeb8;
+  --skin-surface:#2d353c;
+  --skin-surface-2:#3a454e;
+  --skin-input-bg:#1e282f;
+  --skin-border:#57636e;
+  --skin-border-strong:#7d919d;
+  --skin-accent:#41cfdb;
+  --skin-accent-ink:#07383e;
+  --skin-header-bg:linear-gradient(90deg,#17444e,#29333b 22%,#29333b 78%,#552b34);
+  --skin-header-text:#edf9fb;
+  --skin-title-bg:linear-gradient(90deg,#086979,#3a4c58 70%,#9a3948);
+  --skin-title-text:#fff;
+  --skin-hover:#41525e;
+  --skin-selected-bg:#126576;
+  --skin-selected-text:#f3fdff;
+  --skin-button-bg:#3e4a54;
+  --skin-button-text:#f3f8fb;
+  --skin-button-border:#71838e;
+  --skin-focus:#4de1ec;
+  --skin-error:#ffb1b7;
+  --skin-selection:#276878;
+  --skin-radius:12px;
+  --skin-control-radius:8px;
+  --skin-inset-shadow:inset 0 2px 3px #0005;
+  --skin-panel-shadow:0 10px 26px #0005;
+  --skin-shadow:var(--skin-panel-shadow);
+  --skin-font:"Segoe UI","Microsoft YaHei UI",sans-serif;
+  --skin-wallpaper:radial-gradient(ellipse at 0% 25%,#0abfd71a,transparent 38%),radial-gradient(ellipse at 100% 75%,#ff5c6917,transparent 38%);
+}
+html[data-skin="switch"][data-skin][data-skin] .app-shell::after {
+  content:"";
+  position:fixed;
+  inset:10px;
+  z-index:-1;
+  border-left:5px solid #38c8d7;
+  border-right:5px solid #ef5b68;
+  border-radius:24px;
+  pointer-events:none;
+}
+html[data-skin="switch"][data-skin][data-skin] .app-header { border-bottom:2px solid #5b727f; box-shadow:0 2px 0 #12191f; border-radius:0 0 12px 12px; }
+html[data-skin="switch"][data-skin][data-skin] .brand-mark { transform:none; gap:3px; }
+html[data-skin="switch"][data-skin][data-skin] .brand-mark span { border-radius:4px; opacity:1; transform:none; background:#38c8d7; }
+html[data-skin="switch"][data-skin][data-skin] .brand-mark span:nth-child(even) { background:#ef5b68; }
+html[data-skin="switch"][data-skin][data-skin] .library-icon { background:#245763; color:#e8fcff; border-color:#38c8d7; border-radius:12px; }
+html[data-skin="switch"][data-skin][data-skin] .collector-button { background:#da4b5c; color:#fff; border:1px solid #f1848e; box-shadow:0 3px 0 #81333e; }
+html[data-skin="switch"][data-skin][data-skin] .collector-button:hover { background:#ec6573; color:#fff; }
+html[data-skin="switch"][data-skin][data-skin] .details-header { border-top:3px solid #ef5b68; }
+html[data-skin="switch"][data-skin][data-skin] .folder-panel-heading-actions { border-left:2px solid #38c8d7; padding-left:5px; }
+html[data-skin="switch"][data-skin][data-skin] .eyebrow { letter-spacing:2.3px; font-weight:650; }

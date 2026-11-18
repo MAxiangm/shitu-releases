@@ -16,12 +16,13 @@ function context2d() {
   return { draws: 0, transforms: 0, lost: false, isContextLost() { return this.lost; },
     setTransform() { this.transforms++; }, clearRect() { this.draws++; }, fillRect() {}, beginPath() {}, moveTo() {}, lineTo() {}, stroke() {}, drawImage() {}, save() {}, restore() {}, createRadialGradient: () => gradient };
 }
-function particles({ width = 1920, height = 1080, dpr = 1.5, motion = true } = {}) {
+function particles({ width = 1920, height = 1080, dpr = 1.5, motion = true, skin = 'default' } = {}) {
   const schedule = scheduler(), win = new EventTarget(), doc = new EventTarget(), canvas = new EventTarget(), button = new EventTarget();
   let drawing = context2d();
   Object.assign(canvas, { width: 0, height: 0, dataset: {}, getContext: () => drawing });
   Object.assign(button, { setAttribute() {} });
   doc.hidden = false;
+  doc.documentElement = { dataset: { skin } };
   doc.getElementById = id => ({ ambientParticles: canvas, backgroundMotionButton: button, backgroundMotionLabel: {} })[id];
   doc.createElement = () => ({ width: 0, height: 0, getContext: () => context2d() });
   let nativeVisibility;
@@ -33,6 +34,17 @@ function particles({ width = 1920, height = 1080, dpr = 1.5, motion = true } = {
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../src/particle-background.js'), 'utf8'), sandbox);
   return { canvas, doc, win, schedule, sandbox, nativeVisibility: value => nativeVisibility(value), context: () => drawing, replaceContext() { drawing = context2d(); return drawing; } };
 }
+
+test('custom skins stop decorative canvas work and restore the original animation preference', () => {
+  const f = particles({ skin: 'gameboy' });
+  assert.equal(f.canvas.dataset.status, 'skin-paused'); assert.equal(f.schedule.frames.size, 0);
+  f.doc.documentElement.dataset.skin = 'default'; f.win.dispatchEvent(new Event('shitu-skin-change'));
+  assert.equal(f.canvas.dataset.status, 'running'); assert.equal(f.schedule.frames.size, 1);
+  f.schedule.tick(100); const drawn = f.context().draws;
+  f.doc.documentElement.dataset.skin = 'win98'; f.win.dispatchEvent(new Event('shitu-skin-change'));
+  assert.equal(f.canvas.dataset.status, 'skin-paused'); assert.equal(f.schedule.frames.size, 0); assert.equal(f.canvas.width, 1);
+  f.schedule.tick(200); assert.equal(f.context().draws, drawn);
+});
 
 test('decorative canvas bounds its backing surface on large HiDPI displays', () => {
   const f = particles({ width: 7680, height: 4320, dpr: 2 });

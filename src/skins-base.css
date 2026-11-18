@@ -1,0 +1,133 @@
+/* Skin presentation only. Asset pixels, preview fonts and user color labels keep their own values. */
+:where(html[data-skin]:not([data-skin="default"])) {
+  --skin-bg:#dfdfdf; --skin-surface:#f1f1f1; --skin-surface-2:#e5e5e5;
+  --skin-text:#202020; --skin-muted:#555; --skin-faint:#656565;
+  --skin-border:#a1a1a1; --skin-border-strong:#646464;
+  --skin-accent:#285bc4; --skin-accent-ink:#fff;
+  --skin-header-bg:var(--skin-surface-2); --skin-header-text:var(--skin-text);
+  --skin-title-bg:var(--skin-header-bg); --skin-title-text:var(--skin-header-text);
+  --skin-input-bg:#fff; --skin-hover:#dce6f5;
+  --skin-selected-bg:var(--skin-accent); --skin-selected-text:var(--skin-accent-ink);
+  --skin-button-bg:var(--skin-surface-2); --skin-button-text:var(--skin-text); --skin-button-border:var(--skin-border);
+  --skin-focus:var(--skin-accent); --skin-selection:var(--skin-selected-bg);
+  --skin-radius:8px; --skin-control-radius:5px;
+  --skin-shadow:0 12px 35px #0002; --skin-panel-shadow:var(--skin-shadow); --skin-inset-shadow:none;
+  --skin-font:"Segoe UI","Microsoft YaHei UI","Microsoft YaHei",sans-serif;
+  --skin-wallpaper:none; --skin-color-scheme:light; --skin-error:#a62431;
+}
+html[data-skin]:not([data-skin="default"]) {
+  --bg:var(--skin-bg); --surface:var(--skin-surface); --border:var(--skin-border);
+  --border-strong:var(--skin-border-strong); --text:var(--skin-text); --muted:var(--skin-muted);
+  --faint:var(--skin-faint); --accent:var(--skin-accent); --accent-ink:var(--skin-accent-ink);
+  color-scheme:var(--skin-color-scheme); font-family:var(--skin-font);
+}
+html[data-skin]:not([data-skin="default"]) body {
+  background-color:var(--skin-bg); background-image:var(--skin-wallpaper);
+  background-attachment:fixed; color:var(--skin-text);
+}
+html[data-skin]:not([data-skin="default"]) ::selection { background:var(--skin-selection); color:var(--skin-selection-ink,var(--skin-selected-text)); }
+html[data-skin]:not([data-skin="default"]) :is(button,input,select,textarea,summary):focus-visible { outline-color:var(--skin-focus); }
+html[data-skin]:not([data-skin="default"]) #ambientParticles,
+html[data-skin]:not([data-skin="default"]) .app-shell::before,
+html[data-skin]:not([data-skin="default"]) .library-onboarding::before { display:none; }
+html[data-skin]:not([data-skin="default"]) .app-header {
+  background:var(--skin-header-bg); color:var(--skin-header-text); border-color:var(--skin-border-strong);
+  border-radius:0 0 var(--skin-radius) var(--skin-radius); box-shadow:var(--skin-panel-shadow);
+}
+html[data-skin]:not([data-skin="default"]) .app-header :is(.header-button,.backup-button,.library-icon,.brand strong) { color:var(--skin-header-text); }
+html[data-skin]:not([data-skin="default"]) .brand-mark span { background:var(--skin-header-text); }
+html[data-skin]:not([data-skin="default"]) .workspace {
+  background:var(--skin-surface); border-radius:var(--skin-radius); box-shadow:var(--skin-panel-shadow);
+}
+html[data-skin]:not([data-skin="default"]) :is(.toolbar,.folder-navigation,.workspace-footer,.details-top,.manager-current,.manager-choice,.collector-status,.collector-actions,.update-versions,.update-notes-area,.folder-color-section,.smart-folder-heading) { border-color:var(--skin-border); }
+html[data-skin]:not([data-skin="default"]) :is(.browser-popover,.folder-context-menu,.details-panel,.selection-bar,.modal,.progress-panel,.toast,.batch-rename-dialog,.sf-dialog,.font-compare-dialog,.preview-window,.preview-font,.preview-project,.sp-dialog) {
+  background:var(--skin-surface); color:var(--skin-text); border-color:var(--skin-border-strong);
+  border-radius:var(--skin-radius); box-shadow:var(--skin-panel-shadow);
+}
+html[data-skin]:not([data-skin="default"]) .app-shell.folder-panel-pinned #folderPanel { background:var(--skin-surface); border-color:var(--skin-border-strong); }
+html[data-skin]:not([data-skin="default"]) :is(.details-top,.batch-rename-header,.font-compare-heading,.sp-header) {
+  background:var(--skin-title-bg); color:var(--skin-title-text); border-color:var(--skin-border);
+}
+html[data-skin]:not([data-skin="default"]) :is(.details-top,.batch-rename-header,.font-compare-heading,.sp-header) :is(h1,h2,h3,p,span,strong,button) { color:inherit; }
+html[data-skin]:not([data-skin="default"]) :is(.sf-heading,.preview-top) { color:var(--skin-text); }
+html[data-skin]:not([data-skin="default"]) :is(h1,h2,h3,h4,.asset-name,.folder-card-name,.detail-input,.metadata-row>span:last-child,.preview-top strong,.setup-option strong,.manager-choice strong,.progress-top strong,.selection-bar strong,.project-preview-summary h2,.transcode-settings-cpu strong,.video-transcode-worker strong,.sp-plugin-name,.sp-tool-title h3,.sp-settings h4,.font-compare-card-heading h3) { color:var(--skin-text); }
+html[data-skin]:not([data-skin="default"]) :is(.eyebrow,.section-label,.sidebar-hint,.folder-card-meta,.asset-subline,.asset-tags span,.metadata-row>span:first-child,.detail-label,.detail-tags-help,.detail-save-note,.detail-placeholder,.detail-placeholder p,.detail-placeholder span,.empty-state>p,.empty-footnote,.content-meta,.content-meta>span:last-child,.gallery-section-title,.workspace-footer,.breadcrumb,.breadcrumb>span,.storage-status,.local-label,.small-count,.nav-count,.search-box,.search-box kbd,.icon.muted,.folder-path-placeholder,.folder-breadcrumb-separator,.color-label-caption,.folder-color-title,.preview-meta,.preview-top span,.preview-bottom,.sf-label,.sf-eyebrow,.sf-description,.sf-summary,.sf-check,.sf-custom-days span,.batch-rename-field,.batch-rename-check,.batch-rename-preview-heading span,.batch-rename-extra,.batch-rename-status,.batch-rename-field small,.font-compare-summary,.font-compare-controls label,.font-compare-card-meta,.font-compare-asset-name,.font-compare-face,.font-compare-note,.font-preview-controls label,.font-preview-note,.modal p,.modal-parent-field,.update-versions dt,.update-notes-area h3,.update-hint,.update-progress-area>span,.collector-steps span,.collector-steps li::before,.manager-choice small,.manager-migrate>p,.setup-description,.setup-eyebrow,.setup-footnote,.setup-brand small,.setup-legacy>span,.setup-legacy code,.video-transcode-options label,.video-transcode-options small,.video-transcode-progress span,.video-transcode-device-row,.video-transcode-worker span,.transcode-settings-options label,.transcode-settings-options small,.transcode-settings-cpu,.sp-panel,.sp-field-label,.sp-range-heading,.sp-tool-title p,.sp-plugin-description,.sp-field small,.sp-setting-note,.sp-engine-info,.sp-progress-content p,.sp-result-links,.sp-progress-content progress) { color:var(--skin-muted); }
+html[data-skin]:not([data-skin="default"]) :is(.nav-item,.collection-menu summary,.folder-breadcrumb,.folder-panel-pin,.text-button,.selection-action,.icon-button,.folder-more,.folder-toggle,.folder-card-more,.smart-folder-edit,.color-label-custom,.tag-pill,.folder-context-menu button,.manager-choice,.preview-motion,.sp-text-button) { color:var(--skin-text); }
+html[data-skin]:not([data-skin="default"]) :is(.nav-item,.collection-menu summary,.folder-breadcrumb,.text-button,.icon-button,.folder-more,.folder-toggle,.folder-card-more,.smart-folder-edit,.folder-context-menu button,.manager-choice,.sp-text-button):hover { color:var(--skin-text); background-color:var(--skin-hover); }
+html[data-skin]:not([data-skin="default"]) :is(.nav-item.active,#mainNav .nav-item.active,.tag-pill.active,.folder-panel-pin[aria-pressed=true]) {
+  color:var(--skin-selected-text); background:var(--skin-selected-bg); border-color:var(--skin-accent);
+}
+html[data-skin]:not([data-skin="default"]) .nav-item.active .nav-count { color:inherit; }
+html[data-skin]:not([data-skin="default"]) #mainNav .nav-item.active::after { background:var(--skin-accent); }
+html[data-skin]:not([data-skin="default"]) :is(.nav-item.active,.tag-pill.active):hover { color:var(--skin-selected-text); background:var(--skin-selected-bg); }
+html[data-skin]:not([data-skin="default"]) :is(.primary-button,.collector-button,.selection-badge,.selection-mode-button[aria-pressed=true],.asset-card.selected .asset-check,.sp-primary) {
+  background:var(--skin-accent); color:var(--skin-accent-ink); border-color:var(--skin-accent); box-shadow:var(--skin-inset-shadow);
+}
+html[data-skin]:not([data-skin="default"]) :is(.primary-button,.collector-button,.sp-primary):hover { background:var(--skin-accent); color:var(--skin-accent-ink); filter:brightness(1.07); }
+html[data-skin]:not([data-skin="default"]) :is(.secondary-button,.selection-mode-button,.folder-panel-pin,.preview-motion,.sp-secondary,.font-compare-preset,.font-compare-retry,.tag-pill) {
+  background:var(--skin-button-bg); color:var(--skin-button-text); border-color:var(--skin-button-border);
+  border-radius:var(--skin-control-radius); box-shadow:var(--skin-inset-shadow);
+}
+html[data-skin]:not([data-skin="default"]) :is(.primary-button,.collector-button,.sp-primary,.folder-navigation-button,.setup-update-button) { border-radius:var(--skin-control-radius); }
+html[data-skin]:not([data-skin="default"]) :is(.secondary-button,.selection-mode-button,.folder-panel-pin,.preview-motion,.sp-secondary,.font-compare-preset,.tag-pill):hover { background:var(--skin-hover); color:var(--skin-text); }
+html[data-skin]:not([data-skin="default"]) :is(.search-box input,.detail-input,.detail-textarea,.modal input:not([type=color]):not([type=checkbox]):not([type=range]),.modal select,.sf-input:not([type=color]):not([type=checkbox]),.batch-rename-field input,.batch-rename-field select,.font-preview-controls textarea,.font-preview-controls select,.font-compare-text-label textarea,.font-compare-face select,.filter-controls select,.sp-input) {
+  background:var(--skin-input-bg); color:var(--skin-text); border-color:var(--skin-border);
+  border-radius:var(--skin-control-radius); box-shadow:var(--skin-inset-shadow);
+}
+html[data-skin]:not([data-skin="default"]) :is(input,textarea)::placeholder { color:var(--skin-faint); opacity:1; }
+html[data-skin]:not([data-skin="default"]) select option { color:var(--skin-text); background:var(--skin-input-bg); }
+html[data-skin]:not([data-skin="default"]) :is(input[type=range],input[type=checkbox],progress) { accent-color:var(--skin-accent); }
+html[data-skin]:not([data-skin="default"]) :is(.folder-card,.sf-summary,.video-transcode-worker,.collector-last-capture,.sp-plugin-item,.sp-source,.font-compare-card,.font-compare-card-heading,.batch-rename-table-scroll th) { background:var(--skin-surface-2); border-color:var(--skin-border); }
+html[data-skin]:not([data-skin="default"]) :is(.folder-card,.sp-plugin-item):hover { background:var(--skin-hover); border-color:var(--skin-border-strong); }
+html[data-skin]:not([data-skin="default"]) .folder-card-open>.icon { color:var(--skin-accent); }
+html[data-skin]:not([data-skin="default"]) .asset-card.selected .asset-thumb { outline-color:var(--skin-accent); }
+html[data-skin]:not([data-skin="default"]) .asset-card.selected .asset-name { color:var(--skin-accent); }
+html[data-skin]:not([data-skin="default"]) .asset-card:focus-visible .asset-thumb { outline-color:var(--skin-focus); }
+html[data-skin]:not([data-skin="default"]) .asset-check { border-color:var(--skin-border-strong); }
+html[data-skin]:not([data-skin="default"]) .folder-card.asset-drop-target,
+html[data-skin]:not([data-skin="default"]) .folder-row.asset-drop-target,
+html[data-skin]:not([data-skin="default"]) .folder-breadcrumb.asset-drop-target { outline-color:var(--skin-accent); background:var(--skin-hover); box-shadow:none; }
+html[data-skin]:not([data-skin="default"]) :is(.asset-drag-ghost,.setup-update-button,.drop-overlay) { background:var(--skin-surface); color:var(--skin-text); border-color:var(--skin-accent); }
+html[data-skin]:not([data-skin="default"]) :is(.batch-rename-header,.batch-rename-rules,.batch-rename-table-scroll,.batch-rename-footer,.batch-rename-table-scroll th,.batch-rename-table-scroll td,.font-compare-heading,.font-compare-controls,.font-compare-note,.font-preview-controls,.font-preview-note,.detail-separator,.sp-settings,.sp-footer) { border-color:var(--skin-border); }
+html[data-skin]:not([data-skin="default"]) .batch-rename-table-scroll td:first-child { color:var(--skin-muted); }
+html[data-skin]:not([data-skin="default"]) .batch-rename-table-scroll tr.is-changed td:last-child { color:var(--skin-text); }
+html[data-skin]:not([data-skin="default"]) :is(.batch-rename-close,.sf-close) { color:var(--skin-text); }
+html[data-skin]:not([data-skin="default"]) .sf-close:hover { background:var(--skin-hover); }
+html[data-skin]:not([data-skin="default"]) :is(.font-compare-setting-title output,.font-preview-size-heading output) { color:var(--skin-text); }
+html[data-skin]:not([data-skin="default"]) .font-compare-preset[aria-pressed=true] { background:var(--skin-selected-bg); color:var(--skin-selected-text); border-color:var(--skin-selected-bg); }
+html[data-skin]:not([data-skin="default"]) :is(.font-preview-controls,.font-compare-controls) { background:var(--skin-surface); }
+html[data-skin]:not([data-skin="default"]) :is(.library-onboarding,.modal-overlay,.batch-rename-overlay,.font-compare-overlay,.sp-overlay) { background-color:#18202b88; }
+html[data-skin]:not([data-skin="default"]) .library-onboarding { background-color:var(--skin-bg); background-image:var(--skin-wallpaper); }
+html[data-skin]:not([data-skin="default"]) .setup-option { border-color:var(--skin-border); }
+html[data-skin]:not([data-skin="default"]) .setup-option:hover { background:var(--skin-hover); color:var(--skin-text); border-color:var(--skin-accent); }
+html[data-skin]:not([data-skin="default"]) :is(.setup-brand>span,.setup-option,.setup-option-icon,.setup-shell h1,.collector-steps strong,.manager-current code,.manager-migrate>strong,.update-versions dd,.modal .update-status,.modal .video-transcode-status,.collector-status,.collector-automatic,.collector-path,.library-operation-status) { color:var(--skin-text)!important; }
+html[data-skin]:not([data-skin="default"]) .update-progress-area progress::-webkit-progress-bar,
+html[data-skin]:not([data-skin="default"]) .progress-track { background:var(--skin-border); }
+html[data-skin]:not([data-skin="default"]) .update-progress-area progress::-webkit-progress-value,
+html[data-skin]:not([data-skin="default"]) .progress-fill { background:var(--skin-accent); }
+html[data-skin]:not([data-skin="default"]) :is(.color-label-clear,.folder-context-menu .color-label-clear) { background:var(--skin-input-bg); border-color:var(--skin-border-strong); color:var(--skin-muted); }
+html[data-skin]:not([data-skin="default"]) .color-label-swatch[aria-pressed=true] { outline-color:var(--skin-text); }
+html[data-skin]:not([data-skin="default"]) .tag-pill::before { color:inherit; opacity:.65; }
+html[data-skin]:not([data-skin="default"]) :is(.sp-plugin-item.is-active,.sp-source.is-selected) { border-color:var(--skin-accent); background:var(--skin-hover); }
+html[data-skin]:not([data-skin="default"]) .sp-source-check { background:var(--skin-accent); color:var(--skin-accent-ink); }
+html[data-skin]:not([data-skin="default"]) .sp-preview { border-color:var(--skin-border); }
+html[data-skin]:not([data-skin="default"]) :is(.sp-dialog,.sp-sidebar,.sp-settings,.sp-header,.sp-footer) { border-color:var(--skin-border); }
+html[data-skin]:not([data-skin="default"]) :is(.sp-sidebar,.sp-settings) { background:var(--skin-surface-2); }
+html[data-skin]:not([data-skin="default"]) .preview-arrow { background:var(--skin-surface); color:var(--skin-text); border-color:var(--skin-border-strong); }
+html[data-skin]:not([data-skin="default"]) .cylinder-card-surface { background:var(--skin-surface); color:var(--skin-text); border-color:var(--skin-border); }
+html[data-skin]:not([data-skin="default"]) .cylinder-card.active .cylinder-card-surface { border-color:var(--skin-accent); }
+/* Keep errors distinct in both light and dark palettes. */
+html[data-skin]:not([data-skin="default"]) :is(.sf-error,.batch-rename-status.is-error,.batch-rename-table-scroll tr.is-error td:last-child,.video-transcode-status.is-error,.modal .update-status.is-error,.modal-color-error) { color:var(--skin-error); }
+html[data-skin]:not([data-skin="default"]) .toast.error { background:var(--skin-surface); color:var(--skin-error); border-color:var(--skin-error); }
+html[data-skin]:not([data-skin="default"]) :is(.details-top,.batch-rename-header,.font-compare-heading,.sp-header) :is(h1,h2,h3,p,span,strong,button) { color:var(--skin-title-text); }
+html[data-skin]:not([data-skin="default"]) :is(.tag-pill.active,.folder-panel-pin[aria-pressed=true],.selection-mode-button[aria-pressed=true],.header-actions>.icon-button[aria-pressed=true]) {
+  background:var(--skin-selected-bg); color:var(--skin-selected-text); border-color:var(--skin-accent);
+}
+html[data-skin]:not([data-skin="default"]) .nav-item.active .icon { color:inherit; }
+html[data-skin]:not([data-skin="default"]) :is(.preview-video-status,.project-preview-summary,.project-composition-meta,.project-preview-notes,.sp-source-heading,.sp-source-actions,.sp-list-empty,.sp-no-sources,.sp-progress-label strong,.sp-progress-label>span,.sp-range-heading output) { color:var(--skin-muted); }
+html[data-skin]:not([data-skin="default"]) .sp-tool-mark { color:var(--skin-accent); border-color:var(--skin-border); }
+html[data-skin]:not([data-skin="default"]) :is(.details-top,.batch-rename-header,.font-compare-heading,.sp-header) :is(h1,h2,h3,h4) { color:var(--skin-title-text)!important; }
+html[data-skin]:not([data-skin="default"]) .batch-rename-table-scroll th { color:var(--skin-muted); }
+html[data-skin]:not([data-skin="default"]) .app-header .header-actions>.icon-button:not([aria-pressed=true]) {
+  color:var(--skin-header-text); border-color:color-mix(in srgb,var(--skin-header-text) 50%,transparent);
+}

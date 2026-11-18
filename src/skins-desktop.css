@@ -1,0 +1,73 @@
+/* Original desktop-inspired palettes. No system assets or logos are embedded. */
+html[data-skin="win97"] {
+  --skin-bg:#54647b; --skin-surface:#d4d0c8; --skin-surface-2:#e2ded6;
+  --skin-text:#222327; --skin-muted:#4f5158; --skin-faint:#656772;
+  --skin-border:#a8a49c; --skin-border-strong:#666978;
+  --skin-accent:#354c8d; --skin-accent-ink:#fff;
+  --skin-header-bg:linear-gradient(100deg,#252d5b,#576ea1 72%,#9eafc7); --skin-header-text:#fff;
+  --skin-title-bg:linear-gradient(95deg,#283864,#7a8fad); --skin-title-text:#fff;
+  --skin-input-bg:#fffefa; --skin-hover:#c3cede; --skin-button-bg:#e2ded6;
+  --skin-selected-bg:#354c8d; --skin-selected-text:#fff;
+  --skin-radius:2px; --skin-control-radius:1px;
+  --skin-inset-shadow:inset 1px 1px #fff,inset -1px -1px #8d8a82;
+  --skin-shadow:2px 3px 0 #20273766; --skin-panel-shadow:2px 3px 0 #20273766;
+  --skin-wallpaper:repeating-linear-gradient(135deg,#ffffff04 0,#ffffff04 1px,transparent 1px,transparent 5px);
+  --skin-font:"Tahoma","Microsoft YaHei UI",sans-serif;
+}
+html[data-skin="win98"] {
+  --skin-bg:#008080; --skin-surface:#c0c0c0; --skin-surface-2:#d0d0d0;
+  --skin-text:#141414; --skin-muted:#424242; --skin-faint:#595959;
+  --skin-border:#808080; --skin-border-strong:#4f4f4f;
+  --skin-accent:#000080; --skin-accent-ink:#fff;
+  --skin-header-bg:#000080; --skin-header-text:#fff;
+  --skin-title-bg:linear-gradient(90deg,#000080,#0e65a5); --skin-title-text:#fff;
+  --skin-input-bg:#fff; --skin-hover:#d6d6d6; --skin-button-bg:#c0c0c0;
+  --skin-selected-bg:#000080; --skin-selected-text:#fff;
+  --skin-radius:0px; --skin-control-radius:0px;
+  --skin-inset-shadow:inset 1px 1px #fff,inset -1px -1px #404040,inset -2px -2px #808080;
+  --skin-shadow:3px 3px 0 #0006; --skin-panel-shadow:inset 1px 1px #fff,inset -1px -1px #404040,2px 3px 0 #0006;
+  --skin-wallpaper:linear-gradient(90deg,#00000005 1px,transparent 1px),linear-gradient(#ffffff05 1px,transparent 1px);
+  --skin-font:"Tahoma","Microsoft YaHei UI",sans-serif;
+}
+html[data-skin="win98"][data-skin] :is(.primary-button,.sp-primary,.collector-button) {
+  box-shadow:inset 1px 1px #ffffff90,inset -1px -1px #0006;
+}
+html[data-skin="win98"][data-skin] :is(.primary-button,.secondary-button,.sp-primary,.sp-secondary):active:not(:disabled) {
+  box-shadow:inset 1px 1px #404040,inset -1px -1px #fff;
+}
+html[data-skin="win98"] .brand-mark { transform:none; gap:2px; }
+html[data-skin="win98"] .brand-mark span { transform:none; opacity:1; border-radius:0; }
+html[data-skin="winxp"] {
+  --skin-bg:#4b91d1; --skin-surface:#ece9d8; --skin-surface-2:#f5f4ed;
+  --skin-text:#152439; --skin-muted:#4c5661; --skin-faint:#626a71;
+  --skin-border:#b7bdca; --skin-border-strong:#3169b5;
+  --skin-accent:#347d24; --skin-accent-ink:#fff;
+  --skin-header-bg:linear-gradient(#3e8bff 0,#1761ce 15%,#0050bd 80%,#2378e6); --skin-header-text:#fff;
+  --skin-title-bg:linear-gradient(#3b8cff,#0b58bf); --skin-title-text:#fff;
+  --skin-input-bg:#fff; --skin-hover:#d9e8fc; --skin-button-bg:linear-gradient(#fff,#e7e5d8);
+  --skin-button-border:#7d99b8; --skin-selected-bg:#306bc5; --skin-selected-text:#fff;
+  --skin-radius:9px; --skin-control-radius:5px;
+  --skin-inset-shadow:inset 0 1px #ffffffb3; --skin-shadow:0 5px 18px #10417644;
+  --skin-panel-shadow:0 5px 18px #10417644;
+  --skin-wallpaper:radial-gradient(ellipse at 76% 112%,#65a744 0 23%,transparent 23.5%),radial-gradient(ellipse at 25% 120%,#92c951 0 35%,transparent 35.5%),linear-gradient(#3b80c9,#82b8e4 70%);
+  --skin-font:"Tahoma","Microsoft YaHei UI",sans-serif;
+}
+html[data-skin="winxp"] .app-header { box-shadow:inset 0 1px #ffffff70,0 4px 10px #163f6544; }
+html[data-skin="winxp"][data-skin] .collector-button { background:linear-gradient(#68a84a,#2d781d); }
+html[data-skin="mac"] {
+  --skin-bg:#d5dcec; --skin-surface:#f9fafceF; --skin-surface-2:#edf0f5;
+  --skin-text:#242936; --skin-muted:#606879; --skin-faint:#737a89;
+  --skin-border:#ccd2dd; --skin-border-strong:#b7c0ce;
+  --skin-accent:#176eda; --skin-accent-ink:#fff;
+  --skin-header-bg:linear-gradient(#fbfcffeb,#e9edf6eb); --skin-header-text:#303748;
+  --skin-title-bg:linear-gradient(#fbfcff,#edf0f5); --skin-title-text:#303748;
+  --skin-input-bg:#fff; --skin-hover:#e6edf9; --skin-button-bg:linear-gradient(#fff,#f0f2f7);
+  --skin-button-border:#c6cedb; --skin-selected-bg:#d8e8ff; --skin-selected-text:#12539c;
+  --skin-radius:13px; --skin-control-radius:7px; --skin-inset-shadow:inset 0 1px #fff;
+  --skin-shadow:0 12px 36px #28354e20; --skin-panel-shadow:0 12px 36px #28354e20;
+  --skin-wallpaper:radial-gradient(ellipse at 5% 15%,#eebca280,transparent 55%),radial-gradient(ellipse at 85% 95%,#8ba8dfc0,transparent 60%),linear-gradient(130deg,#f5e2d6,#d3ddf0 65%,#bdcce3);
+  --skin-font:"Segoe UI","Microsoft YaHei UI",sans-serif;
+}
+html[data-skin="mac"] :is(.app-header,.details-panel,.browser-popover,.selection-bar) { backdrop-filter:blur(18px); }
+html[data-skin="mac"] .brand-mark { transform:none; gap:3px; }
+html[data-skin="mac"] .brand-mark span { border-radius:3px; }
