@@ -2,6 +2,7 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { createReadStream } = require('node:fs');
+const sharp = require('sharp');
 
 const { VIDEO, AUDIO, MODEL, MODEL_NATIVE, PROJECT, FONT, SUPPORTED } = require('./media-formats.cjs');
 const { collectModelBundle, copyModelBundle, validateModelBundle, isSafeBundlePath } = require('./model-bundle.cjs');
@@ -1278,6 +1279,87 @@ class Library {
       delete asset.videoThumbnailRevision;
       await this._persist(draft);
       return this.snapshot();
+    });
+  }
+
+  refreshFontPreviews(ids, { expectedRoot, signal } = {}) {
+    return this._mutate(async () => {
+      signal?.throwIfAborted();
+      if (expectedRoot !== undefined && expectedRoot !== this.root) throw new Error('素材库已切换，请重新选择字体');
+      if (!Array.isArray(ids) || ids.length > 128 || ids.some(id => typeof id !== 'string' || !id)) throw new Error('请选择有效的字体素材');
+      const selected = this._ids(ids);
+      if (this.data.assets.some(asset => selected.has(asset.id) && !FONT.has(asset.ext))) throw new Error('请选择有效的字体素材');
+      const draft = clone(this.data), published = [], errors = [];
+      let committed = false;
+      const remove = filename => fs.unlink(filename).catch(error => { if (error.code !== 'ENOENT') throw error; });
+      const rollback = async record => {
+        if (record.replaced) await remove(record.destination);
+        if (record.savedPrevious) await fs.rename(record.backup, record.destination);
+        await remove(record.temporary);
+      };
+      const jpegInfo = async filename => {
+        const bytes = await fs.readFile(filename);
+        if (bytes[0] !== 0xff || bytes[1] !== 0xd8) throw new Error('字体封面不是 JPEG');
+        const image = sharp(bytes, { limitInputPixels: 16_000_000, failOn: 'warning' });
+        const information = await image.metadata();
+        if (information.format !== 'jpeg' || !information.width || !information.height) throw new Error('字体封面数据无效');
+        await image.raw().toBuffer();
+        return information;
+      };
+      try {
+        for (const asset of draft.assets) {
+          signal?.throwIfAborted();
+          if (!selected.has(asset.id) || asset.trashedAt || !this.createThumbnail) continue;
+          const relative = `thumbnails/${asset.id}.jpg`, destination = path.join(this.root, relative);
+          const record = { destination, temporary: `${destination}.${crypto.randomUUID()}.tmp`, backup: `${destination}.${crypto.randomUUID()}.previous`, replaced: false, savedPrevious: false };
+          let accepted = false;
+          try {
+            await this._checkManagedParent(relative);
+            const previous = await fileInfo(destination);
+            if (previous && (!previous.isFile() || previous.isSymbolicLink())) throw new Error('字体封面目标不是普通文件');
+            if (asset.thumbnail && asset.font?.family && asset.width > 0 && asset.height > 0 && previous && previous.size <= 16 * 1024 * 1024) {
+              try { await jpegInfo(destination); continue; } catch {}
+            }
+            await this._checkManagedParent(asset.filename);
+            const source = path.join(this.root, asset.filename), original = await fs.lstat(source);
+            if (!original.isFile() || original.isSymbolicLink() || importPathKey(await fs.realpath(source)) !== importPathKey(source)) throw new Error('字体原文件包含符号链接或不是普通文件');
+            if (await hashFile(source) !== asset.hash) throw new Error('字体原文件已变化，请重新导入');
+            signal?.throwIfAborted();
+            const metadata = await this.createThumbnail(source, record.temporary, { originalName: asset.name, signal });
+            signal?.throwIfAborted();
+            const generated = await fs.lstat(record.temporary);
+            if (!generated.isFile() || generated.isSymbolicLink() || generated.size < 4 || generated.size > 16 * 1024 * 1024 || importPathKey(await fs.realpath(record.temporary)) !== importPathKey(record.temporary)) throw new Error('字体封面数据无效');
+            const imageInfo = await jpegInfo(record.temporary);
+            const font = fontMetadata(metadata?.font, true);
+            if (!font?.family) throw new Error('字体预览缺少字体信息');
+            await this._checkManagedParent(asset.filename);
+            await this._checkManagedParent(relative);
+            const currentSource = await fs.lstat(source);
+            if (!currentSource.isFile() || currentSource.isSymbolicLink() || importPathKey(await fs.realpath(source)) !== importPathKey(source)) throw new Error('字体原文件包含符号链接或不是普通文件');
+            if (await hashFile(source) !== asset.hash) throw new Error('字体原文件已变化，请重新导入');
+            signal?.throwIfAborted();
+            if (previous) { await fs.rename(destination, record.backup); record.savedPrevious = true; }
+            await fs.rename(record.temporary, destination); record.replaced = true;
+            Object.assign(asset, { thumbnail: relative, width: imageInfo.width, height: imageInfo.height, font });
+            published.push(record); accepted = true;
+          } catch (error) {
+            signal?.throwIfAborted();
+            if (error.name === 'AbortError') throw error;
+            errors.push({ id: asset.id, message: error.message });
+          } finally {
+            if (!accepted) await rollback(record);
+          }
+        }
+        signal?.throwIfAborted();
+        if (published.length) await this._persist(draft);
+        committed = true;
+        return { snapshot: this.snapshot(), updated: published.length, errors };
+      } finally {
+        for (const record of published.reverse()) {
+          if (!committed) await rollback(record);
+          else if (record.savedPrevious) await remove(record.backup);
+        }
+      }
     });
   }
 

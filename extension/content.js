@@ -8,11 +8,13 @@
   const VIDEO_LINK = /\.(?:mp4|m4v|webm|mov|og[gv]|mkv|avi|mpe?g|flv|m3u8|mpd)$/i;
   const BROWSER_READ_TIMEOUT = 15000;
   const DESKTOP_RECEIPT_TIMEOUT = 320000;
+  const YOUTUBE_RECEIPT_TIMEOUT = 960000;
   let toastHost;
   let toastTimer;
   let toastReceipt;
   let recentGesture = null;
   let videoMenu;
+  let youtubeContext;
   const videoMenuEvents = new WeakSet();
   let captureSerial = 0;
   let activeCaptureId = null;
@@ -128,6 +130,7 @@
     if (/^(?:(?:www|platform)\.)?(?:x|twitter)\.com$/.test(page.hostname)) return globalThis.MosaicXVideo;
     if (/^(?:(?:www|player)\.)?vimeo\.com$/.test(page.hostname)) return globalThis.MosaicVimeoVideo;
     if (/^(?:[a-z0-9-]+\.)?pinterest\.com$/.test(page.hostname)) return globalThis.MosaicPinterestVideo;
+    if (globalThis.MosaicYouTubeVideo?.isPage(page)) return globalThis.MosaicYouTubeVideo;
     return null;
   }
   function socialTarget(video, path) {
@@ -186,8 +189,11 @@
     const height = Math.max(0, Math.min(bounds.bottom, artwork.bottom) - Math.max(bounds.top, artwork.top));
     return width * height >= Math.max(bounds.width * bounds.height, artwork.width * artwork.height) * 0.6;
   }
-  function siteVideoMenuPage() {
+  function siteVideoMenuPage(wideSearch = false) {
     const { hostname, pathname, protocol } = new URL(location.href);
+    if (globalThis.MosaicYouTubeVideo?.isPage(new URL(location.href))) {
+      return !wideSearch || Boolean(globalThis.MosaicYouTubeVideo.pageSource(location.href));
+    }
     if (protocol === 'https:' && /^(?:[a-z0-9-]+\.)?pinterest\.com$/.test(hostname)) return /^\/pin\/\d{1,32}\/?$/.test(pathname);
     if (protocol === 'https:' && /^(?:www\.)?instagram\.com$/.test(hostname)) return /^\/(?:[a-z0-9_.]+\/)?(?:reels?|p|tv)\/[a-z0-9_-]{5,32}\/?$/i.test(pathname);
     if (protocol === 'https:' && /^(?:www\.)?(?:x|twitter)\.com$/.test(hostname)) return /^\/(?:[a-z0-9_]+\/status|i\/web\/status)\/\d+(?:\/|$)/i.test(pathname);
@@ -209,7 +215,7 @@
     }
     // Social players can place deep overlays over a pointer-transparent video.
     // Only widen the search inside a dedicated video page with an unambiguous hit.
-    if (siteVideoMenuPage() && !path.some(node => ['A', 'BUTTON', 'INPUT', 'SELECT', 'TEXTAREA'].includes(node.tagName) ||
+    if (siteVideoMenuPage(true) && !path.some(node => ['A', 'BUTTON', 'INPUT', 'SELECT', 'TEXTAREA'].includes(node.tagName) ||
         ['button', 'menu', 'menuitem', 'slider'].includes(node.getAttribute('role')))) {
       const dialog = path.find(node => node.tagName === 'DIALOG' || node.getAttribute('role') === 'dialog');
       const visible = [...document.querySelectorAll('video')].filter(video => {
@@ -226,6 +232,10 @@
     const video = videoAt(path, event);
     if (video) return video;
     const site = socialTarget(null, path);
+    if (site && site.resolve === globalThis.MosaicYouTubeVideo) {
+      const source = site.resolve({ document, page: site.page, video: null, path });
+      if (source?.sourceType === 'youtube') return { ...source, kind: 'video', socialPageUrl: source.pageUrl };
+    }
     if (site && /vimeo\.com$/.test(site.page.hostname) && path.some(node => ['A', 'IFRAME'].includes(node.tagName))) {
       const source = site.resolve({ document, page: site.page, video: null, path, absolute, trustedMedia, singleVideo: false });
       const url = trustedMedia(source?.url);
@@ -338,12 +348,17 @@
         media.url = source;
         media.name = found.name || nameFor(social.video, source);
         media.socialPageUrl = found.pageUrl;
+        if (found.sourceType === 'youtube') {
+          media.sourceType = found.sourceType;
+          media.videoId = found.videoId;
+        }
         if (found.playback) media.playback = found.playback;
         delete media.error;
       }
     }
     if (media.error) throw Object.assign(new Error(media.error), { originalPage: videoPageLink(media.originalPage) });
     const result = { ...media, pageUrl: location.href, title: document.title };
+    if (media.sourceType === 'youtube') return result;
     if (media.playback) return result;
     if (media.kind === 'video' && /\.(m3u8|mpd)(?:$|[?#])/i.test(media.url)) throw new Error('这是分段流媒体，暂不能保存为视频文件。请使用网站提供的下载功能。');
     if (browserVideo && media.pageUrl && media.pageUrl !== location.href) return result;
@@ -420,7 +435,8 @@
       showCapture(captureId, '正在连接桌面 Mosaic…');
       submitted = true;
       const response = await deadline(() => chrome.runtime.sendMessage({ type: 'shitu:capture', media: prepared, clientCaptureId: captureId }),
-        DESKTOP_RECEIPT_TIMEOUT, '未收到保存确认，请在采集助手或 Mosaic 的「最近导入」核对结果。');
+        prepared.sourceType === 'youtube' ? YOUTUBE_RECEIPT_TIMEOUT : DESKTOP_RECEIPT_TIMEOUT,
+        '未收到保存确认，请在采集助手或 Mosaic 的「最近导入」核对结果。');
       if (!response?.ok) throw new Error(response?.error || '采集失败，请打开桌面软件重试。');
       if (!(Number.isSafeInteger(response.imported) && response.imported > 0) && !(Number.isSafeInteger(response.duplicates) && response.duplicates > 0)) throw new Error('桌面未确认素材入库，请在 Mosaic 中检查后重试。');
       const inTrash = !response.imported && response.existingAssets?.some(asset => asset.trashedAt);
@@ -472,6 +488,7 @@
     if (!event.isTrusted) return;
     recentGesture = null;
     if (ownsVideoMenuEvent(event)) { event.stopImmediatePropagation(); return; }
+    youtubeContext = null;
     dismissVideoMenu();
     if (event.button !== 2 || !event.altKey) return;
     const media = mediaAt(event);
@@ -485,6 +502,9 @@
   }, true);
   window.addEventListener('contextmenu', event => {
     if (!event.isTrusted) return;
+    if (globalThis.MosaicYouTubeVideo?.isPage(new URL(location.href)) && !ownsVideoMenuEvent(event)) {
+      youtubeContext = { media: mediaAt(event), pageUrl: location.href, at: performance.now() };
+    }
     const match = sameGesture(event);
     if (match && recentGesture.handled) {
       recentGesture = null;
@@ -551,6 +571,17 @@
       const options = { browserVideo: message.browserVideo === true };
       if (message.clientCaptureId) options.onRead = browserProgress(message.clientCaptureId);
       resolveMedia(message.media, options).then(media => sendResponse({ ok: true, media }), error => sendResponse({ ok: false, error: error.message }));
+      return true;
+    }
+    if (message?.type === 'shitu:resolve-youtube') {
+      const resolver = globalThis.MosaicYouTubeVideo;
+      const current = resolver?.isPage(new URL(location.href));
+      const selected = youtubeContext?.pageUrl === location.href && performance.now() - youtubeContext.at < 60000
+        ? youtubeContext.media : null;
+      const link = current && resolver.pageSource(message.linkUrl, location.href);
+      const media = selected?.kind === 'video' ? selected : link ? { ...link, kind: 'video', socialPageUrl: link.pageUrl } : null;
+      if (!media || !current) { sendResponse({ ok: false, error: '请在要下载的 YouTube 视频画面、标题或封面上右键。' }); return; }
+      resolveMedia(media).then(prepared => sendResponse({ ok: true, media: prepared }), error => sendResponse({ ok: false, error: error.message }));
       return true;
     }
   });

@@ -7,6 +7,7 @@ const fs = require('node:fs/promises');
 const { pathToFileURL } = require('node:url');
 const { LibraryManager } = require('./library-manager.cjs');
 const { createCollector } = require('./collector.cjs');
+const { downloadYouTube } = require('./youtube-download.cjs');
 const { mediaResponse } = require('./media-response.cjs');
 const FolderIconFiles = require('./folder-icons.cjs');
 const { createAssetExportService } = require('./asset-export-service.cjs');
@@ -81,6 +82,8 @@ let modelService;
 let similarImages;
 let fontService;
 let fontExporter;
+let fontThumbnailRecovery;
+const fontThumbnailAttempts = new WeakMap();
 let aeProjects;
 let aePreviewService;
 let bundleRepair;
@@ -240,12 +243,14 @@ async function switchLibrary(mode) {
     audioPreviewService?.invalidate();
     modelService?.invalidate();
     similarImages?.invalidate();
+    fontThumbnailRecovery?.controller.abort();
     fontService?.invalidate();
     aePreviewService?.invalidate();
     library=mode==='create'?await libraryManager.create(selected):mode==='migrate'?await libraryManager.migrate(selected):await libraryManager.open(selected);
     tasks.refresh();
     const snapshot=librarySnapshot();
     aePreviewService?.scheduleLibrary(library);
+    scheduleFontThumbnailRecovery(library);
     mainWindow.webContents.send('shitu:library-changed');
     sendHistory();
     return {snapshot};
@@ -279,6 +284,27 @@ async function createThumbnail(source, destination, options) {
   const thumb = image.resize({ width: Math.max(1, Math.round(width * scale)), height: Math.max(1, Math.round(height * scale)), quality: 'good' });
   await fs.writeFile(destination, thumb.toJPEG(86));
   return { width, height };
+}
+
+function scheduleFontThumbnailRecovery(owner) {
+  if (!owner || !fontService || typeof owner.refreshFontPreviews !== 'function' || closing) return;
+  if (fontThumbnailRecovery?.owner === owner) return;
+  fontThumbnailRecovery?.controller.abort();
+  const attempted = fontThumbnailAttempts.get(owner) || new Set();
+  fontThumbnailAttempts.set(owner, attempted);
+  const candidates = owner.snapshot().assets.filter(asset => FONT.has(asset.ext) && !asset.trashedAt &&
+    (!asset.thumbnail || !asset.font) && !attempted.has(`${asset.id}:${asset.hash}`)).slice(0, 32);
+  if (!candidates.length) return;
+  const job = { owner, controller: new AbortController(), task: null };
+  fontThumbnailRecovery = job;
+  job.task = (async () => {
+    for (const asset of candidates) {
+      if (library !== owner || closing || job.controller.signal.aborted) return;
+      attempted.add(`${asset.id}:${asset.hash}`);
+      const result = await owner.refreshFontPreviews([asset.id], { expectedRoot: owner.root, signal: job.controller.signal });
+      if (result.updated && library === owner && !closing) sendActionEvent('library-changed');
+    }
+  })().catch(() => {}).finally(() => { if (fontThumbnailRecovery === job) fontThumbnailRecovery = null; });
 }
 
 function assertTrustedSender(event) {
@@ -476,6 +502,7 @@ async function importPaths(paths, folderId = null) {
       sendActionEvent('import-progress', progress);
     } }));
     aePreviewService?.scheduleLibrary(owner);
+    scheduleFontThumbnailRecovery(owner);
     return { snapshot: owner.snapshot(), report };
   } finally { importing = false; }
 }
@@ -543,7 +570,12 @@ function bindHandlers() {
   checkedHandler('cancel-model-warmup', (id, expectedRoot, token) => modelService.cancelWarmHover(id, expectedRoot, token));
   checkedHandler('find-similar-images', (id, expectedRoot, token) => similarImages.search(requireLibrary(), id, expectedRoot, token));
   checkedHandler('cancel-similar-images', (expectedRoot, token) => similarImages.cancel(expectedRoot, token));
-  checkedHandler('prepare-font', (id, expectedRoot, faceIndex = 0) => fontService.prepare(requireLibrary(), id, expectedRoot, faceIndex));
+  checkedHandler('prepare-font', async (id, expectedRoot, faceIndex = 0) => {
+    const owner = requireLibrary();
+    const result = await fontService.prepare(owner, id, expectedRoot, faceIndex);
+    scheduleFontThumbnailRecovery(owner);
+    return result;
+  });
   checkedHandler('export-font-image', (id, expectedRoot, options) => {
     if (closing || switchingLibrary) throw new Error('请等待当前素材操作完成后再导出');
     return fontExporter.exportImage(id, expectedRoot, options);
@@ -785,6 +817,7 @@ async function createWindow() {
     }
     if (closing) return;
     closing = true;
+    fontThumbnailRecovery?.controller.abort();
     audioPreviewService?.invalidate();
     similarImages?.invalidate();
     Promise.resolve(videoTranscodeService?.shutdown()).then(() => Promise.all([transcodeSettings?.flush(), transcodePresets?.flush()])).then(() => library?.flush()).then(() => Promise.allSettled([transcodeDevices?.shutdown?.(), videoTranscoder?.shutdown(), audioEngine?.shutdown(), modelService?.shutdown(), fontExporter?.shutdown(), fontService?.shutdown(), aeProjects?.shutdown(), aePreviewService?.shutdown()])).then(() => { mayClose = true; mainWindow.close(); }).catch(error => {
@@ -881,6 +914,7 @@ else {
       if (historyBusy || closing) throw new Error('正在保存撤销或重做，暂时无法采集');
       return requireLibrary().importPaths(...args);
     }},getLibraryRoot:()=>library?.root,muxVimeoPlayback:videoEngine.muxVimeoPlayback,
+    downloadYouTube:options=>downloadYouTube({...options,ffmpegPath:path.join(__dirname,'..','video-runtime','ffmpeg.exe')}),
     listFolders:()=>requireLibrary().listFolders(),hasAsset:id=>requireLibrary().hasAsset(id),
     onLocate:result=>{
       if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed() ||
@@ -942,6 +976,7 @@ else {
     await createWindow();
     updateScheduler.start();
     aePreviewService.scheduleLibrary(library);
+    scheduleFontThumbnailRecovery(library);
   }).catch(error => {
     dialog.showErrorBox('Mosaic 无法启动', `${error.message}\n\n请保留库内文件，检查权限或使用备份恢复。`);
     app.quit();

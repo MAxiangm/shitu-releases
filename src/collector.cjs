@@ -12,6 +12,7 @@ const { Transform } = require('node:stream');
 const { stageVimeoHls, vimeoPlaybackUrl } = require('./vimeo-playback-source.cjs');
 const { stageVimeoDash } = require('./vimeo-dash-source.cjs');
 const { createBrowserMediaRelay, MESSAGE_LIMIT: BROWSER_MESSAGE_LIMIT } = require('./browser-media-relay.cjs');
+const { youtubePageUrl } = require('./youtube-download.cjs');
 
 const DEFAULT_ORIGIN = 'chrome-extension://mdleapcbplpefdgchdklofdnpjgokdhh';
 const INLINE_LIMIT = 20 * 1024 * 1024;
@@ -76,7 +77,8 @@ function validCaptureRequestId(value) { return typeof value === 'string' && CAPT
 function createCollector({ library, configPath, onImported = () => {}, onLocate,
   getLibraryRoot = () => library.root, listFolders = () => library.listFolders(), hasAsset = id => library.hasAsset(id),
   isReady=()=>true, allowedOrigin = DEFAULT_ORIGIN, port = 38475, allowPrivate = false, maxDownloadBytes = 512 * 1024 * 1024, timeout = 90000,
-  appVersion = require('../package.json').version, muxVimeoPlayback, playbackTimeout = 240000 } = {}) {
+  appVersion = require('../package.json').version, muxVimeoPlayback, playbackTimeout = 240000,
+  downloadYouTube, youtubeTimeout = 900000 } = {}) {
   let server, token, listeningPort, active = 0, disabledError, lastCapture;
   const sockets = new Set();
   const captures = new Map();
@@ -103,7 +105,8 @@ function createCollector({ library, configPath, onImported = () => {}, onLocate,
   function readyStatus() {
     const ready = Boolean(isReady());
     const id = ready ? libraryId(getLibraryRoot()) : null;
-    return { ready, captureProgress: true, vimeoBrowserRead: true, ...(muxVimeoPlayback ? { vimeoPlayback: true } : {}), ...(id ? { libraryId: id } : {}) };
+    return { ready, captureProgress: true, vimeoBrowserRead: true, ...(muxVimeoPlayback ? { vimeoPlayback: true } : {}),
+      ...(typeof downloadYouTube === 'function' ? { youtubeDownload: true } : {}), ...(id ? { libraryId: id } : {}) };
   }
   function currentDestination(destination, id) {
     if (destination === undefined) return null;
@@ -227,8 +230,18 @@ function createCollector({ library, configPath, onImported = () => {}, onLocate,
         if (!inline || !['data:', 'blob:'].includes(parsed.protocol) ||
             (parsed.protocol === 'data:' && !body.url.toLowerCase().startsWith(`data:${body.kind}/`))) throw new Error('素材地址只支持 HTTP、HTTPS 或浏览器提供的临时素材');
       }
-      const pageUrl = body.pageUrl ? webUrl(body.pageUrl,'来源页面').href : undefined;
+      let pageUrl = body.pageUrl ? webUrl(body.pageUrl,'来源页面').href : undefined;
       const playback = body.playback;
+      const youtube = body.sourceType === 'youtube';
+      if (body.sourceType !== undefined && !youtube) throw new Error('不支持这种视频来源');
+      if (youtube) {
+        if (body.kind !== 'video' || inline || playback !== undefined || body.browserRead !== undefined) throw new Error('YouTube 视频采集请求无效');
+        const canonical = youtubePageUrl(body.url);
+        if (body.videoId !== new URL(canonical).searchParams.get('v') || (pageUrl && youtubePageUrl(pageUrl) !== canonical)) throw new Error('YouTube 视频与来源页面不符');
+        if (typeof downloadYouTube !== 'function') throw new Error('请更新桌面 Mosaic 后采集 YouTube 视频');
+        source = new URL(canonical);
+        pageUrl = canonical;
+      }
       const stagePlayback = playback === 'hls' ? stageVimeoHls : playback === 'dash' ? stageVimeoDash : null;
       if (body.browserRead !== undefined && (body.browserRead !== true || !playback || !validCaptureRequestId(body.requestId))) {
         throw new Error('浏览器视频读取请求无效');
@@ -252,14 +265,15 @@ function createCollector({ library, configPath, onImported = () => {}, onLocate,
         if (inlineBytes.length > INLINE_LIMIT || inlineBytes.toString('base64') !== body.dataBase64) throw new Error('临时素材数据无效或超过 20 MB');
       }
       temporary = await fs.mkdtemp(path.join(os.tmpdir(),'shitu-capture-'));
-      const original = path.join(temporary,'download');
+      let original = path.join(temporary,'download');
+      let sourceTitle;
       if (inline) {
         await fs.writeFile(original,inlineBytes,{flag:'wx'});
         progress(job, 'receiving', { receivedBytes: inlineBytes.length, totalBytes: inlineBytes.length });
       }
       else {
         progress(job, 'downloading');
-        const deadline = AbortSignal.timeout(playback ? playbackTimeout : timeout);
+        const deadline = AbortSignal.timeout(youtube ? youtubeTimeout : playback ? playbackTimeout : timeout);
         const signal = cancellationSignal ? AbortSignal.any([deadline, cancellationSignal]) : deadline;
         operationSignal = signal;
         if (body.browserRead) browserSession = browserRelay.createSession(body.requestId, { signal });
@@ -279,7 +293,23 @@ function createCollector({ library, configPath, onImported = () => {}, onLocate,
             onBytes: bytes => progress(job, 'downloading', { receivedBytes: job.receivedBytes + bytes }),
             onHead: head => { if (playback === 'file' && Number.isSafeInteger(head.contentLength)) progress(job, 'downloading', { totalBytes: head.contentLength }); } });
         };
-        if (stagePlayback) {
+        if (youtube) {
+          progress(job, 'reading');
+          const media = await downloadYouTube({ url: source.href, directory: temporary, signal,
+            maxBytes: maxDownloadBytes, timeoutMs: youtubeTimeout, onProgress: event => {
+              const phase = event?.phase === 'merging' ? 'muxing' : event?.phase === 'reading' ? 'reading' : 'downloading';
+              const extra = {};
+              if (Number.isSafeInteger(event?.receivedBytes) && event.receivedBytes >= 0) extra.receivedBytes = event.receivedBytes;
+              if (Number.isSafeInteger(event?.totalBytes) && event.totalBytes > 0) extra.totalBytes = event.totalBytes;
+              progress(job, phase, extra);
+            } });
+          const relative = typeof media?.filePath === 'string' ? path.relative(temporary, media.filePath) : '';
+          if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) throw new Error('YouTube 下载结果路径无效');
+          const stat = await fs.lstat(media.filePath);
+          if (!stat.isFile() || stat.isSymbolicLink() || stat.size <= 0 || stat.size > maxDownloadBytes) throw new Error('YouTube 下载结果为空或超过大小上限');
+          original = media.filePath;
+          sourceTitle = typeof media.title === 'string' ? media.title : '';
+        } else if (stagePlayback) {
           const media = await stagePlayback({ url: source, directory: temporary, signal,
             read });
           progress(job, 'muxing');
@@ -293,7 +323,7 @@ function createCollector({ library, configPath, onImported = () => {}, onLocate,
       const format = identify(head.subarray(0,bytesRead));
       if (!format || format.kind !== body.kind) throw new Error('下载结果不是支持的图片或视频文件；网站可能返回了登录页面或分段流');
       if (inline && INLINE_MIME[format.ext] !== body.mimeType.toLowerCase()) throw new Error('临时素材 MIME 类型与文件内容不符');
-      let name = typeof body.name === 'string' ? body.name : '';
+      let name = youtube && sourceTitle ? sourceTitle : typeof body.name === 'string' ? body.name : '';
       if (!name && source) { try { name = decodeURIComponent(path.posix.basename(source.pathname)); } catch {} }
       if (!name) name = typeof body.title === 'string' ? body.title : '网页素材';
       name = name.replace(/[<>:"/\\|?*\x00-\x1f]/g,'_').replace(/\.[a-z0-9]{2,5}$/i,'').trim().slice(0,200) || '网页素材';
@@ -302,7 +332,7 @@ function createCollector({ library, configPath, onImported = () => {}, onLocate,
       if (body.destination !== undefined) currentDestination(body.destination, libraryId(getLibraryRoot()));
       operationSignal?.throwIfAborted();
       progress(job, 'importing', { name });
-      const sourceUrl = playback ? pageUrl : source?.href;
+      const sourceUrl = playback || youtube ? pageUrl : source?.href;
       const report = await library.importPaths([typed], { folderId, metadata:{name,...(sourceUrl ? {sourceUrl} : {}),...(pageUrl ? {pageUrl} : {})} });
       if (report?.errors?.length) throw new Error(report.errors[0].message || '素材写入素材库失败');
       if (!Number.isSafeInteger(report?.imported) || report.imported < 0 || !Number.isSafeInteger(report?.duplicates) || report.duplicates < 0 || !report.imported && !report.duplicates)
@@ -420,7 +450,7 @@ function createCollector({ library, configPath, onImported = () => {}, onLocate,
       const job = { status:'receiving', at:Date.now(), receivedBytes:0, name:typeof body?.name === 'string' ? body.name.slice(0,240) : '',
         kind:['image','video'].includes(body?.kind) ? body.kind : undefined };
       const record = { job, browserRead: body?.browserRead === true,
-        ...(body?.browserRead === true ? { cancelController: new AbortController() } : {}) };
+        ...(body?.browserRead === true || body?.sourceType === 'youtube' ? { cancelController: new AbortController() } : {}) };
       if (id !== undefined) {
         captures.delete(id);
         captures.set(id, record);

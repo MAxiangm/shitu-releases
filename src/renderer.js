@@ -3055,7 +3055,7 @@ function renderCaptureResult(result) {
   const box = $('collectorLastCapture');
   box.replaceChildren(); box.classList.toggle('hidden', !result);
   if (!result) return;
-  const messages = { receiving: '正在接收浏览器中的素材…', downloading: '正在下载网页素材，尚未入库…',
+  const messages = { reading: '正在解析 YouTube 视频…', receiving: '正在接收浏览器中的素材…', downloading: '正在下载网页素材，尚未入库…',
     muxing: '正在合并音视频，保留原画质和声音…', importing: '下载完成，正在写入素材库…' };
   let message = messages[result.status];
   if (result.status === 'error') message = `上次采集未保存：${result.error || '请重试'}`;

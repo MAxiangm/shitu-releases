@@ -3,7 +3,8 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { mediaResponse } = require('./media-response.cjs');
-const { MAX_FONT_BYTES, parseFont, extractCollectionFace } = require('./font-metadata.cjs');
+const { MAX_FONT_BYTES, parseFont } = require('./font-metadata.cjs');
+const { prepareFontPreview } = require('./font-compat.cjs');
 const FORMATS = new Set(['ttf', 'otf', 'woff', 'woff2', 'ttc', 'otc']);
 const MIME = { ttf: 'font/ttf', otf: 'font/otf', woff: 'font/woff', woff2: 'font/woff2' };
 const pathKey = value => process.platform === 'win32' ? path.resolve(value).toLowerCase() : path.resolve(value);
@@ -61,14 +62,15 @@ function createFontService({ BrowserWindow, cacheDir, getLibrary, thumbnailTimeo
     if (expectedHash && hash !== expectedHash) throw new Error('字体原文件已变化，请重新导入');
     const parsed = parseFont(buffer, { fallbackName: fallbackName || path.basename(source, path.extname(source)) });
     if (faceIndex >= parsed.faces.length) throw new Error('字体集合中的字型不存在');
-    let filename = source, format = parsed.format;
-    if (format === 'ttc') {
-      const extracted = extractCollectionFace(buffer, faceIndex); format = extracted.format;
-      filename = await cachedFace(extracted.buffer, hash, faceIndex, format);
+    const preview = prepareFontPreview(buffer, faceIndex);
+    let filename = source, format = preview.format;
+    if (parsed.format === 'ttc' || preview.repaired) {
+      filename = await cachedFace(preview.buffer, preview.repaired ? `${hash}-compat-v1` : hash, faceIndex, format);
     }
     if (closed) throw cancelled();
     const result = { filename, source, sourceStamp: stamp, fileStamp: fingerprint(await sourceStat(filename)), hash, format,
-      faceIndex, faces: parsed.faces.map(face => ({ ...face })), ...parsed.faces[faceIndex], faceCount: parsed.faces.length };
+      faceIndex, faces: parsed.faces.map(face => ({ ...face })), ...parsed.faces[faceIndex], faceCount: parsed.faces.length,
+      compatibility: preview.repaired };
     descriptors.set(cacheKey, result);
     while (descriptors.size > 64) descriptors.delete(descriptors.keys().next().value);
     return result;
@@ -78,9 +80,9 @@ function createFontService({ BrowserWindow, cacheDir, getLibrary, thumbnailTimeo
     const token = crypto.randomUUID(), url = `shitu://font/${token}/preview.${prepared.format}`;
     sessions.set(token, { prepared, owner, url });
     while (sessions.size > 64) sessions.delete(sessions.keys().next().value);
-    const { format, family, style, fullName, postscriptName, faceIndex, faceCount, sampleText, metadataFromFilename } = prepared;
+    const { format, family, style, fullName, postscriptName, faceIndex, faceCount, sampleText, metadataFromFilename, compatibility } = prepared;
     return { token, options: { url, format, family, style, fullName, ...(postscriptName ? { postscriptName } : {}), faceIndex, faceCount,
-      sampleText, ...(metadataFromFilename ? { metadataFromFilename: true } : {}), faces: prepared.faces.map(({ index, family, style, fullName }) => ({ index, family, style, fullName })) } };
+      sampleText, ...(metadataFromFilename ? { metadataFromFilename: true } : {}), ...(compatibility ? { compatibility: true } : {}), faces: prepared.faces.map(({ index, family, style, fullName }) => ({ index, family, style, fullName })) } };
   }
   function assetFrom(library, id) { return library.snapshot().assets.find(asset => asset.id === id); }
   function prepare(library, id, expectedRoot, faceIndex = 0) {

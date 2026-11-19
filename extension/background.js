@@ -4,12 +4,16 @@ const CONFIG_KEY = 'shituConnection';
 const LAST_KEY = 'shituLastCapture';
 const DESTINATIONS_KEY = 'shituCaptureDestinations';
 // A running worker can read an updated manifest without having loaded new code.
-const WORKER_VERSION = '0.11.20';
+const WORKER_VERSION = '0.11.21';
 const CAPTURE_TIMEOUT = 280000;
+const YOUTUBE_CAPTURE_TIMEOUT = 920000;
 const PAGE_READ_TIMEOUT = 22000;
 const PROGRESS_INTERVAL = 1000;
 const MAX_DATA_LENGTH = 28 * 1024 * 1024;
 const MENU_ID = 'shitu-save-media';
+const MENU_YOUTUBE_ID = 'shitu-save-youtube';
+const YOUTUBE_PAGE_PATTERNS = ['https://youtube.com/*', 'https://www.youtube.com/*', 'https://m.youtube.com/*',
+  'https://music.youtube.com/*', 'https://www.youtube-nocookie.com/*', 'https://youtube-nocookie.com/*'];
 const pending = new Map();
 const locateReceipts = new Map();
 const vimeoBrowserCaptures = new Map();
@@ -77,6 +81,7 @@ function appStatus(result) {
   return { ok: true, app: '拾图', version: result.version, ready: result.ready,
     ...(libraryId ? { libraryId } : {}), ...(result.captureProgress === true ? { captureProgress: true } : {}),
     ...(result.vimeoPlayback === true ? { vimeoPlayback: true } : {}),
+    ...(result.youtubeDownload === true ? { youtubeDownload: true } : {}),
     ...(result.vimeoBrowserRead === true ? { vimeoBrowserRead: true } : {}) };
 }
 
@@ -252,6 +257,26 @@ function checkedVimeoPlayback(input, source, senderUrl) {
   return { playback: input.playback, pageUrl: `https://vimeo.com/${id}` };
 }
 
+function isYouTubePage(value) {
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:' && !url.port && !url.username && !url.password &&
+      /^(?:(?:www|m|music)\.)?youtube\.com$|^(?:www\.)?youtube-nocookie\.com$/.test(url.hostname);
+  } catch { return false; }
+}
+
+function checkedYouTube(input, source, senderUrl) {
+  const id = source.searchParams.get('v');
+  if (!isYouTubePage(senderUrl) || input.kind !== 'video' || source.protocol !== 'https:' ||
+      source.hostname !== 'www.youtube.com' || source.port || source.pathname !== '/watch' || source.hash ||
+      !/^[A-Za-z0-9_-]{11}$/.test(id || '') || input.videoId !== id ||
+      source.href !== `https://www.youtube.com/watch?v=${id}` ||
+      Object.hasOwn(input, 'dataBase64') || Object.hasOwn(input, 'playback') || Object.hasOwn(input, 'browserRead')) {
+    throw new Error('YouTube 视频或来源页面无效。');
+  }
+  return { sourceType: 'youtube', videoId: id, pageUrl: source.href };
+}
+
 function checkedMedia(input, senderUrl) {
   if (!input || typeof input !== 'object' || !['image', 'video'].includes(input.kind)) throw new Error('不是可采集的图片或视频。');
   if (typeof input.url !== 'string' || input.url.length > 8192) throw new Error('素材地址过长或无效。');
@@ -260,6 +285,8 @@ function checkedMedia(input, senderUrl) {
   try { parsed = new URL(url); } catch { throw new Error('素材地址无效。'); }
   if (!['http:', 'https:', 'data:', 'blob:'].includes(parsed.protocol)) throw new Error('不支持这种素材地址。');
   if (parsed.username || parsed.password) throw new Error('素材地址不能包含账号密码。');
+  if (Object.hasOwn(input, 'sourceType') && input.sourceType !== 'youtube') throw new Error('不支持这种视频来源。');
+  const youtube = input.sourceType === 'youtube' ? checkedYouTube(input, parsed, senderUrl) : null;
   const playback = Object.hasOwn(input, 'playback')
     ? checkedVimeoPlayback(input, parsed, acceptedSocialPage(input.socialPageUrl, senderUrl) || senderUrl) : null;
   if (!playback && input.kind === 'video' && /\.(m3u8|mpd)(?:$|[?#])/i.test(url)) {
@@ -272,6 +299,7 @@ function checkedMedia(input, senderUrl) {
     title: safeText(input.title, 500),
     pageUrl: safeText(input.pageUrl, 8192),
     ...playback,
+    ...youtube,
   };
   const temporary = ['data:', 'blob:'].includes(parsed.protocol);
   const inline = Object.hasOwn(input, 'dataBase64');
@@ -416,7 +444,7 @@ function startVimeoBrowserRead(requestId, config, sender) {
 }
 
 function captureProgress(value) {
-  if (!['receiving', 'downloading', 'muxing', 'importing', 'complete'].includes(value?.phase)) return null;
+  if (!['reading', 'receiving', 'downloading', 'muxing', 'importing', 'complete'].includes(value?.phase)) return null;
   const receivedBytes = Number.isSafeInteger(value.receivedBytes) && value.receivedBytes >= 0 ? value.receivedBytes : 0;
   const knownTotal = Number.isSafeInteger(value.totalBytes) && value.totalBytes > 0 && value.totalBytes >= receivedBytes;
   return { phase: value.phase, receivedBytes, ...(knownTotal ? { totalBytes: value.totalBytes } : {}) };
@@ -429,6 +457,7 @@ function displayBytes(bytes) {
 }
 
 function progressMessage(progress) {
+  if (progress.phase === 'reading') return '正在解析 YouTube 视频…';
   if (progress.phase === 'receiving') return '桌面正在接收素材…';
   if (progress.phase === 'muxing') return '正在合并音视频（不重新编码）…';
   if (progress.phase === 'importing') return '正在写入素材库，等待保存确认…';
@@ -482,7 +511,7 @@ async function capture(input, sender, clientCaptureId) {
   let body, key, requestId, resolveShared, rejectShared;
   try {
     body = checkedMedia(input, sender?.url);
-    if (!body.playback) {
+    if (!body.playback && body.sourceType !== 'youtube') {
       if (/^https?:/i.test(sender?.url || '')) body.pageUrl = (body.kind === 'video' && acceptedSocialPage(input.socialPageUrl, sender.url)) || sender.url;
       else if (!/^https?:/i.test(body.pageUrl || '') && /^https?:/i.test(sender?.tab?.url || '')) body.pageUrl = sender.tab.url;
     }
@@ -518,13 +547,14 @@ async function capture(input, sender, clientCaptureId) {
       const payload = { ...media, requestId, ...(destination ? { destination } : {}) };
       async function attempt() {
         if (media.playback && !connection.status.vimeoPlayback) throw issue('请将桌面 Mosaic 更新到支持 Vimeo 播放采集的版本。', 'INCOMPATIBLE_APP');
+        if (media.sourceType === 'youtube' && !connection.status.youtubeDownload) throw issue('请将桌面 Mosaic 更新到支持 YouTube 下载的版本。', 'INCOMPATIBLE_APP');
         if (media.browserRead && !connection.status.vimeoBrowserRead) throw issue('请更新桌面 Mosaic 后重试 Vimeo 浏览器采集。', 'INCOMPATIBLE_APP');
         await publish(media.dataBase64 ? 'receiving' : 'downloading',
           media.dataBase64 ? '正在把素材交给桌面…' : '正在下载素材…');
         const stop = connection.status.captureProgress ? watchProgress(requestId, connection.config, publish) : null;
         const browserRead = media.browserRead ? startVimeoBrowserRead(requestId, connection.config, sender) : null;
         try {
-          const response = localRequest('/v1/capture', payload, connection.config, CAPTURE_TIMEOUT);
+          const response = localRequest('/v1/capture', payload, connection.config, media.sourceType === 'youtube' ? YOUTUBE_CAPTURE_TIMEOUT : CAPTURE_TIMEOUT);
           return await (browserRead ? Promise.race([response, browserRead.failure]) : response);
         } finally { browserRead?.stop(); stop?.(); }
       }
@@ -544,7 +574,7 @@ async function capture(input, sender, clientCaptureId) {
         await publish('reading', '正在通过当前浏览器读取 Vimeo 视频，尚未保存…');
         result = await submit({ ...body, browserRead: true });
       } else {
-        if (body.playback || error.code !== 'VIDEO_BROWSER_READ') throw error;
+        if (body.playback || body.sourceType === 'youtube' || error.code !== 'VIDEO_BROWSER_READ') throw error;
         await publish('reading', '正在从当前网页读取视频，尚未保存…');
         const browserVideo = await readVideoFromPage(body, sender, job.clientCaptureId);
         if (!browserVideo) throw error;
@@ -605,19 +635,26 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 function createMenu() {
   chrome.contextMenus.removeAll(() => {
     chrome.contextMenus.create({ id: MENU_ID, title: '保存到 Mosaic', contexts: ['image', 'video'], documentUrlPatterns: ['http://*/*', 'https://*/*'] }, () => void chrome.runtime.lastError);
+    chrome.contextMenus.create({ id: MENU_YOUTUBE_ID, title: '下载 YouTube 视频到 Mosaic', contexts: ['page', 'link'], documentUrlPatterns: YOUTUBE_PAGE_PATTERNS }, () => void chrome.runtime.lastError);
   });
 }
 function initialize() { createMenu(); ensureConnection().catch(() => {}); }
 chrome.runtime.onInstalled.addListener(initialize);
 chrome.runtime.onStartup.addListener(initialize);
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
-  if (info.menuItemId !== MENU_ID || !tab?.id) return;
+  if (![MENU_ID, MENU_YOUTUBE_ID].includes(info.menuItemId) || !tab?.id) return;
   const sender = { tab, url: info.frameUrl || info.pageUrl, frameId: info.frameId || 0 };
   notifyTab(sender, '正在准备采集，尚未保存…');
   try {
     let media = { url: info.srcUrl, kind: info.mediaType === 'video' ? 'video' : 'image', pageUrl: info.frameUrl || info.pageUrl, title: tab.title };
     const temporary = /^(blob|data):/i.test(info.srcUrl || '');
-    if (temporary || media.kind === 'image') {
+    let youtubeResolved = false;
+    if (info.menuItemId === MENU_YOUTUBE_ID || isYouTubePage(sender.url)) {
+      const resolved = await readFromPage(sender, { type: 'shitu:resolve-youtube', linkUrl: info.linkUrl });
+      if (resolved?.ok && resolved.media?.sourceType === 'youtube') { media = resolved.media; youtubeResolved = true; }
+      else if (info.menuItemId === MENU_YOUTUBE_ID || media.kind === 'video') throw new Error(resolved?.error || '请在 YouTube 视频画面或视频链接上右键。');
+    }
+    if (!youtubeResolved && (temporary || media.kind === 'image')) {
       let resolved;
       try { resolved = await readFromPage(sender, { type: 'shitu:resolve-media', media }); }
       catch (error) { if (temporary) throw error.code === 'PAGE_READ_TIMEOUT' ? error : new Error('无法读取临时素材，请刷新网页后重试。'); }

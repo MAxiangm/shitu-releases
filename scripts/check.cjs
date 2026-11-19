@@ -4,6 +4,7 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const { root, electronPath } = require('./runtime.cjs');
 const { verifyVideoRuntime } = require('./prepare-video-runtime.cjs');
+const { verifyYouTubeRuntime } = require('./prepare-youtube-runtime.cjs');
 function walk(directory) {
   return fs.readdirSync(directory, { withFileTypes: true }).flatMap(entry =>
     entry.isDirectory() ? walk(path.join(directory, entry.name)) : [path.join(directory, entry.name)]);
@@ -22,6 +23,6 @@ for (const file of ['src/main.cjs', 'src/preload.cjs', 'src/index.html', 'assets
   if (!fs.existsSync(path.join(root, file))) throw new Error(`Missing recovered resource: ${file}`);
 }
 const sharp = require('sharp');
-verifyVideoRuntime().then(manifest => {
-  console.log(`Syntax OK: ${files.length} JavaScript files; sharp ${sharp.versions.sharp}; Electron: ${electronPath()}; FFmpeg: ${manifest.version}`);
+Promise.all([verifyVideoRuntime(), verifyYouTubeRuntime()]).then(([manifest, youtube]) => {
+  console.log(`Syntax OK: ${files.length} JavaScript files; sharp ${sharp.versions.sharp}; Electron: ${electronPath()}; FFmpeg: ${manifest.version}; YouTube: ${youtube.components.map(item => `${item.name} ${item.version}`).join(', ')}`);
 }).catch(error => { console.error(error.message); process.exitCode = 1; });

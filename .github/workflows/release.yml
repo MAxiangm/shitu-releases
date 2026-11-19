@@ -2,6 +2,11 @@ name: Build Windows release
 
 on:
   workflow_dispatch:
+    inputs:
+      publish:
+        description: 'Publish this version after all validation passes'
+        type: boolean
+        default: false
   push:
     tags:
       - 'v*'
@@ -86,7 +91,7 @@ jobs:
             ai-runtime
             node_modules
             video-runtime
-          key: shitu-windows-binaries-${{ hashFiles('build-resources.json', 'video-runtime-manifest.json') }}
+          key: shitu-windows-binaries-${{ hashFiles('build-resources.json', 'video-runtime-manifest.json', 'youtube-runtime-manifest.json') }}
       - name: Restore binary dependencies from verified first release
         if: steps.resources.outputs.cache-hit != 'true'
         shell: pwsh
@@ -98,6 +103,7 @@ jobs:
       - name: Prepare video decoder and DXV test samples
         run: |
           node scripts/prepare-video-runtime.cjs
+          node scripts/prepare-youtube-runtime.cjs
           node scripts/prepare-video-test-fixtures.cjs
       - name: Prepare verified model test samples
         run: node scripts/prepare-model-test-fixtures.cjs
@@ -157,10 +163,12 @@ jobs:
       - name: Build installer and update manifest
         run: node scripts/build-installer.cjs
       - name: Publish complete release
-        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.publish)
         env:
           GH_TOKEN: ${{ github.token }}
-        run: node scripts/publish-github.cjs --publish
+        run: |
+          node -e "const fs=require('node:fs');const text=fs.readFileSync('release-notes.md','utf8');fs.writeFileSync('dist/release-notes-current.md',text.split(/\r?\n(?=## )/)[0].trim()+'\n');"
+          node scripts/publish-github.cjs --publish --notes-file dist/release-notes-current.md
       - name: Upload manual validation build
         if: github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v7
