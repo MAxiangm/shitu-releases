@@ -50,13 +50,42 @@ test('a feed player needs one matching post link and cannot reuse a different ca
   assert.equal(resolve(input(metadata(post('Elsewhere')))), null);
 });
 
-test('private, gated, download-disabled and unscoped carousel records do not expose media', () => {
-  for (const fields of [{ user: { is_private: true } }, { allows_download: false },
-    { clips_metadata: { download_enabled: false } }, { gating_ruling: 'LOGIN_REQUIRED' },
+test('private, gated, live, protected and unscoped carousel records do not expose media', () => {
+  for (const fields of [{ user: { is_private: true } }, { is_live: true }, { gating_ruling: 'LOGIN_REQUIRED' },
     { if_not_gated_logged_out: null }, { is_drm_protected: true }]) {
     assert.match(resolve(input(metadata(post('OnTarget', fields), { og: [source] }))).error, /下载受限/);
   }
   assert.equal(resolve(input(metadata(post('OnTarget', { media_type: 8 }), { og: [source] }))), null);
+});
+
+test('Instagram save-button flags do not reject a matching readable video', () => {
+  for (const key of ['can_download', 'is_downloadable', 'downloadable', 'download_allowed',
+    'allows_download', 'allow_download', 'allow_downloads', 'download_enabled', 'is_download_enabled', 'viewer_can_download']) {
+    const fields = { [key]: false, clips_metadata: { [key]: false } };
+    assert.equal(resolve(input(metadata(post('OnTarget', fields)))).url, source, key);
+    // A presentation flag cannot allow reuse of a different post's media.
+    assert.equal(resolve(input(metadata(post('Elsewhere', fields)))), null, key);
+  }
+});
+
+test('Instagram page fallback identifies the selected single video and retains actual restrictions', () => {
+  const selected = input(metadata(post('OnTarget', { video_versions: [], allows_download: false })),
+    { video: { currentSrc: 'blob:https://www.instagram.com/selected' } });
+  assert.equal(resolve(selected), null);
+  assert.equal(resolve.selectedPage(selected).url, home.href);
+  assert.equal(resolve.selectedPage(selected).videoId, 'OnTarget');
+  const embedded = input(metadata({}), { page: new URL('https://www.instagram.com/reel/OnTarget/embed/?utm_source=test') });
+  assert.equal(resolve.selectedPage(embedded).url, home.href);
+  for (const fields of [{ is_drm_protected: true }, { is_live: true },
+    { user: { is_private: true } }, { gating_ruling: 'LOGIN_REQUIRED' }]) {
+    assert.equal(resolve.selectedPage(input(metadata(post('OnTarget', fields)))).blocked, true);
+  }
+  assert.equal(resolve.selectedPage(input(metadata(post('OnTarget', { media_type: 8 })))), null);
+  assert.equal(resolve.selectedPage({ ...selected, video: { mediaKeys: {} } }).blocked, true);
+  assert.equal(resolve.selectedPage({ ...selected, video: null }), null);
+  assert.equal(resolve.selectedPage({ ...selected, video: { isConnected: false } }), null);
+  assert.equal(resolve.selectedPage({ ...selected, page: new URL('https://www.instagram.com/'), singleVideo: false }), null);
+  assert.equal(resolve.selectedPage({ ...selected, document: { ...selected.document, defaultView: { location: { href: 'https://www.instagram.com/reel/OtherPost/' } } } }), null);
 });
 
 test('Instagram metadata requires the same canonical page and a genuine video CDN', () => {
@@ -128,7 +157,7 @@ test('Instagram SPA source lookup reads the same post only after current documen
 });
 
 test('Instagram async lookup cannot erase current restrictions or retrieve an unrelated post', async () => {
-  const blocked = asynchronousPage({ raw: post('OnTarget', { allows_download: false }) });
+  const blocked = asynchronousPage({ raw: post('OnTarget', { user: { is_private: true } }) });
   assert.match((await resolve.resolveAsync(blocked.context)).error, /下载受限/);
   assert.equal(blocked.requests.length, 0);
   const other = asynchronousPage({ fetched: post('Elsewhere') });

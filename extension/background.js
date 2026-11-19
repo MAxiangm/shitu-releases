@@ -1,12 +1,21 @@
 'use strict';
 
+if (typeof importScripts === 'function') importScripts('video-page-source.js', 'youtube-browser-source.js');
+
 const CONFIG_KEY = 'shituConnection';
 const LAST_KEY = 'shituLastCapture';
 const DESTINATIONS_KEY = 'shituCaptureDestinations';
 // A running worker can read an updated manifest without having loaded new code.
-const WORKER_VERSION = '0.11.21';
+const WORKER_VERSION = '0.11.27';
+const BROWSER_SESSION_SITES = {
+  youtube: { label: 'YouTube', domain: 'youtube.com', capability: 'youtubeBrowserSession', field: 'youtubeSession' },
+  bilibili: { label: 'Bilibili', domain: 'bilibili.com', capability: 'bilibiliBrowserSession', field: 'bilibiliSession' }
+};
+const MAX_SESSION_COOKIES = 512;
+const MAX_SESSION_BYTES = 512 * 1024;
 const CAPTURE_TIMEOUT = 280000;
 const YOUTUBE_CAPTURE_TIMEOUT = 920000;
+const PAGE_VIDEO_CAPTURE_TIMEOUT = 31 * 60000;
 const PAGE_READ_TIMEOUT = 22000;
 const PROGRESS_INTERVAL = 1000;
 const MAX_DATA_LENGTH = 28 * 1024 * 1024;
@@ -34,6 +43,51 @@ function checkedConfig(config) {
 
 function issue(message, code) { const error = new Error(message); error.code = code; return error; }
 
+async function mayReadBrowserSession(site) {
+  if (!chrome.permissions?.contains) return false;
+  try { return await chrome.permissions.contains({ permissions: ['cookies'], origins: [`https://*.${site.domain}/*`] }); }
+  catch { return false; }
+}
+
+async function readBrowserSession(sender, site) {
+  const unavailable = () => issue(`无法读取当前 Chrome 的 ${site.label} 登录，请确认页面仍然打开后重试。`, 'VIDEO_BROWSER_SESSION_INVALID');
+  if (!Number.isInteger(sender?.tab?.id) || sender.tab.incognito) {
+    throw issue(`请在普通 Chrome 窗口中使用当前 ${site.label} 登录。`, 'VIDEO_BROWSER_SESSION_INVALID');
+  }
+  try {
+    const stores = await chrome.cookies.getAllCookieStores();
+    const matching = Array.isArray(stores) ? stores.filter(store => Array.isArray(store?.tabIds) && store.tabIds.includes(sender.tab.id)) : [];
+    if (matching.length !== 1 || typeof matching[0].id !== 'string' || !matching[0].id) throw unavailable();
+    const values = await chrome.cookies.getAll({ domain: site.domain, storeId: matching[0].id });
+    if (!Array.isArray(values)) throw unavailable();
+    const capturedAt = Date.now(), now = capturedAt / 1000, cookies = [];
+    for (const cookie of values) {
+      if (!cookie || typeof cookie !== 'object' || Object.hasOwn(cookie, 'partitionKey') || cookie.partitionKeyOpaque === true) continue;
+      const domain = typeof cookie.domain === 'string' ? cookie.domain.toLowerCase() : '';
+      const hostname = domain.replace(/^\./, '');
+      if (!/^[a-z0-9-]+(?:\.[a-z0-9-]+)*$/.test(hostname) ||
+          hostname !== site.domain && !hostname.endsWith(`.${site.domain}`)) continue;
+      if (typeof cookie.path !== 'string' || !cookie.path.startsWith('/') ||
+          typeof cookie.name !== 'string' || !cookie.name || typeof cookie.value !== 'string' ||
+          [domain, cookie.path, cookie.name, cookie.value].some(value => /[\x00-\x1f\x7f]/.test(value)) ||
+          ['secure', 'httpOnly', 'hostOnly', 'session'].some(key => typeof cookie[key] !== 'boolean')) continue;
+      const expiration = cookie.expirationDate;
+      if (expiration !== undefined && (typeof expiration !== 'number' || !Number.isFinite(expiration) || expiration <= now)) continue;
+      if (!cookie.session && expiration === undefined) continue;
+      cookies.push({ domain, path: cookie.path, name: cookie.name, value: cookie.value,
+        secure: cookie.secure, httpOnly: cookie.httpOnly, hostOnly: cookie.hostOnly, session: cookie.session,
+        ...(cookie.session || expiration === undefined ? {} : { expirationDate: expiration }) });
+      if (cookies.length > MAX_SESSION_COOKIES) throw unavailable();
+    }
+    const session = { capturedAt, cookies };
+    if (new TextEncoder().encode(JSON.stringify(session)).byteLength > MAX_SESSION_BYTES) throw unavailable();
+    return session;
+  } catch {
+    // Browser diagnostics can contain session data; only return a fixed message.
+    throw unavailable();
+  }
+}
+
 async function requestLocal(port, route, body, token, timeout) {
   if (!Number.isInteger(port) || port < 38475 || port > 38484) throw issue('本机采集端口无效。', 'INVALID_CONNECTION');
   const abort = new AbortController();
@@ -60,7 +114,7 @@ async function requestLocal(port, route, body, token, timeout) {
       throw issue('Mosaic 返回了无效响应，请更新软件和扩展。', 'INVALID_RESPONSE');
     }
     if (!response.ok || !result?.ok) {
-      const captureCodes = ['VIDEO_BROWSER_READ', 'VIMEO_BROWSER_READ', 'CAPTURE_LIBRARY_CHANGED', 'CAPTURE_FOLDER_MISSING', 'CAPTURE_PENDING'];
+      const captureCodes = ['VIDEO_BROWSER_READ', 'VIMEO_BROWSER_READ', 'VIDEO_SOURCE_FAILED', 'VIDEO_INCOMPLETE', 'AUTH_REQUIRED', 'NETWORK', 'UNSUPPORTED', 'CAPTURE_LIBRARY_CHANGED', 'CAPTURE_FOLDER_MISSING', 'CAPTURE_PENDING', 'VIDEO_BROWSER_SESSION_INVALID', 'VIDEO_BROWSER_SESSION_EXPIRED', 'VIDEO_BROWSER_LOGIN_REQUIRED', 'VIDEO_BROWSER_PERMISSION_REQUIRED'];
       const code = route === '/v1/capture' && captureCodes.includes(result?.code) ? result.code : 'SERVER_ERROR';
       throw issue(result?.error || `请求失败（${response.status}）`, code);
     }
@@ -82,6 +136,10 @@ function appStatus(result) {
     ...(libraryId ? { libraryId } : {}), ...(result.captureProgress === true ? { captureProgress: true } : {}),
     ...(result.vimeoPlayback === true ? { vimeoPlayback: true } : {}),
     ...(result.youtubeDownload === true ? { youtubeDownload: true } : {}),
+    ...(result.youtubeBrowserSession === true ? { youtubeBrowserSession: true } : {}),
+    ...(result.bilibiliBrowserSession === true ? { bilibiliBrowserSession: true } : {}),
+    ...(result.youtubeBrowserRead === true ? { youtubeBrowserRead: true } : {}),
+    ...(result.siteVideoDownload === true ? { siteVideoDownload: true } : {}),
     ...(result.vimeoBrowserRead === true ? { vimeoBrowserRead: true } : {}) };
 }
 
@@ -277,16 +335,55 @@ function checkedYouTube(input, source, senderUrl) {
   return { sourceType: 'youtube', videoId: id, pageUrl: source.href };
 }
 
+function checkedSitePage(input, senderUrl) {
+  const source = globalThis.MosaicVideoPages?.videoPageSource(input?.url);
+  if (!source || source.site !== input.site || source.videoId !== input.videoId || source.url !== input.url ||
+      globalThis.MosaicVideoPages.siteForUrl(senderUrl) !== source.site) throw new Error('视频帖子与来源页面不符。');
+  return source;
+}
+
 function checkedMedia(input, senderUrl) {
   if (!input || typeof input !== 'object' || !['image', 'video'].includes(input.kind)) throw new Error('不是可采集的图片或视频。');
+  if (['youtubeSession', 'bilibiliSession'].some(key => Object.hasOwn(input, key))) throw issue('网页不能提供视频网站登录数据。', 'VIDEO_BROWSER_SESSION_INVALID');
   if (typeof input.url !== 'string' || input.url.length > 8192) throw new Error('素材地址过长或无效。');
   const url = input.url;
   let parsed;
   try { parsed = new URL(url); } catch { throw new Error('素材地址无效。'); }
   if (!['http:', 'https:', 'data:', 'blob:'].includes(parsed.protocol)) throw new Error('不支持这种素材地址。');
   if (parsed.username || parsed.password) throw new Error('素材地址不能包含账号密码。');
-  if (Object.hasOwn(input, 'sourceType') && input.sourceType !== 'youtube') throw new Error('不支持这种视频来源。');
+  if (Object.hasOwn(input, 'sourceType') && !['youtube', 'site-video', 'youtube-browser'].includes(input.sourceType)) throw new Error('不支持这种视频来源。');
   const youtube = input.sourceType === 'youtube' ? checkedYouTube(input, parsed, senderUrl) : null;
+  if (input.sourceType === 'youtube-browser') {
+    const browser = isYouTubePage(senderUrl) && globalThis.MosaicYouTubeBrowser?.checkedSource(input);
+    if (!browser || ['dataBase64', 'playback', 'browserRead', 'pageFallback', 'youtubeSelectionId'].some(key => Object.hasOwn(input, key))) {
+      throw new Error('YouTube 浏览器视频来源无效。');
+    }
+    return { ...browser, name: safeText(input.name, 240), title: safeText(input.title, 500) };
+  }
+  let siteVideo = null, pageFallback = null;
+  if (input.sourceType === 'site-video') {
+    if (input.kind !== 'video' || Object.hasOwn(input, 'dataBase64') || Object.hasOwn(input, 'playback') || Object.hasOwn(input, 'browserRead') || Object.hasOwn(input, 'pageFallback')) {
+      throw new Error('视频帖子下载请求无效。');
+    }
+    const source = checkedSitePage(input, senderUrl);
+    siteVideo = { sourceType: 'site-video', ...source, pageUrl: source.url };
+  }
+  if (Object.hasOwn(input, 'pageFallback')) {
+    if (input.kind !== 'video' || input.sourceType || !input.pageFallback || typeof input.pageFallback !== 'object') throw new Error('视频帖子后备地址无效。');
+    pageFallback = checkedSitePage(input.pageFallback, senderUrl);
+    const provenance = globalThis.MosaicVideoPages?.videoPageSource(input.socialPageUrl || input.pageUrl);
+    if (!provenance || provenance.site !== pageFallback.site || provenance.videoId !== pageFallback.videoId) throw new Error('视频帖子后备地址与选中视频不符。');
+  }
+  const expectations = {};
+  if (Object.hasOwn(input, 'expectedDuration')) {
+    if (input.kind !== 'video' || typeof input.expectedDuration !== 'number' || !Number.isFinite(input.expectedDuration) ||
+        input.expectedDuration <= 0 || input.expectedDuration > 86400) throw new Error('视频预期时长无效。');
+    if (!youtube) expectations.expectedDuration = input.expectedDuration;
+  }
+  if (Object.hasOwn(input, 'expectedAudio')) {
+    if (input.kind !== 'video' || input.expectedAudio !== true) throw new Error('视频预期音轨无效。');
+    if (!youtube) expectations.expectedAudio = true;
+  }
   const playback = Object.hasOwn(input, 'playback')
     ? checkedVimeoPlayback(input, parsed, acceptedSocialPage(input.socialPageUrl, senderUrl) || senderUrl) : null;
   if (!playback && input.kind === 'video' && /\.(m3u8|mpd)(?:$|[?#])/i.test(url)) {
@@ -300,7 +397,16 @@ function checkedMedia(input, senderUrl) {
     pageUrl: safeText(input.pageUrl, 8192),
     ...playback,
     ...youtube,
+    ...siteVideo,
+    ...(pageFallback ? { pageFallback, pageUrl: pageFallback.url } : {}),
+    ...expectations,
   };
+  if (Object.hasOwn(input, 'youtubeSelectionId')) {
+    if (!youtube || typeof input.youtubeSelectionId !== 'string' || !/^[0-9]+-[0-9]+$/.test(input.youtubeSelectionId) || input.youtubeSelectionId.length > 80) {
+      throw new Error('YouTube 所选视频凭据无效。');
+    }
+    body.youtubeSelectionId = input.youtubeSelectionId;
+  }
   const temporary = ['data:', 'blob:'].includes(parsed.protocol);
   const inline = Object.hasOwn(input, 'dataBase64');
   if (temporary || inline) {
@@ -347,7 +453,8 @@ async function readVideoFromPage(body, sender, clientCaptureId) {
   });
   const media = reply?.media;
   if (!reply?.ok || media?.url !== body.url || media.kind !== 'video' || !Object.hasOwn(media, 'dataBase64')) return null;
-  return checkedMedia({ ...body, dataBase64: media.dataBase64, mimeType: media.mimeType });
+  return checkedMedia({ ...body, dataBase64: media.dataBase64, mimeType: media.mimeType,
+    ...(body.pageFallback ? { socialPageUrl: body.pageFallback.url } : {}) }, sender.url);
 }
 
 function sameCaptureDocument(expected, actual) {
@@ -359,10 +466,10 @@ function sameCaptureDocument(expected, actual) {
 async function receiveVimeoBrowserData(message, sender) {
   const job = vimeoBrowserCaptures.get(message.requestId);
   if (!job || job.stopped || job.readId !== message.readId || !sameCaptureDocument(job.sender, sender)) {
-    throw new Error('Vimeo 浏览器读取任务已结束或网页已变化。');
+    throw new Error('视频浏览器读取任务已结束或网页已变化。');
   }
   if (!Number.isSafeInteger(message.sequence) || message.sequence !== job.sequence) {
-    throw new Error('Vimeo 浏览器数据顺序无效。');
+    throw new Error('视频浏览器数据顺序无效。');
   }
   const result = await localRequest('/v1/capture-browser-data', {
     requestId: message.requestId, readId: message.readId, sequence: message.sequence,
@@ -375,7 +482,7 @@ async function receiveVimeoBrowserData(message, sender) {
   return result;
 }
 
-function startVimeoBrowserRead(requestId, config, sender) {
+function startVimeoBrowserRead(requestId, config, sender, sourceType, streams) {
   const job = { sender, config, stopped: false, readId: null, sequence: 0 };
   vimeoBrowserCaptures.set(requestId, job);
   const pause = () => new Promise(resolve => setTimeout(resolve, 100));
@@ -400,8 +507,14 @@ function startVimeoBrowserRead(requestId, config, sender) {
       if (job.stopped || response.done === true) return;
       const read = response.read;
       if (!read) { await pause(); continue; }
+      if (sourceType === 'youtube-browser' ? read.sourceType !== sourceType : read.sourceType && read.sourceType !== 'vimeo') {
+        throw new Error('浏览器视频读取来源不一致。');
+      }
+      if (sourceType === 'youtube-browser' && (read.range || !streams?.some(stream => stream.url === read.url && stream.contentLength === read.limit))) {
+        throw new Error('浏览器读取请求与所选 YouTube 视频不一致。');
+      }
       if (typeof read.readId !== 'string' || typeof read.url !== 'string' || !Number.isSafeInteger(read.limit)) {
-        throw new Error('桌面返回了无效的 Vimeo 浏览器读取请求。');
+        throw new Error('桌面返回了无效的 视频浏览器读取请求。');
       }
       job.readId = read.readId;
       job.sequence = 0;
@@ -409,8 +522,9 @@ function startVimeoBrowserRead(requestId, config, sender) {
       try {
         const reply = await chrome.tabs.sendMessage(sender.tab.id, { type: 'shitu:vimeo-browser-read',
           requestId, readId: read.readId, url: read.url, limit: read.limit,
+          ...(sourceType === 'youtube-browser' ? { sourceType } : {}),
           ...(read.range ? { range: read.range } : {}) }, pageTarget(sender));
-        if (!reply?.ok) failure = reply?.error || '浏览器未完成 Vimeo 视频读取。';
+        if (!reply?.ok) failure = reply?.error || '浏览器未完成 视频读取。';
       } catch { failure = '当前网页已关闭或更新，请刷新页面后重试。'; }
       if (failure && !job.stopped) {
         // The content script normally reports its own failure. This also closes
@@ -428,7 +542,7 @@ function startVimeoBrowserRead(requestId, config, sender) {
       // If importing has already begun, only the original capture response can
       // tell us whether saving committed. Do not turn a saved asset into failure.
       if (!result.cancelled) return;
-      rejectFailure(issue('Vimeo 浏览器传输中断，采集已停止，请重试。', 'BROWSER_READ_FAILED'));
+      rejectFailure(issue('视频浏览器传输中断，采集已停止，请重试。', 'BROWSER_READ_FAILED'));
     } catch {
       rejectFailure(issue('浏览器传输未收到最终确认，请先在 Mosaic 检查结果，避免重复采集。', 'TIMEOUT'));
     }
@@ -444,7 +558,7 @@ function startVimeoBrowserRead(requestId, config, sender) {
 }
 
 function captureProgress(value) {
-  if (!['reading', 'receiving', 'downloading', 'muxing', 'importing', 'complete'].includes(value?.phase)) return null;
+  if (!['connecting', 'reading', 'receiving', 'downloading', 'muxing', 'verifying', 'importing', 'complete'].includes(value?.phase)) return null;
   const receivedBytes = Number.isSafeInteger(value.receivedBytes) && value.receivedBytes >= 0 ? value.receivedBytes : 0;
   const knownTotal = Number.isSafeInteger(value.totalBytes) && value.totalBytes > 0 && value.totalBytes >= receivedBytes;
   return { phase: value.phase, receivedBytes, ...(knownTotal ? { totalBytes: value.totalBytes } : {}) };
@@ -457,9 +571,11 @@ function displayBytes(bytes) {
 }
 
 function progressMessage(progress) {
-  if (progress.phase === 'reading') return '正在解析 YouTube 视频…';
+  if (progress.phase === 'connecting') return '正在连接下载服务；如弹出登录窗口，请完成登录或验证…';
+  if (progress.phase === 'reading') return '正在解析视频下载地址…';
   if (progress.phase === 'receiving') return '桌面正在接收素材…';
   if (progress.phase === 'muxing') return '正在合并音视频（不重新编码）…';
+  if (progress.phase === 'verifying') return '正在检查视频画面、声音和时长…';
   if (progress.phase === 'importing') return '正在写入素材库，等待保存确认…';
   if (progress.phase === 'complete') return '正在确认入库结果…';
   const received = displayBytes(progress.receivedBytes);
@@ -511,7 +627,8 @@ async function capture(input, sender, clientCaptureId) {
   let body, key, requestId, resolveShared, rejectShared;
   try {
     body = checkedMedia(input, sender?.url);
-    if (!body.playback && body.sourceType !== 'youtube') {
+    if (body.sourceType === 'youtube-browser') throw new Error('请在所选 YouTube 视频上重新采集。');
+    if (!body.playback && !body.pageFallback && !['youtube', 'site-video'].includes(body.sourceType)) {
       if (/^https?:/i.test(sender?.url || '')) body.pageUrl = (body.kind === 'video' && acceptedSocialPage(input.socialPageUrl, sender.url)) || sender.url;
       else if (!/^https?:/i.test(body.pageUrl || '') && /^https?:/i.test(sender?.tab?.url || '')) body.pageUrl = sender.tab.url;
     }
@@ -544,42 +661,76 @@ async function capture(input, sender, clientCaptureId) {
     if (!connection.status.ready) throw issue('请先在桌面 Mosaic 中选择或新建素材库。', 'LIBRARY_NOT_READY');
     const destination = await captureDestination(connection.status.libraryId);
     async function submit(media) {
-      const payload = { ...media, requestId, ...(destination ? { destination } : {}) };
+      const { youtubeSelectionId, ...transfer } = media;
       async function attempt() {
+        if (media.sourceType === 'youtube-browser' && !connection.status.youtubeBrowserRead) throw issue('请更新桌面 Mosaic 以读取 YouTube 浏览器播放文件。', 'INCOMPATIBLE_APP');
         if (media.playback && !connection.status.vimeoPlayback) throw issue('请将桌面 Mosaic 更新到支持 Vimeo 播放采集的版本。', 'INCOMPATIBLE_APP');
         if (media.sourceType === 'youtube' && !connection.status.youtubeDownload) throw issue('请将桌面 Mosaic 更新到支持 YouTube 下载的版本。', 'INCOMPATIBLE_APP');
+        const sessionSite = media.sourceType === 'youtube' ? BROWSER_SESSION_SITES.youtube :
+          media.sourceType === 'site-video' && media.site === 'bilibili' ? BROWSER_SESSION_SITES.bilibili : null;
+        if (sessionSite && !connection.status[sessionSite.capability]) throw issue(`请更新桌面 Mosaic 后使用当前 Chrome 的 ${sessionSite.label} 登录。`, 'INCOMPATIBLE_APP');
+        if (media.sourceType === 'site-video' && !connection.status.siteVideoDownload) throw issue('请将桌面 Mosaic 更新到支持视频帖子下载的版本。', 'INCOMPATIBLE_APP');
         if (media.browserRead && !connection.status.vimeoBrowserRead) throw issue('请更新桌面 Mosaic 后重试 Vimeo 浏览器采集。', 'INCOMPATIBLE_APP');
+        const payload = { ...transfer, requestId, ...(destination ? { destination } : {}) };
+        if (sessionSite && await mayReadBrowserSession(sessionSite)) {
+          payload[sessionSite.field] = await readBrowserSession(sender, sessionSite);
+        }
         await publish(media.dataBase64 ? 'receiving' : 'downloading',
           media.dataBase64 ? '正在把素材交给桌面…' : '正在下载素材…');
         const stop = connection.status.captureProgress ? watchProgress(requestId, connection.config, publish) : null;
-        const browserRead = media.browserRead ? startVimeoBrowserRead(requestId, connection.config, sender) : null;
+        const browserRead = media.browserRead || media.sourceType === 'youtube-browser'
+          ? startVimeoBrowserRead(requestId, connection.config, sender, media.sourceType, media.streams) : null;
         try {
-          const response = localRequest('/v1/capture', payload, connection.config, media.sourceType === 'youtube' ? YOUTUBE_CAPTURE_TIMEOUT : CAPTURE_TIMEOUT);
+          const response = localRequest('/v1/capture', payload, connection.config,
+            ['youtube', 'site-video'].includes(media.sourceType) ? PAGE_VIDEO_CAPTURE_TIMEOUT :
+              media.sourceType === 'youtube-browser' ? YOUTUBE_CAPTURE_TIMEOUT : CAPTURE_TIMEOUT);
           return await (browserRead ? Promise.race([response, browserRead.failure]) : response);
-        } finally { browserRead?.stop(); stop?.(); }
+        } finally { delete payload.youtubeSession; delete payload.bilibiliSession; browserRead?.stop(); stop?.(); }
       }
       try { return await attempt(); }
       catch (error) {
-        if (!['UNAUTHORIZED', 'CONNECTION_FAILED'].includes(error.code)) throw error;
+        // A dropped response can happen after the import committed. Only an
+        // explicit authentication rejection proves this request did not save.
+        if (error.code === 'CONNECTION_FAILED') throw issue('未收到桌面保存确认，请先在 Mosaic 检查结果，避免重复采集。', 'TIMEOUT');
+        if (error.code !== 'UNAUTHORIZED') throw error;
         connection = await ensureConnection(true);
         if (!connection.status.ready) throw issue('请先在桌面 Mosaic 中选择或新建素材库。', 'LIBRARY_NOT_READY');
         if (destination && connection.status.libraryId !== destination.libraryId) throw new Error('素材库已切换，请重新采集。');
         return attempt();
       }
     }
-    let result;
-    try { result = await submit(body); }
-    catch (error) {
-      if (body.playback && error.code === 'VIMEO_BROWSER_READ' && connection.status.vimeoBrowserRead) {
-        await publish('reading', '正在通过当前浏览器读取 Vimeo 视频，尚未保存…');
-        result = await submit({ ...body, browserRead: true });
-      } else {
-        if (body.playback || body.sourceType === 'youtube' || error.code !== 'VIDEO_BROWSER_READ') throw error;
+    async function primaryCapture() {
+      try { return await submit(body); }
+      catch (error) {
+        if (body.sourceType === 'youtube' && body.youtubeSelectionId && connection.status.youtubeBrowserRead &&
+            ['AUTH_REQUIRED', 'NETWORK', 'UNSUPPORTED', 'VIDEO_SOURCE_FAILED'].includes(error.code)) {
+          await publish('reading', '正在通过当前浏览器读取所选 YouTube 视频…');
+          const reply = await readFromPage(sender, { type: 'shitu:resolve-youtube-browser',
+            videoId: body.videoId, selectionId: body.youtubeSelectionId });
+          if (!reply?.ok || reply.media?.sourceType !== 'youtube-browser' || reply.media.videoId !== body.videoId || reply.media.url !== body.url) throw error;
+          return submit(checkedMedia(reply.media, sender.url));
+        }
+        if (body.playback && error.code === 'VIMEO_BROWSER_READ' && connection.status.vimeoBrowserRead) {
+          await publish('reading', '正在通过当前浏览器读取 Vimeo 视频，尚未保存…');
+          return submit({ ...body, browserRead: true });
+        }
+        if (body.playback || body.sourceType || error.code !== 'VIDEO_BROWSER_READ') throw error;
         await publish('reading', '正在从当前网页读取视频，尚未保存…');
         const browserVideo = await readVideoFromPage(body, sender, job.clientCaptureId);
         if (!browserVideo) throw error;
-        result = await submit(browserVideo);
+        return submit(browserVideo);
       }
+    }
+    let result;
+    try { result = await primaryCapture(); }
+    catch (error) {
+      // The desktop emits these codes only before importing. A library write
+      // failure or uncertain commit must never start a second download/import.
+      if (!body.pageFallback || !connection.status.siteVideoDownload ||
+          !['VIDEO_SOURCE_FAILED', 'VIDEO_INCOMPLETE'].includes(error.code)) throw error;
+      await publish('reading', '正在从所选视频帖子读取完整音视频…');
+      const { pageFallback, playback, browserRead, dataBase64, mimeType, ...media } = body;
+      result = await submit({ ...media, ...pageFallback, sourceType: 'site-video', pageUrl: pageFallback.url });
     }
     const confirmed = captureResult(result);
     const location = savedLocation(result, confirmed);

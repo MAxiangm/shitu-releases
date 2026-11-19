@@ -48,6 +48,7 @@ function fixture({ scripts = [], observed = [], fetchImpl, timers } = {}) {
   return {
     find: (video, selectedPage = page) => resolver({ document, page: selectedPage, video, path: [] }),
     findAsync: (video, selectedPage = page, selectedPath = []) => resolver.resolveAsync({ document, page: selectedPage, video, path: selectedPath }),
+    selectedPage: (video, options = {}) => resolver.selectedPage({ document, page, video, path: [], ...options }),
     matchesSelection: (found, snapshot) => resolver.matchesSelection(found, snapshot),
     document, requests,
     observe: script => onMutations([{ target: document, addedNodes: [script] }])
@@ -82,21 +83,33 @@ test('X resolves each video in the observed unified-card JSON-string carousel sh
   assert.equal((await fallback.findAsync(target)).url, mp4(second, '720x720'));
 });
 
-test('explicit X download-disabled flags override direct and observed MP4 URLs', () => {
-  const media = fixture({ scripts: [{ type: 'application/json', textContent: JSON.stringify([
-    record('34', [variant('34', '320x568', 600)], { allow_download_status: { allow_download: false } })
-  ]) }], observed: [mp4('34', '720x1280')] });
-  const result = media.find({ poster: thumb('34'), currentSrc: mp4('34', '320x568') });
-  assert.match(result.error, /下载已关闭/);
-  assert.equal(result.url, undefined);
+test('X save-button flags and nodownload controls do not reject the selected readable MP4', () => {
+  for (const fields of [{ allow_download_status: { allow_download: false } }, { allow_download: false },
+    { allowDownload: false }, { downloadable: false }]) {
+    const media = fixture({ scripts: [{ type: 'application/json', textContent: JSON.stringify([
+      record('34', [variant('34', '320x568', 600)], fields)
+    ]) }], observed: [mp4('34', '720x1280')] });
+    const result = media.find({ poster: thumb('34'), currentSrc: mp4('34', '320x568'), controlsList: { contains: () => true } });
+    assert.equal(result.url, mp4('34', '320x568'));
+    assert.equal(media.find({ poster: thumb('99') }).url, undefined);
+  }
 });
 
-test('X remembers explicit download denial even if its metadata omits all variants', () => {
+test('X ignores UI-only download denial when the selected player has an observed MP4', () => {
   const media = fixture({ observed: [mp4('34', '720x1280')] });
   media.observe(streamScript([{
     type: 'video', media_url_https: thumb('34'), allow_download_status: { allow_download: false }
   }]));
-  assert.match(media.find({ poster: thumb('34') }).error, /下载已关闭/);
+  assert.equal(media.find({ poster: thumb('34') }).url, mp4('34', '720x1280'));
+});
+
+test('X retains actual protected, live and unavailable-media restrictions even with a direct MP4', () => {
+  for (const fields of [{ is_protected: true }, { is_drm_protected: true }, { has_drm: true }, { is_live: true },
+    { ext_media_availability: { status: 'Unavailable' } }]) {
+    const media = fixture({ observed: [mp4('34', '720x1280')] });
+    media.observe(streamScript([{ type: 'video', media_url_https: thumb('34'), ...fields }]));
+    assert.match(media.find({ poster: thumb('34'), currentSrc: mp4('34', '720x1280') }).error, /受保护|不可读取/);
+  }
 });
 
 test('X timeline fallback trusts only an exact observed media key and complete official MP4', () => {
@@ -121,8 +134,8 @@ test('X uses the active file identity when a recycled player still has another v
   assert.equal(media.requests.length, 0);
 });
 
-test('a stale download-disabled poster cannot reject an unrelated active X file', () => {
-  const media = fixture({ scripts: [streamScript([record('34', [], { allow_download: false })])] });
+test('a stale protected poster cannot reject an unrelated active X file', () => {
+  const media = fixture({ scripts: [streamScript([record('34', [], { is_protected: true })])] });
   assert.equal(media.find({ poster: thumb('34'), currentSrc: mp4('35', '720x1280') }).url, mp4('35', '720x1280'));
 });
 
@@ -153,12 +166,43 @@ test('X SPA source lookup recovers the selected post HTML with its exact display
 test('X does not refetch an already resolved source or an explicitly blocked video', async () => {
   const media = fixture({ scripts: [streamScript([
     record('34', [variant('34', '720x1280', 2000)]),
-    record('35', [variant('35', '720x1280', 2000)], { allow_download: false })
+    record('35', [variant('35', '720x1280', 2000)], { is_protected: true })
   ])], fetchImpl: () => { throw new Error('Must not request'); } });
   assert.equal((await media.findAsync({ poster: thumb('34') })).url, mp4('34', '720x1280'));
-  assert.match((await media.findAsync({ poster: thumb('35') })).error, /下载已关闭/);
+  assert.match((await media.findAsync({ poster: thumb('35') })).error, /受保护|不可读取/);
   assert.match((await media.findAsync({ poster: thumb('99'), mediaKeys: {} })).error, /网站提供/);
   assert.equal(media.requests.length, 0);
+});
+
+test('X nodownload controls still allow same-post source recovery for the selected video', async () => {
+  const media = fixture({ fetchImpl: () => htmlResponse([record('34', [variant('34', '720x1280', 2000)], { downloadable: false })]) });
+  const result = await media.findAsync({ poster: thumb('34'), currentSrc: 'blob:https://x.com/selected', controlsList: { contains: () => true } });
+  assert.equal(result.url, mp4('34', '720x1280'));
+  assert.equal(media.requests.length, 1);
+});
+
+test('X page fallback binds one selected post and refuses multi-video or restricted identities', () => {
+  const target = { poster: thumb('34'), currentSrc: 'blob:https://x.com/selected', controlsList: { contains: () => true } };
+  const one = fixture({ scripts: [streamScript([record('34', [], { downloadable: false })])] });
+  assert.equal(one.selectedPage(target).url, page.href);
+  assert.equal(one.selectedPage(target).videoId, '1000');
+  const multiple = fixture({ scripts: [streamScript([
+    record('34', [variant('34', '720x1280', 2000)]), record('35', [variant('35', '720x1280', 2000)])
+  ])] });
+  assert.equal(multiple.selectedPage(target), null);
+  assert.equal(multiple.find(target).url, mp4('34', '720x1280'));
+  const mismatch = fixture({ scripts: [streamScript([record('35', [])])] });
+  assert.equal(mismatch.selectedPage(target), null);
+  const restricted = fixture({ scripts: [streamScript([record('34', [], { is_protected: true })])] });
+  assert.equal(restricted.selectedPage(target).blocked, true);
+  assert.equal(one.selectedPage({ ...target, mediaKeys: {} }).blocked, true);
+  assert.equal(one.selectedPage({ ...target, isConnected: false }), null);
+  assert.equal(one.selectedPage({ ...target, closest: selector => selector === 'article' ? { querySelectorAll: () => [target, {}] } : null }), null);
+  const unknown = fixture();
+  assert.equal(unknown.selectedPage(target), null);
+  assert.equal(unknown.selectedPage(target, { singleVideo: true }).url, page.href);
+  unknown.document.defaultView.location.href = 'https://x.com/home';
+  assert.equal(unknown.selectedPage(target, { singleVideo: true, page: new URL('https://x.com/home') }), null);
 });
 
 test('X timeline recovery requires one unambiguous selected post', async () => {

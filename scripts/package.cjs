@@ -66,7 +66,8 @@ async function createPackage() {
   if (project.devDependencies?.electron !== electronVersion) {
     throw new Error(`The preserved runtime is Electron ${electronVersion}; package.json requests ${project.devDependencies?.electron}. Update this release script and runtime together before changing Electron.`);
   }
-  for (const required of ['src/main.cjs', 'assets/icon.ico', 'ai-runtime/cutout/installed.json', 'ai-runtime/upscale/installed.json', 'extension/manifest.json']) {
+  for (const required of ['src/main.cjs', 'src/video-site-auth.cjs', 'src/video-auth-native/Program.cs',
+    'src/video-auth-native/YouTubeConnection.cs', 'assets/icon.ico', 'ai-runtime/cutout/installed.json', 'ai-runtime/upscale/installed.json', 'extension/manifest.json']) {
     if (!(await exists(path.join(root, required)))) throw new Error(`Required release file is missing: ${required}`);
   }
   const target = packagePath(project);

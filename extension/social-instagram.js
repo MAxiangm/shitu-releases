@@ -5,8 +5,6 @@
   const CDN = /^(?:[a-z0-9-]+\.)*(?:cdninstagram\.com|fbcdn\.net)$/i;
   const POST = /^\/(?:[a-z0-9_.]+\/)?(?:reels?|p|tv)\/([a-z0-9_-]{5,32})(?:\/embed(?:\/captioned)?)?\/?$/i;
   const RESTRICTED = '此视频的下载受限，请使用 Instagram 提供的下载入口。';
-  const NO_DOWNLOAD = ['can_download', 'is_downloadable', 'downloadable', 'download_allowed',
-    'allows_download', 'allow_download', 'allow_downloads', 'download_enabled', 'is_download_enabled', 'viewer_can_download'];
   const PAGE_LIMIT = 8 * 1024 * 1024;
   const PAGE_TIMEOUT = 8000;
 
@@ -43,11 +41,12 @@
   }
 
   function denied(node) {
+    // A hidden save button does not make a matching playback file inaccessible.
+    // Keep actual privacy, authentication, live and encryption restrictions.
     return node && (
       node.is_private === true || node.user?.is_private === true || node.owner?.is_private === true ||
       node.is_drm_protected === true || node.is_live === true || Boolean(node.gating_ruling) ||
-      (Object.hasOwn(node, 'if_not_gated_logged_out') && node.if_not_gated_logged_out === null) ||
-      NO_DOWNLOAD.some(key => node[key] === false || node.clips_metadata?.[key] === false)
+      (Object.hasOwn(node, 'if_not_gated_logged_out') && node.if_not_gated_logged_out === null)
     );
   }
 
@@ -153,6 +152,19 @@
   const resolve = context => {
     const result = inspect(context);
     return result?.error ? { error: result.error } : result?.source || null;
+  };
+  resolve.selectedPage = context => {
+    if (context.video?.mediaKeys || context.video?.srcObject) return { blocked: true };
+    if (!context.video || context.video.isConnected === false ||
+        (context.document.defaultView?.location && context.document.defaultView.location.href !== context.page.href)) return null;
+    const result = inspect(context);
+    if (result?.error) return { blocked: true };
+    if (!result?.post || result.carousel) return null;
+    const pageUrl = new URL(result.post.href);
+    pageUrl.search = ''; pageUrl.hash = '';
+    pageUrl.pathname = pageUrl.pathname.replace(/\/embed(?:\/captioned)?\/?$/, '/');
+    if (!pageUrl.pathname.endsWith('/')) pageUrl.pathname += '/';
+    return { url: pageUrl.href, videoId: result.code };
   };
   resolve.resolveAsync = async context => {
     const initial = inspect(context);

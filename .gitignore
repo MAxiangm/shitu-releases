@@ -9,3 +9,7 @@ library/
 HAP-log.txt
 恢复说明.md
 docs/原版使用说明.md
+/tmp/
+/output/
+/src/video-auth-native/*.exe
+/src/video-auth-native/*.pdb

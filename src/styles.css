@@ -695,6 +695,10 @@ body.dragging-folder-tree .toast-stack,body.dragging-folder-tree .toast-stack * 
 .collector-steps strong { color:#ccc; font-size:12px; font-weight:400; }
 .collector-steps span { color:#888; font-size:11px; line-height:1.9; }
 .collector-path { color:#707070!important; font-size:10px!important; margin:0 0 20px!important; overflow-wrap:anywhere; }
+.collector-connection { margin:0 0 22px; padding:16px; border:1px solid #333; border-radius:8px; }
+.collector-connection h3 { margin:0 0 8px; font-size:13px; font-weight:500; }
+.collector-connection p { margin:0 0 10px; font-size:11px; }
+.collector-connection .collector-actions { padding-top:12px; }
 .collector-actions { display:flex; justify-content:space-between; align-items:center; gap:12px; padding-top:19px; border-top:1px solid #333; }
 .library-manager { width:500px; }
 .manager-current { padding:14px 0 18px; margin-bottom:16px; border-top:1px solid #333; border-bottom:1px solid #333; }

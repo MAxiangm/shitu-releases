@@ -105,7 +105,8 @@ test('Vimeo playback rejects misleading hosts, another video and protected sourc
     assert.ok(resolve(page(undefined, { video: { currentSrc: url } })).error);
   }
   assert.ok(resolve(page(undefined, { video: { currentSrc, mediaKeys: {} } })).error);
-  assert.ok(resolve(page(undefined, { video: { currentSrc, controlsList: { contains: name => name === 'nodownload' } } })).error);
+  assert.ok(resolve(page(undefined, { video: { currentSrc, srcObject: {} } })).error);
+  assert.equal(resolve(page(undefined, { video: { currentSrc, controlsList: { contains: name => name === 'nodownload' } } })).url, currentSrc);
 });
 
 test('Vimeo only accepts a CDN download URL when the link is explicitly offered for download', () => {
@@ -170,6 +171,7 @@ test('Vimeo does not use config marked as live or DRM protected', () => {
 test('Vimeo can read only the embed URL declared by matching main-page metadata', async () => {
   const video = media('blob:https://vimeo.com/active');
   video.isConnected = true;
+  video.controlsList = { contains: name => name === 'nodownload' };
   const config = configFor(1234, { hls: { default_cdn: 'first', cdns: {
     first: { url: 'https://vod-adaptive-ak.vimeocdn.com/clip/playlist.m3u8' }
   } } });
@@ -201,6 +203,20 @@ test('a visible Vimeo picture remains selectable inside the real aria-hidden vid
   assert.equal(resolve(input).url, 'https://vod.vimeocdn.com/clip/video.mp4');
   video.getClientRects = () => [];
   assert.ok(resolve(input).error);
+});
+
+test('Vimeo keeps the selected ended player when an end-screen recommendation covers it', () => {
+  const video = { ...media('blob:https://vimeo.com/ended'), ended: true, readyState: 4,
+    duration: 15.893333, videoWidth: 1280, videoHeight: 720, getClientRects: () => [{}] };
+  const poster = { tagName: 'IMG', getAttribute: name => name === 'src' ? 'https://i.vimeocdn.com/video/next.jpg' : null };
+  const recommended = link('https://vimeo.com/9999');
+  const source = 'https://vod.vimeocdn.com/selected/video.mp4';
+  const input = page('https://vimeo.com/798860', { video, players: [video, media('')], singleVideo: false,
+    path: [poster, recommended], configs: [configFor(798860, { progressive: [{ url: source }] })] });
+  const result = resolve(input);
+  assert.equal(result.url, source);
+  assert.equal(result.playback, 'file');
+  assert.equal(resolve({ ...input, video: null }), null, 'An overlay without a selected player must not select a page video');
 });
 
 test('Vimeo main-page JSON-LD graph selects only the matching VideoObject embed URL', async () => {

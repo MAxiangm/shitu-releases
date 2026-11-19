@@ -63,6 +63,96 @@ test('YouTube collector advertises availability only when a downloader is suppli
   assert.equal(unavailable.imports.length, 0);
   const available = await fixture(t, { downloadYouTube: stagedVideo });
   assert.equal((await available.request('/v1/ping')).body.youtubeDownload, true);
+  assert.notEqual((await available.request('/v1/ping')).body.youtubeBrowserSession, true);
+  const currentBrowser = await fixture(t, { downloadYouTube: stagedVideo, youtubeBrowserSession: true });
+  assert.equal((await currentBrowser.request('/v1/ping')).body.youtubeBrowserSession, true);
+});
+
+test('current Chrome credentials reach only the YouTube downloader and never enter library metadata or progress', async t => {
+  const secret = 'fixed-test-session-secret';
+  const session = { capturedAt: Date.now(), cookies: [{ domain: '.youtube.com', name: 'SID', value: secret }] };
+  let observed;
+  const setup = await fixture(t, { youtubeBrowserSession: true, downloadYouTube: async options => {
+    observed = structuredClone(options.browserSession);
+    return stagedVideo(options);
+  } });
+  const response = await setup.capture(media({ requestId: '1700000000000-70', youtubeSession: session }));
+  assert.equal(response.body.ok, true, response.body.error);
+  assert.deepEqual(observed, session);
+  assert.equal(JSON.stringify(setup.imports).includes(secret), false);
+  assert.equal(JSON.stringify(response).includes(secret), false);
+  assert.equal(JSON.stringify(setup.collector.info()).includes(secret), false);
+  const progress = await setup.request('/v1/capture-progress', { requestId: '1700000000000-70' });
+  assert.equal(JSON.stringify(progress).includes(secret), false);
+});
+
+test('Bilibili current Chrome sessions preserve the selected part and stay out of saved metadata', async t => {
+  const url = 'https://www.bilibili.com/video/BV1bK411W797/?p=2';
+  const secret = 'fixed-bilibili-session-secret';
+  const session = { capturedAt: Date.now(), cookies: [{ domain: '.bilibili.com', name: 'SESSDATA', value: secret }] };
+  const input = { kind: 'video', sourceType: 'site-video', site: 'bilibili', videoId: 'BV1bK411W797:p2', url, pageUrl: url };
+  let observed;
+  const setup = await fixture(t, { bilibiliBrowserSession: true, downloadSiteVideo: async options => {
+    observed = { site: options.site, url: options.url, session: structuredClone(options.browserSession) };
+    return { ...await stagedVideo(options), title: 'Selected Bilibili P2' };
+  } });
+  assert.equal((await setup.request('/v1/ping')).body.bilibiliBrowserSession, true);
+  const response = await setup.capture({ ...input, requestId: '1700000000000-71', bilibiliSession: session });
+  assert.equal(response.body.ok, true, response.body.error);
+  assert.deepEqual(observed, { site: 'bilibili', url, session });
+  assert.equal(setup.imports[0].settings.metadata.pageUrl, url);
+  for (const value of [setup.imports, response, setup.collector.info(), await setup.request('/v1/capture-progress', { requestId: '1700000000000-71' })]) {
+    assert.equal(JSON.stringify(value).includes(secret), false);
+  }
+});
+
+test('collector prevents cross-site session mixing and refuses a Bilibili session without its capability', async t => {
+  let downloads = 0;
+  const download = async options => { downloads++; return stagedVideo(options); };
+  const session = { capturedAt: Date.now(), cookies: [] };
+  const url = 'https://www.bilibili.com/video/BV1bK411W797/?p=2';
+  const bili = { kind: 'video', sourceType: 'site-video', site: 'bilibili', videoId: 'BV1bK411W797:p2', url, pageUrl: url };
+  const old = await fixture(t, { downloadSiteVideo: download });
+  assert.notEqual((await old.request('/v1/ping')).body.bilibiliBrowserSession, true);
+  assert.equal((await old.capture({ ...bili, bilibiliSession: session })).body.code, 'VIDEO_BROWSER_SESSION_INVALID');
+  const setup = await fixture(t, { youtubeBrowserSession: true, bilibiliBrowserSession: true,
+    downloadYouTube: download, downloadSiteVideo: download });
+  for (const invalid of [
+    { ...bili, youtubeSession: session },
+    media({ bilibiliSession: session }),
+    { ...bili, youtubeSession: session, bilibiliSession: session },
+    { ...bili, site: 'vimeo', bilibiliSession: session },
+    { kind: 'image', url: 'https://example.com/image.jpg', bilibiliSession: session }
+  ]) assert.equal((await setup.capture(invalid)).body.code, 'VIDEO_BROWSER_SESSION_INVALID');
+  assert.equal(downloads, 0);
+});
+
+test('collector refuses browser credentials for unsupported capabilities and other transfer types', async t => {
+  let downloads = 0;
+  const download = async options => { downloads++; return stagedVideo(options); };
+  const old = await fixture(t, { downloadYouTube: download });
+  const session = { capturedAt: Date.now(), cookies: [] };
+  assert.equal((await old.capture(media({ youtubeSession: session }))).body.code, 'VIDEO_BROWSER_SESSION_INVALID');
+  const enabled = await fixture(t, { youtubeBrowserSession: true, downloadYouTube: download, downloadSiteVideo: download });
+  for (const invalid of [
+    media({ sourceType: 'site-video', site: 'youtube', youtubeSession: session }),
+    media({ sourceType: 'youtube-browser', youtubeSession: session }),
+    { kind: 'image', url: 'https://example.com/image.jpg', youtubeSession: session }
+  ]) assert.equal((await enabled.capture(invalid)).body.code, 'VIDEO_BROWSER_SESSION_INVALID');
+  assert.equal(downloads, 0);
+  assert.equal(old.imports.length + enabled.imports.length, 0);
+});
+
+test('current-browser session failures retain actionable safe codes without an import', async t => {
+  for (const code of ['VIDEO_BROWSER_PERMISSION_REQUIRED', 'VIDEO_BROWSER_SESSION_INVALID', 'VIDEO_BROWSER_SESSION_EXPIRED', 'VIDEO_BROWSER_LOGIN_REQUIRED']) {
+    const setup = await fixture(t, { youtubeBrowserSession: true, downloadYouTube: async () => {
+      throw Object.assign(new Error('Fixed safe message'), { code });
+    } });
+    const result = await setup.capture(media());
+    assert.equal(result.body.code, code);
+    assert.equal(result.body.error, 'Fixed safe message');
+    assert.equal(setup.imports.length, 0);
+  }
 });
 
 test('YouTube collector imports downloaded bytes into the selected folder and retains the public video source', async t => {
@@ -197,7 +287,7 @@ async function worker({ available = true, resolveMedia = media() } = {}) {
       requests.push({ route, body });
       return Response.json(route === '/v1/capture'
         ? { ok: true, imported: 1, duplicates: 0, assetIds: ['saved-video'] }
-        : { ok: true, app: '拾图', version: '0.29.19', ready: true, youtubeDownload: available });
+        : { ok: true, app: '拾图', version: '0.29.23', ready: true, youtubeDownload: available, youtubeBrowserSession: true });
     }
   }, { filename: 'extension/background.js' });
   const sender = { id: extensionId, url: pageUrl, tab: { id: 7, url: pageUrl }, frameId: 0 };

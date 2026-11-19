@@ -7,7 +7,9 @@ const fs = require('node:fs/promises');
 const { pathToFileURL } = require('node:url');
 const { LibraryManager } = require('./library-manager.cjs');
 const { createCollector } = require('./collector.cjs');
-const { downloadYouTube } = require('./youtube-download.cjs');
+const { downloadYouTube, downloadSiteVideo } = require('./youtube-download.cjs');
+const { createVideoSiteAuth } = require('./video-site-auth.cjs');
+const { createAuthenticatedVideoDownload } = require('./authenticated-video-download.cjs');
 const { mediaResponse } = require('./media-response.cjs');
 const FolderIconFiles = require('./folder-icons.cjs');
 const { createAssetExportService } = require('./asset-export-service.cjs');
@@ -63,6 +65,7 @@ let closing = false;
 let mayClose = false;
 let collector;
 let collectorError;
+let videoSiteAuth;
 let libraryManager;
 let switchingLibrary=false;
 let draggingAssets=false;
@@ -376,7 +379,7 @@ async function installDownloadedUpdate({ filePath }) {
       child.once('error', reject);
       child.once('spawn', () => { child.unref(); resolve(); });
     });
-    await Promise.allSettled([imagePlugins?.shutdown(), collector?.close(), videoEngine?.shutdown(), audioEngine?.shutdown(), modelService?.shutdown(), fontExporter?.shutdown(), fontService?.shutdown(), aeProjects?.shutdown(), aePreviewService?.shutdown()]);
+    await Promise.allSettled([imagePlugins?.shutdown(), collector?.close(), videoSiteAuth?.shutdown(), videoEngine?.shutdown(), audioEngine?.shutdown(), modelService?.shutdown(), fontExporter?.shutdown(), fontService?.shutdown(), aeProjects?.shutdown(), aePreviewService?.shutdown()]);
     setTimeout(() => { mayClose = true; app.quit(); }, 150);
   } catch (error) {
     installingUpdate = false;
@@ -666,6 +669,10 @@ function bindHandlers() {
   checkedHandler('use-legacy-library',()=>switchLibrary('legacy'));
   checkedHandler('request-close', () => mainWindow.close());
   checkedHandler('collector-info', () => ({ enabled:collector?.info().enabled||false, baseUrl:collector?.info().baseUrl, ready:Boolean(library)&&!switchingLibrary, error:collectorError || collector?.info().error, lastCapture:collector?.info().lastCapture, appVersion:app.getVersion(), extensionPath }));
+  const browserYouTubeAuth = () => ({ site: 'youtube', mode: 'chrome-extension', connected: false, connecting: false });
+  checkedHandler('youtube-auth-state', browserYouTubeAuth);
+  checkedHandler('youtube-auth-connect', browserYouTubeAuth);
+  checkedHandler('youtube-auth-disconnect', browserYouTubeAuth);
   checkedHandler('open-extension-folder', async () => {
     const error=await shell.openPath(extensionPath); if(error)throw new Error(error);
   });
@@ -820,18 +827,18 @@ async function createWindow() {
     fontThumbnailRecovery?.controller.abort();
     audioPreviewService?.invalidate();
     similarImages?.invalidate();
-    Promise.resolve(videoTranscodeService?.shutdown()).then(() => Promise.all([transcodeSettings?.flush(), transcodePresets?.flush()])).then(() => library?.flush()).then(() => Promise.allSettled([transcodeDevices?.shutdown?.(), videoTranscoder?.shutdown(), audioEngine?.shutdown(), modelService?.shutdown(), fontExporter?.shutdown(), fontService?.shutdown(), aeProjects?.shutdown(), aePreviewService?.shutdown()])).then(() => { mayClose = true; mainWindow.close(); }).catch(error => {
+    Promise.resolve(videoTranscodeService?.shutdown()).then(() => Promise.all([transcodeSettings?.flush(), transcodePresets?.flush()])).then(() => library?.flush()).then(() => Promise.allSettled([videoSiteAuth?.shutdown(), transcodeDevices?.shutdown?.(), videoTranscoder?.shutdown(), audioEngine?.shutdown(), modelService?.shutdown(), fontExporter?.shutdown(), fontService?.shutdown(), aeProjects?.shutdown(), aePreviewService?.shutdown()])).then(() => { mayClose = true; mainWindow.close(); }).catch(error => {
       closing = false;
       dialog.showErrorBox('保存未完成', error.message);
     });
   });
-  mainWindow.once('ready-to-show', () => mainWindow.show());
+  mainWindow.once('ready-to-show', () => { if (!process.argv.includes('--background')) mainWindow.show(); });
   await mainWindow.loadFile(path.join(__dirname, 'index.html'));
 }
 
 if (!app.requestSingleInstanceLock()) app.quit();
 else {
-  app.on('second-instance', () => { if (mainWindow) { if (mainWindow.isMinimized()) mainWindow.restore(); mainWindow.focus(); } });
+  app.on('second-instance', () => { if (mainWindow) { if (mainWindow.isMinimized()) mainWindow.restore(); if (!mainWindow.isVisible()) mainWindow.show(); mainWindow.focus(); } });
   app.whenReady().then(async () => {
     videoEngine = createVideoEngine({ runtimeDir: path.join(__dirname, '..', 'video-runtime'), cacheDir: path.join(app.getPath('userData'), 'video-previews') });
     audioEngine = createAudioEngine({ runtimeDir: path.join(__dirname, '..', 'video-runtime'), cacheDir: path.join(app.getPath('userData'), 'audio-previews') });
@@ -909,12 +916,21 @@ else {
         if(event.type==='complete' || (event.type==='error' && event.results?.length)) sendActionEvent('library-changed');
       }
     });
+    videoSiteAuth = createVideoSiteAuth({ directory: path.join(app.getPath('userData'), 'video-site-auth'),
+      onState: value => sendActionEvent('video-auth', value) });
+    const authenticatedVideo = createAuthenticatedVideoDownload({ auth: videoSiteAuth,
+      downloadYouTube: options => downloadYouTube({ ...options, ffmpegPath: path.join(__dirname, '..', 'video-runtime', 'ffmpeg.exe') }),
+      downloadSiteVideo: options => downloadSiteVideo({ ...options, ffmpegPath: path.join(__dirname, '..', 'video-runtime', 'ffmpeg.exe') }) });
     collector=createCollector({library:{snapshot:()=>requireLibrary().snapshot(),importPaths:(...args)=>{
       if (installingUpdate) throw new Error('正在安装更新，暂时无法采集');
       if (historyBusy || closing) throw new Error('正在保存撤销或重做，暂时无法采集');
       return requireLibrary().importPaths(...args);
     }},getLibraryRoot:()=>library?.root,muxVimeoPlayback:videoEngine.muxVimeoPlayback,
-    downloadYouTube:options=>downloadYouTube({...options,ffmpegPath:path.join(__dirname,'..','video-runtime','ffmpeg.exe')}),
+    downloadYouTube:authenticatedVideo.downloadYouTube,
+    youtubeBrowserSession:true,
+    bilibiliBrowserSession:true,
+    downloadSiteVideo:authenticatedVideo.downloadSiteVideo,
+    probeVideo:(filename,options)=>videoEngine.probe(filename,options),
     listFolders:()=>requireLibrary().listFolders(),hasAsset:id=>requireLibrary().hasAsset(id),
     onLocate:result=>{
       if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed() ||
@@ -990,6 +1006,6 @@ else {
     audioPreviewService?.invalidate();
     videoTranscodeService?.shutdown().catch(()=>{}); videoTranscoder?.shutdown().catch(()=>{});
     Promise.resolve(transcodeDevices?.shutdown?.()).catch(()=>{});
-    imagePlugins?.shutdown().catch(()=>{}); collector?.close().catch(()=>{}); videoEngine?.shutdown().catch(()=>{}); Promise.resolve(audioEngine?.shutdown()).catch(()=>{}); modelService?.shutdown().catch(()=>{}); fontExporter?.shutdown().catch(()=>{}); fontService?.shutdown().catch(()=>{}); aeProjects?.shutdown().catch(()=>{}); aePreviewService?.shutdown().catch(()=>{});
+    imagePlugins?.shutdown().catch(()=>{}); collector?.close().catch(()=>{}); videoSiteAuth?.shutdown().catch(()=>{}); videoEngine?.shutdown().catch(()=>{}); Promise.resolve(audioEngine?.shutdown()).catch(()=>{}); modelService?.shutdown().catch(()=>{}); fontExporter?.shutdown().catch(()=>{}); fontService?.shutdown().catch(()=>{}); aeProjects?.shutdown().catch(()=>{}); aePreviewService?.shutdown().catch(()=>{});
   });
 }

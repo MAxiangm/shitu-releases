@@ -49,11 +49,34 @@ test('Pinterest regional Pin resolves its declared progressive MP4 from the actu
 test('Pinterest matches both route and Pin record IDs and never runs an executable script', () => {
   const unexpected = relay();
   unexpected.textContent += '\nthrow new Error("not data");';
-  const limited = relay({ videos: { videoUrls: [source], downloadable: false } });
+  const limited = relay({ videos: { videoUrls: [source], isProtected: true } });
   assert.equal(resolve(page({ scripts: [relay({ entityId: otherId }), relay({}, { requestId: otherId }), unexpected] })), null);
   assert.equal(resolve(page({ scripts: [relay(), limited] })), null);
   for (const href of [pinUrl.replace('https:', 'http:'), pinUrl.replace('pinterest.com', 'pinterest.com.example'),
     pinUrl.replace(`/pin/${pinId}`, '/explore/videos'), pinUrl + 'extra/']) assert.equal(resolve(page({ href })), null);
+});
+
+test('Pinterest save-button flags do not reject the selected readable video', () => {
+  for (const fields of [{ isEligibleForVideoDownload: false }, { videos: { videoUrls: [source], downloadable: false } }]) {
+    assert.equal(resolve(page({ scripts: [relay(fields)] })).url, source);
+    assert.equal(resolve(page({ scripts: [relay(fields)], video: { currentSrc: hls.replace(key, other) } })), null);
+  }
+});
+
+test('Pinterest page fallback retains the selected Pin identity when only a stream is exposed', () => {
+  const selected = page({ scripts: [relay({ isEligibleForVideoDownload: false, videos: { videoUrls: [hls] } })], video: { currentSrc: hls } });
+  assert.equal(resolve(selected), null);
+  assert.equal(resolve.selectedPage(selected).url, pinUrl);
+  assert.equal(resolve.selectedPage(selected).videoId, pinId);
+  assert.equal(resolve.selectedPage(page({ scripts: [], video: { currentSrc: 'blob:https://ca.pinterest.com/selected' } })).url, pinUrl);
+  for (const options of [
+    { video: { currentSrc: hls.replace(key, other) } },
+    { scripts: [], singleVideo: false, video: { currentSrc: hls } },
+    { video: { currentSrc: hls, isConnected: false } },
+    { nodes: [{ getAttribute: name => name === 'data-pin-id' ? otherId : null }], video: { currentSrc: hls } }
+  ]) assert.equal(resolve.selectedPage(page(options)), null);
+  assert.equal(resolve.selectedPage(page({ scripts: [relay({ videos: { videoUrls: [hls], isProtected: true } })], video: { currentSrc: hls } })).blocked, true);
+  assert.equal(resolve.selectedPage(page({ video: { currentSrc: hls, mediaKeys: {} } })).blocked, true);
 });
 
 test('Pinterest requires a chosen matching video identity if the page has multiple players', () => {
@@ -176,8 +199,6 @@ test('Pinterest async resolution uses existing matching Relay records without a 
 
 test('Pinterest async resolution cannot fetch around an explicit restriction or mismatched target', async t => {
   const cases = [
-    ['download restriction', { scripts: [relay({ images_orig: { url: liveCover }, isEligibleForVideoDownload: false })] }],
-    ['video restriction', { scripts: [relay({ images_orig: { url: liveCover }, videos: { downloadable: false } })] }],
     ['protected source', { scripts: [relay({ images_orig: { url: liveCover }, videos: { isProtected: true } })] }],
     ['mismatched current cover', { scripts: [relay()] }],
     ['unrelated active media', { video: { currentSrc: hls.replace(key, other) }, scripts: [livePin()] }],
@@ -199,12 +220,20 @@ test('Pinterest fetched HTML must contain the same Pin and the same clicked cove
     ['another request ID', htmlFor(relay({ images_orig: { url: liveCover } }, { requestId: otherId }))],
     ['another cover', htmlFor(relay())],
     ['login HTML', '<html><title>Log in</title></html>'],
-    ['download disabled', htmlFor(relay({ images_orig: { url: liveCover }, videos: { downloadable: false } }))],
+    ['protected video', htmlFor(relay({ images_orig: { url: liveCover }, videos: { isProtected: true } }))],
     ['executable script suffix', htmlFor({ textContent: livePin().textContent + '\nthrow new Error("not data");' })]
   ];
   for (const [name, html] of cases) await t.test(name, async () => {
     assertSourceError(await readAsync(asyncPage(), async () => htmlResponse(html)));
   });
+});
+
+test('Pinterest same-post recovery accepts readable media despite hidden save controls', async () => {
+  const recovered = relay({ images_orig: { url: liveCover }, isEligibleForVideoDownload: false,
+    videos: { videoUrls: [source], downloadable: false } });
+  const result = await readAsync(asyncPage(), async () => htmlResponse(htmlFor(recovered)));
+  assert.equal(result.url, source);
+  assert.equal(result.pageUrl, pinUrl);
 });
 
 test('Pinterest async source lookup rejects redirects, invalid responses, and network failures', async t => {

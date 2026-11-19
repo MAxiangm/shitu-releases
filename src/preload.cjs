@@ -137,6 +137,9 @@ contextBridge.exposeInMainWorld('shitu', Object.freeze({
   revealLibrary: () => call('reveal-library'),
   requestClose: () => call('request-close'),
   getCollectorInfo: () => call('collector-info'),
+  getYouTubeAuthState: () => call('youtube-auth-state'),
+  connectYouTube: () => call('youtube-auth-connect'),
+  disconnectYouTube: () => call('youtube-auth-disconnect'),
   onWebCapture: callback => {
     const listener = (_event, result) => callback(result);
     ipcRenderer.on('shitu:web-capture', listener);

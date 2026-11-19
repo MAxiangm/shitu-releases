@@ -3,10 +3,11 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
-const os = require('node:os');
 const path = require('node:path');
 const { EventEmitter } = require('node:events');
 const { PassThrough } = require('node:stream');
+const http = require('node:http');
+const { spawn, spawnSync } = require('node:child_process');
 const { youtubePageUrl, downloadYouTube } = require('../src/youtube-download.cjs');
 
 const id = 'BaW_jenozKc';
@@ -32,8 +33,13 @@ test('YouTube URL validation rejects arbitrary servers, credentials, playlists a
 });
 
 async function fixture(t) {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'mosaic-youtube-test-'));
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const parent = path.resolve(__dirname, '..', '.recovery', 'tests');
+  await fs.mkdir(parent, { recursive: true });
+  const root = await fs.mkdtemp(path.join(parent, 'mosaic-youtube-test-'));
+  t.after(() => {
+    assert.equal(path.dirname(path.resolve(root)), parent);
+    return fs.rm(root, { recursive: true, force: true });
+  });
   const runtimeDir = path.join(root, 'runtime');
   const directory = path.join(root, 'capture');
   await fs.mkdir(runtimeDir); await fs.mkdir(directory);
@@ -49,7 +55,7 @@ async function fixture(t) {
     setImmediate(() => run(child).catch(error => child.emit('error', error)));
     return child;
   }
-  const metadata = (child, extra = {}) => child.stdout.write(`MOSAIC_META:${JSON.stringify({ id, title: '测试视频', is_live: false, live_status: 'not_live', has_drm: false, vcodec: 'h264', ...extra })}\n`);
+  const metadata = (child, extra = {}) => child.stdout.write(`MOSAIC_META:${JSON.stringify({ id, title: '测试视频', is_live: false, live_status: 'not_live', has_drm: false, vcodec: 'h264', acodec: 'aac', duration: 1, ...extra })}\n`);
   const progress = (child, data) => child.stderr.write(`MOSAIC_PROGRESS:${JSON.stringify(data)}\n`);
   const complete = async (child, { contents = mp4, filePath = path.join(directory, 'capture.mp4') } = {}) => {
     await fs.writeFile(filePath, contents);
@@ -68,14 +74,15 @@ test('download returns the selected video and isolates helpers, config and outpu
   const f = await fixture(t);
   f.behavior(async child => {
     f.metadata(child);
-    f.progress(child, { filename: 'video', downloaded: 12, total: 22 });
-    f.progress(child, { filename: 'audio', downloaded: 3, total: 10 });
+    f.progress(child, { filename: 'video', downloaded_bytes: 12, total_bytes: 22 });
+    f.progress(child, { filename: 'audio', downloaded_bytes: 3, total_bytes: 10 });
     f.progress(child, { merging: true });
     await f.complete(child);
   });
   const result = await f.download({ url: `${canonical}&list=PLtracking` });
   assert.equal(result.filePath, path.join(f.directory, 'capture.mp4'));
   assert.equal(result.title, '测试视频'); assert.equal(result.pageUrl, canonical);
+  assert.equal(result.duration, 1); assert.equal(result.hasAudio, true);
   const { executable, args, options } = f.calls[0];
   assert.equal(executable, path.join(f.runtimeDir, 'yt-dlp.exe'));
   assert.equal(options.shell, false); assert.equal(options.windowsHide, true); assert.equal(options.cwd, f.directory);
@@ -96,6 +103,19 @@ test('cancellation stops the downloader and does not return a partial file', asy
   assert.equal(f.calls[0].child.kills, 1);
 });
 
+test('selected audio and duration constraints remain unknown when the extractor omits them', async t => {
+  for (const [acodec, duration, expectedAudio, expectedDuration] of [
+    [undefined, undefined, undefined, undefined], ['unknown', null, undefined, undefined],
+    ['none', 12.5, false, 12.5], ['opus', -1, true, undefined]
+  ]) {
+    const f = await fixture(t);
+    f.behavior(async child => { f.metadata(child, { acodec, duration }); await f.complete(child); });
+    const result = await f.download();
+    assert.equal(result.hasAudio, expectedAudio);
+    assert.equal(result.duration, expectedDuration);
+  }
+});
+
 test('timeout stops the downloader', async t => {
   const f = await fixture(t);
   f.behavior(async child => { f.metadata(child); });
@@ -109,8 +129,8 @@ test('aggregate video and audio size is capped even when neither stream exceeds 
   const f = await fixture(t);
   f.behavior(async child => {
     f.metadata(child);
-    f.progress(child, { filename: 'video', downloaded: 70 });
-    f.progress(child, { filename: 'audio', downloaded: 40 });
+    f.progress(child, { filename: 'video', downloaded_bytes: 70 });
+    f.progress(child, { filename: 'audio', downloaded_bytes: 40 });
   });
   await assert.rejects(f.download({ maxBytes: 100 }), error => error.code === 'YOUTUBE_TOO_LARGE');
   assert.equal(f.calls[0].child.kills, 1);
@@ -157,4 +177,104 @@ test('authentication errors are actionable and do not expose signed URLs or path
     setImmediate(() => child.emit('close', 1));
   });
   await assert.rejects(f.download(), error => error.code === 'YOUTUBE_AUTH_REQUIRED' && !error.message.includes('signature'));
+});
+
+test('app-managed cookie files are passed as one argument without exposing their contents', async t => {
+  const f = await fixture(t);
+  const cookieFile = path.join(f.root, 'app session 50%.txt');
+  const secret = '# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t0\tSID\tprivate-test-value\n';
+  await fs.writeFile(cookieFile, secret);
+  const result = await f.download({ cookieFile });
+  assert.equal(result.pageUrl, canonical);
+  const args = f.calls[0].args;
+  assert.equal(args.filter(value => value === '--cookies').length, 1);
+  assert.equal(args[args.indexOf('--cookies') + 1], cookieFile);
+  assert.ok(!JSON.stringify(f.events).includes('private-test-value'));
+  assert.ok(!JSON.stringify(result).includes(cookieFile));
+  assert.equal(await fs.readFile(cookieFile, 'utf8'), secret, 'the auth service owns the file lifetime');
+});
+
+test('missing, relative, empty, oversized and non-file cookie paths fail before launching a downloader', async t => {
+  const f = await fixture(t);
+  const empty = path.join(f.root, 'empty.txt');
+  const large = path.join(f.root, 'large.txt');
+  await fs.writeFile(empty, '');
+  await fs.writeFile(large, 'test');
+  await fs.truncate(large, 8 * 1024 * 1024 + 1);
+  for (const cookieFile of [null, '', 'relative.txt', path.join(f.root, 'missing.txt'), f.root, empty, large, `${empty}\0`]) {
+    await assert.rejects(f.download({ cookieFile }), error => error.code === 'YOUTUBE_AUTH_FILE_INVALID');
+  }
+  assert.equal(f.calls.length, 0);
+});
+
+test('cookie paths through a redirected directory are rejected before launching a downloader', async t => {
+  const f = await fixture(t);
+  const original = path.join(f.root, 'auth-owner');
+  const redirected = path.join(f.root, 'auth-link');
+  await fs.mkdir(original);
+  await fs.writeFile(path.join(original, 'session.txt'), '# Netscape HTTP Cookie File\n');
+  try { await fs.symlink(original, redirected, process.platform === 'win32' ? 'junction' : 'dir'); }
+  catch (error) {
+    if (['EPERM', 'EACCES', 'ENOTSUP'].includes(error.code)) { t.skip('Directory links are unavailable in this test environment'); return; }
+    throw error;
+  }
+  await assert.rejects(f.download({ cookieFile: path.join(redirected, 'session.txt') }), error => error.code === 'YOUTUBE_AUTH_FILE_INVALID');
+  assert.equal(f.calls.length, 0);
+});
+
+test('actual bundled yt-dlp accepts an app cookie file and downloads playable media with native JSON progress', { timeout: 60000 }, async t => {
+  if (process.platform !== 'win32') { t.skip('Bundled Windows executable integration'); return; }
+  const runtimeDir = path.resolve(__dirname, '..', 'video-runtime', 'youtube');
+  const ffmpegPath = path.resolve(runtimeDir, '..', 'ffmpeg.exe');
+  const ffprobePath = path.resolve(runtimeDir, '..', 'ffprobe.exe');
+  try { await Promise.all(['yt-dlp.exe', 'deno.exe'].map(name => fs.access(path.join(runtimeDir, name))).concat([fs.access(ffmpegPath), fs.access(ffprobePath)])); }
+  catch { t.skip('Bundled video runtime unavailable'); return; }
+  const parent = path.resolve(__dirname, '..', '.recovery', 'tests');
+  await fs.mkdir(parent, { recursive: true });
+  const root = await fs.mkdtemp(path.join(parent, 'mosaic-youtube-cli-'));
+  t.after(async () => {
+    assert.equal(path.dirname(path.resolve(root)), parent);
+    await fs.rm(root, { recursive: true, force: true });
+  });
+  const sample = path.join(root, 'sample.mp4');
+  const generated = spawnSync(ffmpegPath, ['-hide_banner', '-loglevel', 'error', '-nostdin',
+    '-f', 'lavfi', '-i', 'color=c=blue:s=64x48:r=12:d=1', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=1',
+    '-c:v', 'libopenh264', '-c:a', 'aac', '-threads', '1', '-movflags', '+faststart', '-shortest', '-y', sample],
+  { encoding: 'utf8', windowsHide: true, timeout: 20000 });
+  assert.ifError(generated.error); assert.equal(generated.status, 0, generated.stderr);
+  const bytes = await fs.readFile(sample), requests = [];
+  const server = http.createServer((request, response) => {
+    requests.push(request.url);
+    response.writeHead(200, { 'Content-Type': 'video/mp4', 'Content-Length': bytes.length }); response.end(bytes);
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(async () => { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); });
+  const infoPath = path.join(root, 'info.json');
+  // Real video extractors do not guarantee any of these optional metadata fields.
+  // The old hand-built template serialized absent fields as bare NA and failed.
+  await fs.writeFile(infoPath, JSON.stringify({ id, title: '真实 "引号" 标题\n第二行',
+    url: `http://127.0.0.1:${server.address().port}/video.mp4`, ext: 'mp4', vcodec: 'h264', acodec: 'aac', duration: 1,
+    extractor: 'youtube', extractor_key: 'Youtube', webpage_url: canonical }));
+  const directory = path.join(root, 'output 50%'); await fs.mkdir(directory);
+  const cookieFile = path.join(root, 'active session.txt');
+  await fs.writeFile(cookieFile, '# Netscape HTTP Cookie File\n');
+  const events = [];
+  const result = await downloadYouTube({ url: canonical, directory, runtimeDir, ffmpegPath, cookieFile, maxBytes: 1024 * 1024,
+    timeoutMs: 30000, onProgress: event => events.push(event),
+    spawnProcess(executable, args, options) {
+      assert.deepEqual(args.slice(-2), ['--', canonical]);
+      assert.equal(args[args.indexOf('--cookies') + 1], cookieFile);
+      return spawn(executable, [...args.slice(0, -2), '--load-info-json', infoPath], options);
+    } });
+  assert.equal(result.title, '真实 "引号" 标题第二行');
+  assert.equal(result.pageUrl, canonical);
+  assert.equal(result.duration, 1); assert.equal(result.hasAudio, true);
+  assert.ok(requests.includes('/video.mp4'));
+  assert.ok(events.filter(event => event.phase === 'downloading' && event.receivedBytes > 0).length >= 2,
+    'The real transfer progress and the final file confirmation must both be received');
+  const probe = spawnSync(ffprobePath, ['-v', 'error', '-protocol_whitelist', 'file,pipe',
+    '-show_entries', 'stream=codec_type', '-of', 'json', result.filePath], { encoding: 'utf8', windowsHide: true, timeout: 20000 });
+  assert.ifError(probe.error); assert.equal(probe.status, 0, probe.stderr);
+  const types = JSON.parse(probe.stdout).streams.map(stream => stream.codec_type);
+  assert.ok(types.includes('video')); assert.ok(types.includes('audio'));
 });

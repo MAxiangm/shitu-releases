@@ -47,8 +47,10 @@
   function rememberRecord(record) {
     const poster = posterKey(record.media_url_https || record.preview_image_url);
     if (!poster || !['video', 'animated_gif'].includes(record.type)) return;
-    const disabled = record.allow_download_status?.allow_download === false || record.allow_download === false ||
-      record.allowDownload === false || record.downloadable === false || record.is_protected === true ||
+    // Download-button availability is presentation metadata. Only actual access,
+    // encryption and live-media restrictions invalidate an otherwise readable file.
+    const disabled = record.is_protected === true || record.is_drm_protected === true ||
+      record.has_drm === true || record.is_live === true ||
       (record.ext_media_availability?.status && record.ext_media_availability.status !== 'Available');
     const items = record.video_info?.variants || record.variants;
     if (!disabled && !Array.isArray(items)) return;
@@ -97,7 +99,7 @@
 
   function hasMediaMetadata(text) {
     return (text.includes('video.twimg.com') || text.includes('pbs.twimg.com')) &&
-      /variants|allow_download|allowDownload|downloadable|is_protected|ext_media_availability/.test(text);
+      /variants|allow_download|allowDownload|downloadable|is_protected|is_drm_protected|has_drm|is_live|ext_media_availability/.test(text);
   }
 
   function readHydration(script) {
@@ -167,7 +169,6 @@
     const download = videoVariant(link?.href);
     if (!player && !video && !download) return null;
     if (video?.mediaKeys || video?.srcObject) return { error: '此 X 视频需要使用网站提供的下载功能。' };
-    if (video?.controlsList?.contains('nodownload')) return { error: '此 X 视频的下载已关闭。' };
     for (const script of document.querySelectorAll('script:not([src])')) readHydration(script);
     const current = videoVariant(video?.currentSrc || video?.getAttribute?.('src'));
     // Recycled players can retain the previous poster after binding a new
@@ -175,12 +176,38 @@
     const identity = current?.key || posterFor(video, player) || download?.key;
     if (!identity && !player) return null;
     const known = media.get(identity);
-    if (known?.disabled) return { error: '此 X 视频的下载已关闭。' };
+    if (known?.disabled) return { error: '此 X 视频受保护或当前不可读取。' };
     const declared = known?.variants.reduce((best, item) => !best || item.bitrate > best.bitrate ? item : best, null);
     const source = (download?.key === identity && download) || declared ||
       (current?.key === identity && current) || (identity && observedVariant(identity, document));
     if (source) return { url: source.url, pageUrl: selectedPost(page, video, path) || known?.pageUrl || page.href };
     return { error: '当前 X 帖文没有可读取的完整视频文件。可打开帖子详情后再试。' };
+  };
+
+  resolve.selectedPage = context => {
+    const { document, page, video, path = [], singleVideo } = context;
+    if (video?.mediaKeys || video?.srcObject) return { blocked: true };
+    if (!pageHosts.has(page?.hostname) || page.protocol !== 'https:' || !video ||
+        video.isConnected === false ||
+        (document.defaultView?.location && document.defaultView.location.href !== page.href)) return null;
+    // Reuse the same bounded metadata ingestion and clicked-player identity.
+    resolve(context);
+    const identity = videoVariant(video.currentSrc || video.getAttribute?.('src'))?.key || posterFor(video, localPlayer(video, path));
+    const selected = selectedPost(page, video, path);
+    const videoId = selected && /\/status\/(\d+)$/.exec(selected)?.[1];
+    if (!identity || !videoId) return null;
+    const known = media.get(identity);
+    if (known?.disabled) return { blocked: true };
+    if (known?.pageUrl && /\/status\/(\d+)$/.exec(known.pageUrl)?.[1] !== videoId) return null;
+    const related = [...media.entries()].filter(([, item]) => /\/status\/(\d+)$/.exec(item.pageUrl || '')?.[1] === videoId);
+    // The page downloader cannot select a carousel member. Keep those captures
+    // on their exact-file path rather than downloading the first post video.
+    if (related.length > 1 || (related.length === 1 && related[0][0] !== identity)) return null;
+    const article = video.closest?.('article');
+    const articleVideos = article?.querySelectorAll?.('video');
+    if (article && articleVideos?.length !== 1) return null;
+    if (!article && singleVideo !== true && related.length !== 1) return null;
+    return { url: selected, videoId };
   };
 
   resolve.matchesSelection = (found, snapshot) => {
@@ -214,8 +241,7 @@
   resolve.resolveAsync = async context => {
     const initial = resolve(context);
     const { document, page, video, path = [] } = context;
-    if (initial?.url || !pageHosts.has(page?.hostname) || !video || video.mediaKeys || video.srcObject ||
-        video.controlsList?.contains('nodownload')) return initial;
+    if (initial?.url || !pageHosts.has(page?.hostname) || !video || video.mediaKeys || video.srcObject) return initial;
     const player = localPlayer(video, path);
     const identity = videoVariant(video.currentSrc || video.getAttribute?.('src'))?.key || posterFor(video, player);
     if (!identity || media.get(identity)?.disabled) return initial;
@@ -243,7 +269,7 @@
         // X can remove or recycle the player while a right-click is handled.
         // Resolve the identity captured at the gesture, never the later DOM.
         const known = media.get(identity);
-        if (known?.disabled) return { error: '此 X 视频的下载已关闭。' };
+        if (known?.disabled) return { error: '此 X 视频受保护或当前不可读取。' };
         const source = known?.variants.reduce((best, item) => !best || item.bitrate > best.bitrate ? item : best, null) ||
           observedVariant(identity, document);
         return source ? { url: source.url, pageUrl: address } : initial;

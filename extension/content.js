@@ -8,13 +8,16 @@
   const VIDEO_LINK = /\.(?:mp4|m4v|webm|mov|og[gv]|mkv|avi|mpe?g|flv|m3u8|mpd)$/i;
   const BROWSER_READ_TIMEOUT = 15000;
   const DESKTOP_RECEIPT_TIMEOUT = 320000;
-  const YOUTUBE_RECEIPT_TIMEOUT = 960000;
+  const YOUTUBE_RECEIPT_TIMEOUT = 32 * 60000;
+  const SITE_FALLBACK_RECEIPT_TIMEOUT = DESKTOP_RECEIPT_TIMEOUT + YOUTUBE_RECEIPT_TIMEOUT;
   let toastHost;
   let toastTimer;
   let toastReceipt;
   let recentGesture = null;
   let videoMenu;
   let youtubeContext;
+  const youtubeSelections = new Map();
+  let youtubeSelectionSerial = 0;
   const videoMenuEvents = new WeakSet();
   let captureSerial = 0;
   let activeCaptureId = null;
@@ -131,12 +134,49 @@
     if (/^(?:(?:www|player)\.)?vimeo\.com$/.test(page.hostname)) return globalThis.MosaicVimeoVideo;
     if (/^(?:[a-z0-9-]+\.)?pinterest\.com$/.test(page.hostname)) return globalThis.MosaicPinterestVideo;
     if (globalThis.MosaicYouTubeVideo?.isPage(page)) return globalThis.MosaicYouTubeVideo;
+    if (globalThis.MosaicBilibiliVideo?.isPage(page)) return globalThis.MosaicBilibiliVideo;
     return null;
   }
   function socialTarget(video, path) {
     const page = new URL(location.href);
     const resolve = socialResolver(page);
     return resolve ? { video, path, page, resolve } : null;
+  }
+  function socialContext(social) {
+    return { document, page: social.page, video: social.video, path: social.path, absolute, trustedMedia,
+      singleVideo: document.querySelectorAll('video').length === 1 };
+  }
+  function blockedPageFallback(message) {
+    return /受保护|受限|私密|登录|无权|直播|DRM|具体视频画面|多个视频|无法确定|不一致|已变化|已切换/i.test(String(message || ''));
+  }
+  function selectedPageFallback(social, found) {
+    const pages = globalThis.MosaicVideoPages;
+    const site = pages?.siteForUrl(social?.page?.href);
+    if (!site || found?.error && blockedPageFallback(found.error)) return null;
+    const candidates = [];
+    const add = value => {
+      const source = pages.videoPageSource(value, social.page.href);
+      if (source?.site === site) candidates.push(source);
+    };
+    if (found?.pageUrl) add(found.pageUrl);
+    if (found?.openUrl) add(found.openUrl);
+    // Adapters have already checked local post/card identity and restrictions.
+    // Never infer a timeline's selected post from the window URL alone.
+    if (typeof social.resolve.selectedPage === 'function') {
+      try {
+        const selected = social.resolve.selectedPage(socialContext(social));
+        if (selected?.blocked === true) return { blocked: true };
+        add(typeof selected === 'string' ? selected : selected?.url);
+      } catch {}
+    } else if (site === 'vimeo' && social.video && document.querySelectorAll('video').length === 1) {
+      add(social.page.href);
+    }
+    const unique = new Map(candidates.map(source => [`${source.site}:${source.videoId}`, source]));
+    return unique.size === 1 ? unique.values().next().value : null;
+  }
+  function pageDownloadMedia(media, source) {
+    const { social, pageFallback, playback, error, dataBase64, mimeType, ...plain } = media;
+    return { ...plain, kind: 'video', sourceType: 'site-video', ...source, socialPageUrl: source.url };
   }
   function videoPageLink(value) {
     const href = trustedMedia(value, host => /^(?:www\.)?vimeo\.com$/.test(host));
@@ -147,13 +187,58 @@
     if (label?.trim()) return label.trim().slice(0, 240);
     try { const last = decodeURIComponent(new URL(url).pathname.split('/').pop()); return last?.slice(0, 240) || document.title.slice(0, 240); } catch { return document.title.slice(0, 240); }
   }
+  function videoExpectations(video, social) {
+    // Read once while identifying the clicked player. An async site resolver
+    // may outlive that element, or the site may recycle it for another clip.
+    // YouTube may currently be playing an ad; its downloader owns validation
+    // against the selected video's authoritative metadata instead.
+    if (social && social.resolve === globalThis.MosaicYouTubeVideo) return {};
+    const expected = {};
+    try {
+      const duration = video.duration;
+      if (typeof duration === 'number' && Number.isFinite(duration) && duration > 0 && duration <= 86400) {
+        expected.expectedDuration = duration;
+      }
+    } catch {}
+    const audioReaders = [() => video.mozHasAudio === true, () => video.audioTracks?.length > 0,
+      () => Number.isFinite(video.webkitAudioDecodedByteCount) && video.webkitAudioDecodedByteCount > 0];
+    if (audioReaders.some(read => { try { return read(); } catch { return false; } })) expected.expectedAudio = true;
+    return expected;
+  }
   function videoFrom(video, path) {
     const url = absolute(video.currentSrc || video.getAttribute('src') || video.querySelector('source[src]')?.getAttribute('src'));
     const media = { url, kind: 'video', name: url ? nameFor(video, url) : document.title.slice(0, 240) };
     if (video.mediaKeys) media.error = '这是受保护的视频，请使用网站提供的下载功能。';
     else if (video.srcObject || !url) media.error = '这个播放器没有可下载的视频文件地址。';
     if (!video.mediaKeys && !video.srcObject) media.social = socialTarget(video, path);
+    Object.assign(media, videoExpectations(video, media.social));
+    if (media.social) {
+      const fallback = selectedPageFallback(media.social);
+      if (fallback?.blocked) media.restrictedSource = true;
+      else if (fallback) media.pageFallback = fallback;
+    }
     return media;
+  }
+  function rememberYouTubeSelection(social, source) {
+    if (social?.resolve !== globalThis.MosaicYouTubeVideo || !social.video?.isConnected ||
+        !/^[A-Za-z0-9_-]{11}$/.test(source.videoId || '')) return null;
+    const selectionId = `${Date.now()}-${++youtubeSelectionSerial}`;
+    youtubeSelections.set(selectionId, { video: social.video, videoId: source.videoId, pageUrl: location.href,
+      url: social.video.currentSrc || social.video.getAttribute('src') || '',
+      poster: social.video.poster || social.video.getAttribute('poster') || '', at: Date.now(),
+      path: social.path, page: social.page });
+    if (youtubeSelections.size > 8) youtubeSelections.delete(youtubeSelections.keys().next().value);
+    return selectionId;
+  }
+  function selectedYouTubeBrowserSource(message) {
+    const selected = youtubeSelections.get(message.selectionId);
+    if (!selected || selected.videoId !== message.videoId || Date.now() - selected.at > 20 * 60000 ||
+        location.href !== selected.pageUrl || !selected.video.isConnected || selected.video.mediaKeys || selected.video.srcObject ||
+        (selected.video.currentSrc || selected.video.getAttribute('src') || '') !== selected.url ||
+        (selected.video.poster || selected.video.getAttribute('poster') || '') !== selected.poster) return null;
+    const current = globalThis.MosaicYouTubeVideo({ document, video: selected.video, path: selected.path, page: selected.page });
+    if (current?.videoId !== selected.videoId || current.error) return null;
+    return globalThis.MosaicYouTubeBrowser?.selectSource(document, selected.videoId) || null;
   }
   function imageFrom(node) {
     const image = node.tagName === 'SOURCE' || node.tagName === 'PICTURE' ? node.closest('picture')?.querySelector('img') : node;
@@ -194,6 +279,9 @@
     if (globalThis.MosaicYouTubeVideo?.isPage(new URL(location.href))) {
       return !wideSearch || Boolean(globalThis.MosaicYouTubeVideo.pageSource(location.href));
     }
+    if (globalThis.MosaicBilibiliVideo?.isPage(new URL(location.href))) {
+      return !wideSearch || Boolean(globalThis.MosaicBilibiliVideo.pageSource(location.href));
+    }
     if (protocol === 'https:' && /^(?:[a-z0-9-]+\.)?pinterest\.com$/.test(hostname)) return /^\/pin\/\d{1,32}\/?$/.test(pathname);
     if (protocol === 'https:' && /^(?:www\.)?instagram\.com$/.test(hostname)) return /^\/(?:[a-z0-9_.]+\/)?(?:reels?|p|tv)\/[a-z0-9_-]{5,32}\/?$/i.test(pathname);
     if (protocol === 'https:' && /^(?:www\.)?(?:x|twitter)\.com$/.test(hostname)) return /^\/(?:[a-z0-9_]+\/status|i\/web\/status)\/\d+(?:\/|$)/i.test(pathname);
@@ -204,6 +292,22 @@
     const clicked = path.find(node => node.tagName === 'VIDEO');
     if (clicked) return videoFrom(clicked, path);
     const image = path.find(node => /^(?:img|image)$/i.test(node.tagName));
+    // Vimeo keeps recommendation artwork inside the ended current player.
+    // Its explicit .player boundary distinguishes that artwork from sidebar
+    // thumbnails, even when the end-screen image is a link or a small tile.
+    const page = new URL(location.href);
+    if (page.protocol === 'https:' && /^(?:(?:www|player)\.)?vimeo\.com$/.test(page.hostname) && siteVideoMenuPage(true)) {
+      const player = path.map(node => node.closest?.('.player')).find(Boolean);
+      const videos = player ? [...player.querySelectorAll('video')] : [];
+      if (videos.length === 1) {
+        const video = videos[0], style = getComputedStyle(video);
+        if (video.isConnected && (video.readyState >= 2 || video.ended === true) &&
+            Number.isFinite(video.duration) && video.duration > 0 &&
+            style.display !== 'none' && style.visibility !== 'hidden' && coversPointer(video, null, event)) {
+          return videoFrom(video, path);
+        }
+      }
+    }
     // Restrict overlay lookup to the local player. A full-page video behind
     // unrelated foreground content is not the clicked asset.
     for (const container of path.slice(0, 3)) {
@@ -236,10 +340,18 @@
       const source = site.resolve({ document, page: site.page, video: null, path });
       if (source?.sourceType === 'youtube') return { ...source, kind: 'video', socialPageUrl: source.pageUrl };
     }
+    if (site && site.resolve === globalThis.MosaicBilibiliVideo) {
+      const source = site.resolve({ document, page: site.page, video: null, path, singleVideo: false });
+      if (source?.sourceType === 'site-video') return { ...source, kind: 'video', socialPageUrl: source.pageUrl };
+    }
     if (site && /vimeo\.com$/.test(site.page.hostname) && path.some(node => ['A', 'IFRAME'].includes(node.tagName))) {
       const source = site.resolve({ document, page: site.page, video: null, path, absolute, trustedMedia, singleVideo: false });
       const url = trustedMedia(source?.url);
-      if (url) return { kind: 'video', url, name: source.name || nameFor(path[0], url) };
+      const fallback = selectedPageFallback(site, source);
+      if (fallback?.blocked) return { kind: 'video', error: '当前视频受访问保护，无法下载。' };
+      if (url) return { kind: 'video', url, name: source.name || nameFor(path[0], url),
+        ...(fallback ? { pageFallback: fallback, socialPageUrl: fallback.url } : {}) };
+      if (fallback) return pageDownloadMedia({ name: document.title }, fallback);
       if (source?.error) return { kind: 'video', error: source.error, originalPage: videoPageLink(source.openUrl) };
     }
     const candidates = [...path];
@@ -251,7 +363,11 @@
     if (site && site.resolve === globalThis.MosaicPinterestVideo) {
       const source = site.resolve({ document, page: site.page, video: null, path: candidates, absolute, trustedMedia, singleVideo: false });
       const url = trustedMedia(source?.url, host => host === 'v1.pinimg.com');
-      if (url) return { kind: 'video', url, name: source.name, socialPageUrl: source.pageUrl };
+      if (url) {
+        const fallback = selectedPageFallback(site, source);
+        if (fallback?.blocked) return { kind: 'video', error: '当前视频受访问保护，无法下载。' };
+        return { kind: 'video', url, name: source.name, socialPageUrl: source.pageUrl, ...(fallback ? { pageFallback: fallback } : {}) };
+      }
     }
     for (const node of candidates) { const result = imageFrom(node); if (result) return result; }
     for (const node of candidates) { const result = videoLinkFrom(node); if (result) return result; }
@@ -322,17 +438,20 @@
   }
 
   async function resolveMedia(media, { browserVideo = false, onRead = () => {} } = {}) {
-    const { social, ...plainMedia } = media;
+    const { social, restrictedSource, ...plainMedia } = media;
     media = plainMedia;
+    if (restrictedSource) throw new Error('当前视频受访问保护，无法下载。');
     if (social) {
       if (location.href !== social.page.href || !social.video.isConnected) throw new Error('页面已切换，请在当前视频上重新采集。');
       if (social.video.mediaKeys || social.video.srcObject) throw new Error('这个播放器没有可下载的视频文件地址。');
       const selectedUrl = social.video.currentSrc || social.video.getAttribute('src');
       const selectedPoster = social.video.poster || social.video.getAttribute('poster');
-      const found = await (social.resolve.resolveAsync || social.resolve)({
-        document, page: social.page, video: social.video, path: social.path, absolute, trustedMedia,
-        singleVideo: document.querySelectorAll('video').length === 1
-      });
+      let found;
+      try { found = await (social.resolve.resolveAsync || social.resolve)(socialContext(social)); }
+      catch (error) {
+        if (!media.pageFallback || blockedPageFallback(error.message)) throw error;
+        found = { error: error.message || '无法读取视频来源。' };
+      }
       const currentUrl = social.video.currentSrc || social.video.getAttribute('src');
       const samePoster = selectedPoster && (social.video.poster || social.video.getAttribute('poster')) === selectedPoster;
       const blobOrigin = `blob:${social.page.origin}/`;
@@ -342,23 +461,44 @@
           (!selectedSource && (!social.video.isConnected || (currentUrl !== selectedUrl && !playerStarted)))) {
         throw new Error('页面或视频已切换，请在当前视频上重新采集。');
       }
-      if (found?.error) throw Object.assign(new Error(found.error), { originalPage: videoPageLink(found.openUrl) });
+      const resolvedFallback = selectedPageFallback(social, found);
+      if (resolvedFallback?.blocked) throw new Error('当前视频受访问保护，无法下载。');
+      if (media.pageFallback && resolvedFallback && (media.pageFallback.site !== resolvedFallback.site || media.pageFallback.videoId !== resolvedFallback.videoId)) {
+        throw new Error('视频帖子已变化，请重新采集。');
+      }
+      const fallback = resolvedFallback || media.pageFallback;
+      if (found?.error && (!fallback || blockedPageFallback(found.error))) {
+        throw Object.assign(new Error(found.error), { originalPage: videoPageLink(found.openUrl) });
+      }
       const source = trustedMedia(found?.url);
-      if (source) {
+      if (found?.sourceType === 'site-video' && fallback) {
+        media = pageDownloadMedia({ ...media, name: found.name || media.name }, fallback);
+      } else if (source) {
         media.url = source;
         media.name = found.name || nameFor(social.video, source);
         media.socialPageUrl = found.pageUrl;
         if (found.sourceType === 'youtube') {
           media.sourceType = found.sourceType;
           media.videoId = found.videoId;
+          const selectionId = rememberYouTubeSelection(social, found);
+          if (selectionId) media.youtubeSelectionId = selectionId;
         }
         if (found.playback) media.playback = found.playback;
+        if (fallback) { media.pageFallback = fallback; media.socialPageUrl = fallback.url; }
         delete media.error;
-      }
+      } else if (fallback) media = pageDownloadMedia(media, fallback);
     }
     if (media.error) throw Object.assign(new Error(media.error), { originalPage: videoPageLink(media.originalPage) });
+    if (media.kind === 'video' && !media.playback && /\.(m3u8|mpd)(?:$|[?#])/i.test(media.url) && media.pageFallback) {
+      media = pageDownloadMedia(media, media.pageFallback);
+    }
     const result = { ...media, pageUrl: location.href, title: document.title };
-    if (media.sourceType === 'youtube') return result;
+    if (media.sourceType === 'youtube') {
+      delete result.expectedDuration;
+      delete result.expectedAudio;
+      return result;
+    }
+    if (media.sourceType === 'site-video') return result;
     if (media.playback) return result;
     if (media.kind === 'video' && /\.(m3u8|mpd)(?:$|[?#])/i.test(media.url)) throw new Error('这是分段流媒体，暂不能保存为视频文件。请使用网站提供的下载功能。');
     if (browserVideo && media.pageUrl && media.pageUrl !== location.href) return result;
@@ -435,7 +575,9 @@
       showCapture(captureId, '正在连接桌面 Mosaic…');
       submitted = true;
       const response = await deadline(() => chrome.runtime.sendMessage({ type: 'shitu:capture', media: prepared, clientCaptureId: captureId }),
-        prepared.sourceType === 'youtube' ? YOUTUBE_RECEIPT_TIMEOUT : DESKTOP_RECEIPT_TIMEOUT,
+        prepared.sourceType === 'youtube' && prepared.youtubeSelectionId ? YOUTUBE_RECEIPT_TIMEOUT * 2 :
+          ['youtube', 'site-video'].includes(prepared.sourceType) ? YOUTUBE_RECEIPT_TIMEOUT :
+          prepared.pageFallback ? SITE_FALLBACK_RECEIPT_TIMEOUT : DESKTOP_RECEIPT_TIMEOUT,
         '未收到保存确认，请在采集助手或 Mosaic 的「最近导入」核对结果。');
       if (!response?.ok) throw new Error(response?.error || '采集失败，请打开桌面软件重试。');
       if (!(Number.isSafeInteger(response.imported) && response.imported > 0) && !(Number.isSafeInteger(response.duplicates) && response.duplicates > 0)) throw new Error('桌面未确认素材入库，请在 Mosaic 中检查后重试。');
@@ -583,6 +725,11 @@
       if (!media || !current) { sendResponse({ ok: false, error: '请在要下载的 YouTube 视频画面、标题或封面上右键。' }); return; }
       resolveMedia(media).then(prepared => sendResponse({ ok: true, media: prepared }), error => sendResponse({ ok: false, error: error.message }));
       return true;
+    }
+    if (message?.type === 'shitu:resolve-youtube-browser') {
+      const media = selectedYouTubeBrowserSource(message);
+      sendResponse(media ? { ok: true, media } : { ok: false, error: '当前所选视频没有可读取的完整播放文件，请播放后重新采集。' });
+      return;
     }
   });
 })();

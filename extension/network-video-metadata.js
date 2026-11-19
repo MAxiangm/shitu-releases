@@ -81,7 +81,9 @@
     if (value.allow_download_status?.allow_download === false) {
       clean.allow_download_status = { allow_download: false }; restricted = true;
     }
-    if (value.is_protected === true) { clean.is_protected = true; restricted = true; }
+    for (const key of ['is_protected', 'is_drm_protected', 'has_drm', 'is_live']) {
+      if (value[key] === true) { clean[key] = true; restricted = true; }
+    }
     if (typeof value.ext_media_availability?.status === 'string' && value.ext_media_availability.status !== 'Available') {
       clean.ext_media_availability = { status: 'Unavailable' }; restricted = true;
     }
@@ -130,9 +132,10 @@
       const cleaned = cleanRecord(entry);
       if (cleaned) {
         const previous = records.get(cleaned.key);
-        // A sparse denial must not be erased by a later ordinary rendition.
+        // Sparse access/protection metadata must not be erased by a later rendition.
         if (previous) {
-          for (const key of ['allow_download', 'allowDownload', 'downloadable', 'is_protected', 'allow_download_status', 'ext_media_availability']) {
+          for (const key of ['allow_download', 'allowDownload', 'downloadable', 'is_protected', 'is_drm_protected',
+            'has_drm', 'is_live', 'allow_download_status', 'ext_media_availability']) {
             if (Object.hasOwn(previous, key)) cleaned.record[key] = previous[key];
           }
           if (!cleaned.record.video_info.variants.length) cleaned.record.video_info = previous.video_info;
@@ -154,7 +157,8 @@
     if (script?.tagName !== 'SCRIPT' || script.src || script.hasAttribute?.('data-mosaic-video-records')) return;
     const text = script.textContent;
     if (!text || text.length > 2 * 1024 * 1024 || scannedScripts.get(script) === text ||
-        !text.includes('video.twimg.com') || !/variants|unified_card/.test(text)) return;
+        (!text.includes('video.twimg.com') && !text.includes('pbs.twimg.com')) ||
+        !/variants|unified_card|is_protected|is_drm_protected|has_drm|is_live|ext_media_availability/.test(text)) return;
     scannedScripts.set(script, text);
     if (script.type === 'application/json' || script.type === 'application/ld+json') {
       try { collect(JSON.parse(text)); } catch {}
@@ -168,7 +172,7 @@
     // Read the data literals in X's self-removing SSR stream scripts without
     // executing any of the script or retaining unrelated fields from the JSON.
     for (const match of text.matchAll(/"(?:[^"\\]|\\[\s\S])*"/g)) {
-      if (!match[0].includes('video.twimg.com')) continue;
+      if (!match[0].includes('video.twimg.com') && !match[0].includes('pbs.twimg.com')) continue;
       try {
         const decoded = JSON.parse(match[0]);
         if (decoded.startsWith('{') || decoded.startsWith('[')) collect(JSON.parse(decoded));

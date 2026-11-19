@@ -163,7 +163,9 @@
   }
 
   function currentPlayback(document, page, video, id, trustedMedia, singleVideo) {
-    if (!video || !id || video.mediaKeys || video.srcObject || video.controlsList?.contains('nodownload')) return null;
+    // Hiding the site's save command does not make an ordinary player source
+    // unreadable. Keep encrypted/live-stream checks separate from UI hints.
+    if (!video || !id || video.mediaKeys || video.srcObject) return null;
     const active = video.currentSrc || video.getAttribute?.('src');
     const source = playbackSource(active, id, trustedMedia);
     if (source) return source;
@@ -278,7 +280,7 @@
   resolve.resolveAsync = async context => {
     const initial = resolve(context);
     const { document, page, video, trustedMedia, singleVideo } = context;
-    if (initial?.url || initial?.restricted || video?.mediaKeys || video?.srcObject || video?.controlsList?.contains('nodownload') ||
+    if (initial?.url || initial?.restricted || video?.mediaKeys || video?.srcObject ||
         !video || !activeSelection(document, video, singleVideo)) return initial;
     const id = publicPlaybackId(page);
     const declared = id && nextPage(document, page, id)?.embedUrl;

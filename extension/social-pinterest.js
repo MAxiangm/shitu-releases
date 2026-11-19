@@ -93,19 +93,23 @@
     if (video && !key && !ownerId && (current && !current.startsWith(`blob:${page.origin}/`) || (!singleVideo && !cover))) return null;
 
     const matching = new Map();
-    let hasRecord = false;
+    let hasRecord = false, matchedSelection = false;
     for (const script of document.querySelectorAll('script[data-relay-completed-request="true"]')) {
       const pin = readPin(script, id);
       if (!pin) continue;
       hasRecord = true;
       if (!pin.videos) continue;
-      if (pin.isEligibleForVideoDownload === false || pin.videos.downloadable === false || pin.videos.isProtected === true) return { hasRecord, source: null };
+      // The site's save-button flags do not determine whether the selected
+      // ordinary playback file can be read. Keep actual protection checks.
+      if (pin.videos.isProtected === true) return { hasRecord, blocked: true, source: null };
       const list = pin.videos.videoList;
       const details = list && typeof list === 'object' && !Array.isArray(list) ? Object.values(list).slice(0, 64) : [];
       const urls = Array.isArray(pin.videos.videoUrls) ? pin.videos.videoUrls.slice(0, 64) : [];
       const renditions = [list?.v720P?.url, ...details.map(item => item?.url), ...urls];
       const title = [pin.title, pin.gridTitle, pin.closeupUnifiedTitle, pin.description, document.title].find(value => typeof value === 'string' && value.trim());
       const coverMatches = isPinCover(pin, cover);
+      if (key ? renditions.some(value => videoIdentity(value, page) === key)
+        : cover ? coverMatches : video && (ownerId === id || singleVideo === true)) matchedSelection = true;
       for (const rendition of renditions) {
         const candidate = directVideo(rendition);
         if (!candidate || (key ? candidate.key !== key : cover && !coverMatches && candidate.key !== cover)) continue;
@@ -114,7 +118,7 @@
       }
     }
     const selected = matching.size === 1 ? matching.values().next().value : null;
-    return { hasRecord, id, current, poster, key, cover, ownerId,
+    return { hasRecord, matchedSelection, id, current, poster, key, cover, ownerId,
       source: selected ? { url: selected.url, name: selected.name, pageUrl: new URL(`/pin/${id}/`, page.origin).href } : null };
   }
 
@@ -140,6 +144,16 @@
   }
 
   const resolve = context => inspect(context)?.source || null;
+  resolve.selectedPage = context => {
+    if (context.video?.mediaKeys || context.video?.srcObject) return { blocked: true };
+    const selected = inspect(context);
+    if (selected?.blocked) return { blocked: true };
+    if (!selected || context.video?.isConnected === false ||
+        (context.document.defaultView?.location && context.document.defaultView.location.href !== context.page.href)) return null;
+    if (selected.hasRecord ? !selected.matchedSelection
+      : !context.video || (!selected.ownerId && context.singleVideo !== true)) return null;
+    return { url: new URL(`/pin/${selected.id}/`, context.page.origin).href, videoId: selected.id };
+  };
   // Pinterest's client-side navigation can leave only the previous page's
   // serialized data in the DOM. Read the selected Pin's own HTML on demand.
   // Keep the synchronous resolver for hit-testing images and video covers.

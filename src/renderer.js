@@ -3055,7 +3055,7 @@ function renderCaptureResult(result) {
   const box = $('collectorLastCapture');
   box.replaceChildren(); box.classList.toggle('hidden', !result);
   if (!result) return;
-  const messages = { reading: '正在解析 YouTube 视频…', receiving: '正在接收浏览器中的素材…', downloading: '正在下载网页素材，尚未入库…',
+  const messages = { connecting: '请在打开的窗口完成 YouTube 登录，完成后自动继续下载…', reading: '正在解析视频下载地址…', verifying: '正在检查视频画面、声音和时长…', receiving: '正在接收浏览器中的素材…', downloading: '正在下载网页素材，尚未入库…',
     muxing: '正在合并音视频，保留原画质和声音…', importing: '下载完成，正在写入素材库…' };
   let message = messages[result.status];
   if (result.status === 'error') message = `上次采集未保存：${result.error || '请重试'}`;
@@ -3081,10 +3081,15 @@ async function refreshCollector(quiet = false) {
     $('collectorPath').textContent = info.extensionPath ? `扩展目录：${info.extensionPath}` : '';
     $('openExtensionFolder').disabled = !info.extensionPath;
     renderCaptureResult(info.lastCapture);
+    await refreshYouTubeConnection();
   } catch (error) {
     $('collectorStatus').classList.add('unavailable');
     $('collectorStatus').textContent = `无法读取本地接收服务状态：${error.message || error}`;
   } finally { refreshingCollector = false; $('refreshCollector').disabled = false; }
+}
+function refreshYouTubeConnection() {
+  const status = $('youtubeConnectionStatus');
+  if (status) status.textContent = '在 Chrome 工具栏打开 Mosaic 采集助手，分别开启 YouTube 或 B 站登录授权。之后在原视频页面按 Alt＋右键下载。';
 }
 function showCollector() {
   folderTreeDrag.cancel();

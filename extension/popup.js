@@ -13,6 +13,24 @@ let folderChange = 0;
 let savingFolder = false;
 let recentRequestId = null;
 let locating = false;
+const BROWSER_SESSIONS = {
+  youtube: { label: 'YouTube', origin: 'https://*.youtube.com/*', capability: 'youtubeBrowserSession', enabled: false, supported: false },
+  bilibili: { label: 'Bilibili', origin: 'https://*.bilibili.com/*', capability: 'bilibiliBrowserSession', enabled: false, supported: false }
+};
+let changingBrowserSession = false;
+
+async function refreshBrowserSessionPermissions() {
+  await Promise.all(Object.entries(BROWSER_SESSIONS).map(async ([key, site]) => {
+    const button = $(`${key}SessionToggle`), message = $(`${key}SessionStatus`);
+    try { site.enabled = Boolean(await chrome.permissions?.contains({ permissions: ['cookies'], origins: [site.origin] })); }
+    catch { site.enabled = false; }
+    button.textContent = `${site.enabled ? '停用' : '使用'}当前 ${site.label} 登录`;
+    button.disabled = changingBrowserSession || (!site.enabled && (!site.supported || !chrome.permissions?.request));
+    message.textContent = site.enabled
+      ? site.supported ? `已开启，下载时使用当前 Chrome 的 ${site.label} 登录。` : '已开启，请更新并连接桌面 Mosaic 后使用。'
+      : site.supported ? '未开启，普通公开视频仍可直接下载。' : '请先更新并连接桌面 Mosaic。';
+  }));
+}
 
 async function ensureWorkerVersion() {
   if (workerVerified) return true;
@@ -151,6 +169,7 @@ async function checkConnection(force = false) {
   try {
     if (!await ensureWorkerVersion()) return false;
     const result = await send({ type: force ? 'shitu:reconnect' : 'shitu:ping' });
+    for (const site of Object.values(BROWSER_SESSIONS)) site.supported = result?.ok === true && result[site.capability] === true;
     if (result?.ok) {
       status(result.ready ? `已连接 · ${result.version}` : '已连接 · 请先选择素材库', result.ready ? 'online' : '');
       $('feedback').textContent = result.ready
@@ -164,13 +183,42 @@ async function checkConnection(force = false) {
     await Promise.all([showRecent(), refreshFolders(result, sequence)]);
     return false;
   } catch {
+    for (const site of Object.values(BROWSER_SESSIONS)) site.supported = false;
     status('连接检查失败', 'offline');
     $('feedback').textContent = '扩展可能正在更新，请关闭此窗口后重新打开。';
     if (!savingFolder && sequence === folderChange) renderFolders(null);
     return false;
   }
-  finally { checking = false; $('check').disabled = reloading; }
+  finally { checking = false; $('check').disabled = reloading; await refreshBrowserSessionPermissions(); }
 }
+async function changeBrowserSessionPermission(key, event) {
+  const site = BROWSER_SESSIONS[key];
+  if (!event.isTrusted || changingBrowserSession || !chrome.permissions?.request ||
+      (!site.enabled && !site.supported)) return;
+  changingBrowserSession = true;
+  for (const name of Object.keys(BROWSER_SESSIONS)) $(`${name}SessionToggle`).disabled = true;
+  try {
+    // Request immediately inside the real click, before any asynchronous work.
+    const disabling = site.enabled;
+    const change = disabling
+      ? chrome.permissions.remove({ origins: [site.origin] })
+      : chrome.permissions.request({ permissions: ['cookies'], origins: [site.origin] });
+    await change;
+    if (disabling) {
+      const remaining = await Promise.all(Object.values(BROWSER_SESSIONS).map(item => chrome.permissions.contains({ origins: [item.origin] })));
+      if (!remaining.some(Boolean)) await chrome.permissions.remove({ permissions: ['cookies'] });
+    }
+    await refreshBrowserSessionPermissions();
+  } catch {
+    $(`${key}SessionStatus`).textContent = '未能更改授权，请稍后重试。';
+  } finally {
+    changingBrowserSession = false;
+    await refreshBrowserSessionPermissions();
+  }
+}
+for (const key of Object.keys(BROWSER_SESSIONS)) $(`${key}SessionToggle`).addEventListener('click', event => changeBrowserSessionPermission(key, event));
+chrome.permissions?.onAdded?.addListener(() => { void refreshBrowserSessionPermissions(); });
+chrome.permissions?.onRemoved?.addListener(() => { void refreshBrowserSessionPermissions(); });
 $('check').addEventListener('click', () => checkConnection(true));
 $('captureFolder').addEventListener('change', async event => {
   if (!event.isTrusted || !folderState || savingFolder) return;

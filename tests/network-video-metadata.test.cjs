@@ -243,7 +243,7 @@ test('X records and variants stay bounded and reject mismatched or spoofed CDN s
   assert.ok(instance.data().media.every(item => item.video_info.variants.every(item => !item.url.includes('.example'))));
 });
 
-test('X download restrictions survive later ordinary metadata', async () => {
+test('X download-button hints do not reject a readable rendition after metadata updates', async () => {
   let entry = record('34', { allow_download_status: { allow_download: false }, text: 'not exposed' });
   const instance = fixture({ fetchImpl: () => Promise.resolve(response({ media: [entry] })) });
   await instance.context.fetch(api);
@@ -253,7 +253,31 @@ test('X download restrictions survive later ordinary metadata', async () => {
   await instance.context.fetch(api);
   await settled(() => instance.scripts[0] !== previous);
   assert.equal(instance.data().media[0].allow_download_status.allow_download, false);
-  assert.match(instance.resolve({ poster: poster('34') }).error, /下载已关闭/);
+  assert.equal(instance.resolve({ poster: poster('34'), controlsList: { contains: () => true } }).url, mp4('34'));
+});
+
+test('X network observation preserves actual protection and live flags through sparse and later records', async () => {
+  for (const field of ['is_protected', 'is_drm_protected', 'has_drm', 'is_live']) {
+    let entry = record('34', { [field]: true, video_info: { variants: [] }, privateText: 'not retained' });
+    const instance = fixture({ fetchImpl: () => Promise.resolve(response({ media: [entry] })) });
+    await instance.context.fetch(api);
+    await settled(() => instance.scripts.length === 1);
+    const previous = instance.scripts[0];
+    entry = record('34');
+    await instance.context.fetch(api);
+    await settled(() => instance.scripts[0] !== previous);
+    assert.equal(instance.data().media[0][field], true, field);
+    assert.equal(instance.scripts[0].textContent.includes('privateText'), false);
+    assert.match(instance.resolve({ poster: poster('34'), currentSrc: mp4('34') }).error, /受保护|不可读取/);
+  }
+});
+
+test('X sparse protected SSR metadata is preserved without requiring an MP4 URL', () => {
+  const payload = { media: [record('34', { has_drm: true, video_info: { variants: [] } })] };
+  const initial = { tagName: 'SCRIPT', type: 'application/json', textContent: JSON.stringify(payload) };
+  const instance = fixture({ initialScripts: [initial] });
+  assert.equal(instance.data().media[0].has_drm, true);
+  assert.match(instance.resolve({ poster: poster('34'), currentSrc: mp4('34') }).error, /受保护|不可读取/);
 });
 
 test('X XHR observation preserves open arguments, response data, and normal load listeners', () => {

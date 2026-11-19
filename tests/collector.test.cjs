@@ -479,7 +479,7 @@ test('download failures and timeouts become explicit errors without a saved asse
   assert.deepEqual(failed, { phase: 'error', at: failed.at, receivedBytes: 0 });
 });
 
-test('the web video retry signal is reserved for browser-readable authorization failures', async t => {
+test('browser retries keep their authorization signal while unsupported streams allow only a selected-page fallback', async t => {
   const server = await sourceServer(t, (request, response) => {
     if (request.url === '/session.mp4') response.writeHead(403).end('Sign in');
     else if (request.url === '/login.mp4') response.writeHead(200, { 'Content-Type': 'text/html' }).end('<html>Sign in</html>');
@@ -492,7 +492,7 @@ test('the web video retry signal is reserved for browser-readable authorization 
   assert.equal(html.body.code, 'VIDEO_BROWSER_READ');
   const playlist = await setup.capture({ kind: 'video', url: server.url + '/playlist' });
   assert.equal(playlist.body.ok, false);
-  assert.equal(playlist.body.code, undefined);
+  assert.equal(playlist.body.code, 'VIDEO_SOURCE_FAILED');
   const imageResult = await setup.capture({ kind: 'image', url: server.url + '/session.mp4' });
   assert.equal(imageResult.body.code, undefined);
   assert.equal(setup.library.snapshot().stats.total, 0);

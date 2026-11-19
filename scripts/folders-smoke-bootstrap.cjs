@@ -1,4 +1,18 @@
 'use strict';
+async function executeRendererStep(contents, code) {
+  const result = await contents.executeJavaScript(`(async () => {
+    try { return { ok: true, value: await (${code}) }; }
+    catch (error) { return { ok: false, error: {
+      message: String(error?.message || error), stack: String(error?.stack || ''),
+      step: String(window.__folderSmokeStep || '')
+    } }; }
+  })()`);
+  if (!result?.ok) {
+    const error = result?.error || {};
+    throw new Error(`Folder renderer${error.step ? ` (${error.step})` : ''}: ${error.message || 'No script result'}\n${error.stack || ''}`);
+  }
+  return result.value;
+}
 module.exports = function configureFoldersSmoke({ root, base }) {
   const fs = require('node:fs/promises');
   const path = require('node:path');
@@ -9,7 +23,7 @@ module.exports = function configureFoldersSmoke({ root, base }) {
   const { Library } = require(path.join(root, 'src', 'library.cjs'));
   const fixture = require(path.join(base, 'folder-smoke-fixture.json'));
   const resultPath = path.join(base, 'result.json');
-  const failures = [], requests = [];
+  const failures = [], requests = [], rendererDiagnostics = [];
   let completed = false, libraryPickerTarget = null;
   const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
   require(path.join(root, 'src', 'collector.cjs')).createCollector = () => ({ start: async () => ({}), info: () => ({ enabled: false }), activeCount: () => 0, close: async () => {} });
@@ -22,7 +36,7 @@ module.exports = function configureFoldersSmoke({ root, base }) {
   shell.openExternal = async () => { throw new Error('Folder smoke must not open the browser'); };
   const fail = async error => {
     if (completed) return; completed = true;
-    await fs.writeFile(resultPath, JSON.stringify({ ok: false, error: error.stack || String(error), failures }, null, 2)); app.exit(1);
+    await fs.writeFile(resultPath, JSON.stringify({ ok: false, error: error.stack || String(error), failures, rendererDiagnostics }, null, 2)); app.exit(1);
   };
   app.whenReady().then(() => session.defaultSession.webRequest.onBeforeRequest({ urls: ['http://*/*', 'https://*/*'] }, (details, callback) => {
     requests.push(details.url); callback({ cancel: true });
@@ -30,11 +44,18 @@ module.exports = function configureFoldersSmoke({ root, base }) {
   app.on('browser-window-created', (_event, window) => {
     window.show = () => {}; window.setSkipTaskbar(true); window.setOpacity(0); window.showInactive(); window.webContents.setBackgroundThrottling(false);
     window.webContents.on('render-process-gone', (_event, details) => failures.push('Renderer exited: ' + details.reason));
+    window.webContents.on('console-message', (_event, value, message, lineNumber, sourceId) => {
+      const entry = typeof value === 'object' && value ? value : { level: value, message, lineNumber, sourceId };
+      if (entry.level !== 'error' && entry.level !== 3) return;
+      rendererDiagnostics.push({ message: String(entry.message || '').slice(0, 4000), line: entry.lineNumber, source: entry.sourceId });
+      if (rendererDiagnostics.length > 20) rendererDiagnostics.shift();
+    });
     window.webContents.once('did-finish-load', async () => {
       if (!window.webContents.getURL().endsWith('/src/index.html')) return;
       try {
         assert.equal(app.getPath('userData'), path.join(base, 'profile'));
-        const result = await window.webContents.executeJavaScript(`(async () => {
+        const result = await executeRendererStep(window.webContents, `(async () => {
+          window.__folderSmokeStep = 'create and navigate hierarchy';
           const check = (condition, message) => { if (!condition) throw new Error(message); };
           const wait = async (predicate, label) => {
             const deadline = Date.now() + 10000;
@@ -90,6 +111,7 @@ module.exports = function configureFoldersSmoke({ root, base }) {
           check(childB !== childA, 'Same-name children under separate parents lost their identity');
           let cycleRejected = false; try { await api.moveFolder(rootA, leafA); } catch { cycleRejected = true; }
           check(cycleRejected, 'Moving a parent inside its own descendant was accepted');
+          window.__folderSmokeStep = 'import assets into nested folders';
           const samples = ${JSON.stringify(fixture.samples)};
           const folderIds = [rootA, childA, leafA, rootB];
           const assetIds = [];
@@ -100,6 +122,7 @@ module.exports = function configureFoldersSmoke({ root, base }) {
             assetIds.push(imported.report.assetIds[0]); applyLibrary(imported.snapshot, false);
           }
           selectFolder(rootA); check(filteredAssets().length === 1 && filteredAssets()[0].id === assetIds[0], 'A folder view mixed descendants into its direct assets');
+          window.__folderSmokeStep = 'tree counts and expansion';
           check(document.getElementById('breadcrumbCurrent').textContent.includes('项目 A'), 'Parent breadcrumb missing');
           browser.open = true;
           const count = row(rootA).querySelector('.nav-count'); check(count.textContent === '3', 'Tree count omitted descendant assets');
@@ -110,6 +133,7 @@ module.exports = function configureFoldersSmoke({ root, base }) {
           selectFolder(childA); check(filteredAssets().length === 1 && filteredAssets()[0].id === assetIds[1], 'Child view mixed its descendant into direct assets');
           selectFolder(leafA); check(filteredAssets().length === 1 && filteredAssets()[0].id === assetIds[2], 'Leaf folder view was not exact');
           check(document.getElementById('breadcrumbCurrent').textContent === '项目 A / 参考 / 细节', 'Breadcrumb did not show the complete hierarchy');
+          window.__folderSmokeStep = 'details folder destinations';
           changeView('all', rootA); state.selected = new Set([assetIds[1]]); toggleDetails(true); renderDetails();
           const destinations = [...document.getElementById('detailFolder').options];
           check(destinations.find(item => item.value === leafA)?.textContent === '项目 A / 参考 / 细节', 'Details did not show the leaf path');
@@ -117,6 +141,7 @@ module.exports = function configureFoldersSmoke({ root, base }) {
           document.getElementById('detailFolder').value = childB; document.getElementById('detailFolder').dispatchEvent(new Event('change', { bubbles: true }));
           await wait(async () => (await api.getLibrary()).assets.find(item => item.id === assetIds[1]).folderId === childB, 'Details did not move the selected image to the child folder');
           applyLibrary(await api.getLibrary(), false);
+          window.__folderSmokeStep = 'move folder and verify breadcrumbs';
           await openManage(rootA, 'move');
           const allowedParents = [...document.getElementById('modalParent').options].map(item => item.value);
           check(!allowedParents.includes(rootA) && !allowedParents.includes(childA) && !allowedParents.includes(leafA), 'Move chooser offered the selected folder or its descendants');
@@ -127,6 +152,7 @@ module.exports = function configureFoldersSmoke({ root, base }) {
           check(state.library.assets.find(item => item.id === assetIds[2]).folderId === leafA, 'Moving a folder changed the image assignment');
           check(document.getElementById('folderBreadcrumbs').textContent.includes('项目 B') && !document.getElementById('folderBreadcrumbs').textContent.includes('项目 A'), 'Moved folder breadcrumb kept its old parent');
           const extra = await api.createFolder('待整理子级', childA); applyLibrary(extra, false);
+          window.__folderSmokeStep = 'delete subtree and prune history';
           const deleteLeaf = extra.folders.find(item => item.name === '待整理子级').id;
           const imported = await api.importPaths([samples[4].filename], deleteLeaf); assetIds.push(imported.report.assetIds[0]); applyLibrary(imported.snapshot, false);
           changeView('all', childA); changeView('all', deleteLeaf); changeView('all', rootA);
@@ -153,7 +179,10 @@ module.exports = function configureFoldersSmoke({ root, base }) {
             pathBarCreateRoot: true, pathBarCreateChild: true, upAndHistoryButtons: true, clickableAncestorBreadcrumbs: true,
             rootUpDisabled: true, movedBreadcrumbUpdated: true, deletedHistoryPruned: true };
         })()`);
-        const js = code => window.webContents.executeJavaScript(code);
+        const js = async code => {
+          try { return await window.webContents.executeJavaScript(code); }
+          catch (error) { throw new Error(`${error.message}\nFolder renderer step: ${code.slice(0, 800)}`); }
+        };
         const altKey = keyCode => {
           window.webContents.sendInputEvent({ type: 'keyDown', keyCode, modifiers: ['alt'] });
           window.webContents.sendInputEvent({ type: 'keyUp', keyCode, modifiers: ['alt'] });
@@ -324,7 +353,7 @@ module.exports = function configureFoldersSmoke({ root, base }) {
         assert.deepEqual(backupLibrary.snapshot().folders, snapshot.folders);
         assert.deepEqual(backupLibrary.snapshot().assets, snapshot.assets);
         assert.deepEqual(failures, []); assert.deepEqual(requests, []);
-        await window.webContents.executeJavaScript("document.getElementById('toastStack').replaceChildren()");
+        await js("document.getElementById('toastStack').replaceChildren()");
         let screenshotCaptured = false, screenshotError;
         for (let attempt = 0; attempt < 3 && !screenshotCaptured; attempt++) {
           window.webContents.invalidate();
@@ -369,3 +398,4 @@ module.exports = function configureFoldersSmoke({ root, base }) {
   });
   setTimeout(() => fail(new Error('Folder UI smoke timed out')), 75000).unref();
 };
+module.exports.executeRendererStep = executeRendererStep;
