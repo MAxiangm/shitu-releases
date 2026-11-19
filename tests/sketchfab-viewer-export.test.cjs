@@ -216,3 +216,144 @@ test('accepts deeply frozen JSON data and never calls toJSON supplied by an inpu
   assert.equal(exportSketchfabViewer(input).stats.meshCount, 1);
   let called = false; invalid({ ...snapshot(), toJSON() { called = true; return snapshot(); } }); assert.equal(called, false);
 });
+
+test('PBR channels survive GLB export with distinct linear textures and exact JSON accounting', () => {
+  const material = { metallicFactor: 0.75, roughnessFactor: 0.3, metallicRoughnessTexture: 0,
+    normalTexture: 1, normalScale: 0.5, occlusionTexture: 2, occlusionStrength: 0.8,
+    emissiveTexture: 3, emissiveFactor: [0.25, 0.5, 1], doubleSided: false };
+  const input = snapshot([{ ...triangle(), texcoords: [0, 0, 1, 0, 0, 1], material }], Array.from({ length: 4 }, () => image()));
+  const saved = structuredClone(input), bytes = Buffer.byteLength(JSON.stringify(input));
+  const result = exportSketchfabViewer(input, { limits: { jsonBytes: bytes } }), parsed = parseGlb(result.glb);
+  assert.deepEqual(input, saved);
+  assert.equal(result.stats.inputJsonBytes, bytes);
+  const output = parsed.doc.materials[0];
+  assert.deepEqual(output.pbrMetallicRoughness, { metallicFactor: 0.75, roughnessFactor: 0.3, metallicRoughnessTexture: { index: 0 } });
+  assert.deepEqual(output.normalTexture, { index: 1, scale: 0.5 });
+  assert.deepEqual(output.occlusionTexture, { index: 2, strength: 0.8 });
+  assert.deepEqual(output.emissiveTexture, { index: 3 });
+  assert.deepEqual(output.emissiveFactor, [0.25, 0.5, 1]);
+  assert.equal(output.alphaMode, undefined, 'alpha in data textures does not make a surface transparent');
+  invalid(input, { limits: { jsonBytes: bytes - 1 } }, 'SKETCHFAB_VIEWER_TOO_LARGE');
+});
+
+test('packed PBR and emissive textures use nonzero factors while legacy diffuse material remains nonmetal', () => {
+  const uv = [0, 0, 1, 0, 0, 1];
+  const parsed = parseGlb(exportSketchfabViewer(snapshot([
+    { ...triangle(), texcoords: uv, material: { metallicRoughnessTexture: 0, emissiveTexture: 0 } },
+    { ...triangle(), material: { metallicFactor: 0.2, roughnessFactor: 0 } },
+    triangle(),
+  ], [image()])).glb);
+  assert.deepEqual(parsed.doc.materials[0].pbrMetallicRoughness, { metallicFactor: 1, roughnessFactor: 1, metallicRoughnessTexture: { index: 0 } });
+  assert.deepEqual(parsed.doc.materials[0].emissiveFactor, [1, 1, 1]);
+  assert.deepEqual(parsed.doc.materials[1].pbrMetallicRoughness, { metallicFactor: 0.2, roughnessFactor: 0 });
+  assert.deepEqual(parsed.doc.materials[2].pbrMetallicRoughness, { metallicFactor: 0, roughnessFactor: 1 });
+});
+
+test('emissive strength preserves HDR emission through its glTF extension', () => {
+  const input = snapshot([{ ...triangle(), material: { emissiveFactor: [1, 0.2, 0], emissiveStrength: 12 } },
+    { ...triangle(), material: { emissiveFactor: [0, 0.4, 1], emissiveStrength: 3 } }]);
+  const result = exportSketchfabViewer(input), parsed = parseGlb(result.glb);
+  assert.equal(result.stats.inputJsonBytes, Buffer.byteLength(JSON.stringify(input)));
+  assert.deepEqual(parsed.doc.extensionsUsed, ['KHR_materials_emissive_strength']);
+  assert.equal(parsed.doc.extensionsRequired, undefined);
+  assert.deepEqual(parsed.doc.materials[0].emissiveFactor, [1, 0.2, 0]);
+  assert.deepEqual(parsed.doc.materials[0].extensions, { KHR_materials_emissive_strength: { emissiveStrength: 12 } });
+  assert.deepEqual(parsed.doc.materials[1].extensions, { KHR_materials_emissive_strength: { emissiveStrength: 3 } });
+});
+
+test('PBR references require UVs, in-range image indices and finite declared factors', () => {
+  const textured = patch => snapshot([{ ...triangle(), texcoords: [0, 0, 1, 0, 0, 1], material: patch }], [image()]);
+  for (const key of ['metallicRoughnessTexture', 'normalTexture', 'occlusionTexture', 'emissiveTexture']) {
+    for (const index of [-1, 0.5, 1, '0', null]) invalid(textured({ [key]: index }));
+    invalid(snapshot([{ ...triangle(), material: { [key]: 0 } }], [image()]));
+  }
+  for (const key of ['metallicFactor', 'roughnessFactor', 'occlusionStrength']) {
+    for (const value of [-0.1, 1.1, NaN, Infinity, '0.5', null]) invalid(textured({ occlusionTexture: 0, [key]: value }));
+  }
+  for (const patch of [{ normalScale: 1 }, { occlusionStrength: 1 }, { emissiveStrength: 1 },
+    { normalTexture: 0, normalScale: -1 }, { normalTexture: 0, normalScale: Infinity },
+    { emissiveFactor: [1, 1, 2] }, { emissiveFactor: [1, 1] },
+    { emissiveFactor: [1, 1, 1], emissiveStrength: -1 }, { emissiveFactor: [1, 1, 1], emissiveStrength: Infinity },
+    { metalness: 0.5 }]) invalid(textured(patch));
+});
+
+test('explicit material coverage overrides unused packed texture alpha without changing legacy fallback', () => {
+  const mesh = material => ({ ...triangle(), texcoords: [0, 0, 1, 0, 0, 1], material: { baseColorTexture: 0, ...material } });
+  const input = snapshot([mesh({ alphaMode: 'OPAQUE' }), mesh({ alphaMode: 'MASK', alphaCutoff: 0.4 }), mesh({ alphaMode: 'BLEND' }), mesh({})], [image()]);
+  const result = exportSketchfabViewer(input), parsed = parseGlb(result.glb);
+  assert.equal(result.stats.inputJsonBytes, Buffer.byteLength(JSON.stringify(input)));
+  assert.deepEqual(parsed.doc.materials.map(material => material.alphaMode), ['OPAQUE', 'MASK', 'BLEND', 'BLEND']);
+  assert.equal(parsed.doc.materials[1].alphaCutoff, 0.4);
+  for (const material of [{ alphaMode: 'transparent' }, { alphaMode: null }, { alphaCutoff: 0.5 },
+    { alphaMode: 'OPAQUE', alphaCutoff: 0.5 }, { alphaMode: 'MASK', alphaCutoff: -0.1 }, { alphaMode: 'MASK', alphaCutoff: 1.1 }]) invalid(snapshot([mesh(material)], [image()]));
+});
+
+function skinnedFixture() {
+  const mesh = { ...triangle(), joints: [0, 1, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0], weights: [0.5, 0.5, 0, 0, 1, 0, 0, 0, 0.25, 0.75, 0, 0] };
+  const identity = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+  return { ...snapshot([mesh]), coordinateSystem: 'sketchfab-z-up', scene: {
+    nodes: [{ name: 'root', children: [1, 3] }, { name: 'joint0', children: [2] }, { name: 'joint1', translation: [0, 1, 0] }, { name: 'mesh', mesh: 0, skin: 0 }],
+    skins: [{ joints: [1, 2], skeleton: 1, inverseBindMatrices: [...identity, ...identity.slice(0, 13), -1, ...identity.slice(14)] }],
+    animations: [{ name: 'wave', channels: [{ node: 2, path: 'rotation', times: [0, 1], values: [0, 0, 0, 1, 0, 0, 1, 0] },
+      { node: 1, path: 'translation', times: [0, 0.5, 1], values: [0, 0, 0, 0, 0, 1, 0, 0, 0], interpolation: 'STEP' }] }],
+  } };
+}
+
+test('skin hierarchy, inverse bind matrices and keyframes remain real glTF data under the coordinate root', () => {
+  const input = skinnedFixture(), copy = structuredClone(input), result = exportSketchfabViewer(input), parsed = parseGlb(result.glb), doc = parsed.doc;
+  assert.deepEqual(input, copy); assert.equal(result.stats.inputJsonBytes, Buffer.byteLength(JSON.stringify(input)));
+  assert.deepEqual(doc.scenes[0].nodes, [4]); assert.deepEqual(doc.nodes[4].children, [0]);
+  assert.deepEqual(doc.nodes.slice(0, 4), input.scene.nodes);
+  const attributes = doc.meshes[0].primitives[0].attributes;
+  assert.equal(doc.accessors[attributes.JOINTS_0].componentType, 5123);
+  assert.deepEqual(accessor(parsed, attributes.JOINTS_0), input.meshes[0].joints);
+  assert.deepEqual(accessor(parsed, attributes.WEIGHTS_0), input.meshes[0].weights);
+  assert.deepEqual(doc.skins[0].joints, [1, 2]); assert.equal(doc.skins[0].skeleton, 1);
+  assert.equal(doc.accessors[doc.skins[0].inverseBindMatrices].type, 'MAT4');
+  assert.deepEqual(accessor(parsed, doc.skins[0].inverseBindMatrices), input.scene.skins[0].inverseBindMatrices);
+  const animation = doc.animations[0]; assert.equal(animation.name, 'wave');
+  assert.deepEqual(animation.channels.map(c => c.target), [{ node: 2, path: 'rotation' }, { node: 1, path: 'translation' }]);
+  assert.deepEqual(animation.samplers.map(s => s.interpolation), ['LINEAR', 'STEP']);
+  animation.samplers.forEach((sampler, i) => {
+    assert.deepEqual(accessor(parsed, sampler.input), input.scene.animations[0].channels[i].times);
+    assert.deepEqual(accessor(parsed, sampler.output), input.scene.animations[0].channels[i].values);
+    assert.equal(doc.bufferViews[doc.accessors[sampler.input].bufferView].target, undefined);
+  });
+});
+
+test('skin and scene validation reject cycles, partial weights and invalid joint references', () => {
+  const mutate = change => { const input = skinnedFixture(); change(input); invalid(input); };
+  mutate(s => { delete s.meshes[0].weights; });
+  mutate(s => { delete s.scene; });
+  mutate(s => { s.meshes[0].weights.fill(0); });
+  mutate(s => { s.meshes[0].weights[0] = -0.1; });
+  mutate(s => { s.meshes[0].joints[0] = 2; });
+  mutate(s => { s.meshes[0].joints[0] = 0.5; });
+  mutate(s => { s.scene.nodes[3].skin = 1; });
+  mutate(s => { delete s.scene.nodes[3].skin; });
+  mutate(s => { s.scene.nodes[2].children = [0]; });
+  mutate(s => { s.scene.nodes[0].children.push(2); });
+  mutate(s => { s.scene.nodes[3].mesh = 1; });
+  mutate(s => { s.scene.nodes[2].rotation = [0, 0, 0, 0]; });
+  mutate(s => { s.scene.skins[0].joints = [1, 1]; });
+  mutate(s => { s.scene.skins[0].skeleton = 3; });
+  mutate(s => { s.scene.skins[0].inverseBindMatrices.pop(); });
+  mutate(s => { s.scene.skins[0].inverseBindMatrices[0] = NaN; });
+  mutate(s => { s.scene.untrusted = true; });
+});
+
+test('animation channels reject nonincreasing float timestamps, non-TRS targets and unsupported interpolation', () => {
+  const mutate = change => { const input = skinnedFixture(); change(input.scene.animations[0].channels, input); invalid(input); };
+  mutate(c => { c[0].times = [1, 0]; });
+  mutate(c => { c[0].times = [1, 1 + 1e-10]; });
+  mutate(c => { c[0].times = [-1, 0]; });
+  mutate(c => { c[0].node = 4; });
+  mutate(c => { c[0].path = 'weights'; });
+  mutate(c => { c[0].interpolation = 'CUBICSPLINE'; });
+  mutate(c => { c[0].values.pop(); });
+  mutate(c => { c[0].values.fill(0); });
+  mutate(c => { c.push(structuredClone(c[0])); });
+  mutate((c, s) => { s.scene.nodes[2].matrix = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]; });
+  const input = skinnedFixture();
+  for (const limits of [{ nodes: 3 }, { joints: 1 }, { animationChannels: 1 }, { keyframes: 4 }]) invalid(input, { limits }, 'SKETCHFAB_VIEWER_TOO_LARGE');
+});

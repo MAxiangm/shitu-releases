@@ -170,6 +170,15 @@ test('Sketchfab worker refuses mixed or wrong-model viewer responses before a de
   }
 });
 
+test('confirmed viewer animation is described accurately without persisting scene data', async () => {
+  const snapshot = { version: 1, modelId: id, meshes: [{ positions: [0,0,0,1,0,0,0,1,0] }], images: [], scene: { nodes: [{ mesh: 0 }] } };
+  const instance = await worker({ viewerCapable: true, resolveReply: { ok: true, viewerSnapshot: snapshot },
+    reply: () => Response.json({ ok: true, imported: 1, assetIds: ['new-model'], captureMethod: 'viewer', modelStats: { animationCount: 2 } }) });
+  const result = await instance.send(model());
+  assert.equal(result.ok, true); assert.match(result.message, /2 段动画/); assert.doesNotMatch(result.message, /静态/);
+  assert.equal(JSON.stringify(instance.storage).includes('positions'), false);
+});
+
 test('Sketchfab worker rejects forged browser archives and uses fixed resolution errors', async () => {
   for (const archiveUrl of ['https://example.com/model.zip', `https://sketchfab-prod-media.s3.amazonaws.com/archives/${other}/gltf/model.zip`]) {
     const instance = await worker({ resolveReply: { ok: true, archiveUrl } });

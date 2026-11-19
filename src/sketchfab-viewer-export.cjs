@@ -12,6 +12,12 @@ const DEFAULT_LIMITS = Object.freeze({
   imageDimension: 8192,
   totalImagePixels: 32 * 1024 * 1024,
   outputBytes: 128 * 1024 * 1024,
+  nodes: 4096,
+  skins: 128,
+  joints: 256,
+  animations: 64,
+  animationChannels: 8192,
+  keyframes: 1_000_000,
 });
 const FLOAT_MAX = 3.4028234663852886e38;
 const INTERNAL_ERRORS = new WeakSet();
@@ -181,7 +187,7 @@ function matrix(input, budget) {
 }
 function build(snapshot, options) {
   const limits = makeLimits(options), budget = new JsonBudget(limits.jsonBytes);
-  const input = record(snapshot, ['version', 'modelId', 'meshes', 'images', 'warnings', 'coordinateSystem'], ['version', 'modelId', 'meshes', 'images']);
+  const input = record(snapshot, ['version', 'modelId', 'meshes', 'images', 'warnings', 'coordinateSystem', 'scene'], ['version', 'modelId', 'meshes', 'images']);
   budget.object(input);
   if (input.version !== 1 || typeof input.modelId !== 'string' || !MODEL_ID.test(input.modelId)) reject();
   budget.number(input.version); budget.string(input.modelId);
@@ -200,6 +206,7 @@ function build(snapshot, options) {
   const doc = { asset: { version: '2.0', generator: 'Mosaic Sketchfab viewer export', extras: { modelId: input.modelId } },
     scene: 0, scenes: [{ nodes: [] }], nodes: [], meshes: [], accessors: [], bufferViews: [], materials: [], buffers: [{ byteLength: 0 }] };
   const binary = []; let binaryBytes = 0, vertexCount = 0, triangleCount = 0;
+  const meshJoints = [];
   function view(bytes, target) {
     const offset = binaryBytes, padding = (4 - bytes.length % 4) % 4;
     binaryBytes += bytes.length + padding; bound(binaryBytes + 28, limits.outputBytes);
@@ -218,7 +225,7 @@ function build(snapshot, options) {
     doc.textures = images.map((_, source) => ({ source }));
   }
   for (const source of array(input.meshes, 1, limits.meshes, budget)) {
-    const mesh = record(source, ['name', 'positions', 'normals', 'texcoords', 'indices', 'matrix', 'material'], ['positions']); budget.object(mesh);
+    const mesh = record(source, ['name', 'positions', 'normals', 'texcoords', 'indices', 'matrix', 'material', 'joints', 'weights'], ['positions']); budget.object(mesh);
     const name = Object.hasOwn(mesh, 'name') ? text(mesh.name, budget) : undefined;
     const positions = array(mesh.positions, 9, limits.vertices * 3, budget);
     if (positions.length % 3) reject();
@@ -246,6 +253,31 @@ function build(snapshot, options) {
       for (let i = 0; i < uv.length; i++) bytes.writeFloatLE(number(uv[i], budget), i * 4);
       attributes.TEXCOORD_0 = accessor(bytes, count, 'VEC2', 5126, 34962);
     }
+    if (Object.hasOwn(mesh, 'joints') !== Object.hasOwn(mesh, 'weights')) reject();
+    let maximumJoint = -1;
+    if (Object.hasOwn(mesh, 'joints')) {
+      if (!Object.hasOwn(input, 'scene')) reject();
+      const joints = array(mesh.joints, count * 4, count * 4, budget), weights = array(mesh.weights, count * 4, count * 4, budget);
+      const jointBytes = Buffer.alloc(joints.length * 2), weightBytes = Buffer.alloc(weights.length * 4);
+      let normalized = false;
+      for (let i = 0; i < joints.length; i += 4) {
+        const values = [];
+        for (let j = 0; j < 4; j++) {
+          const joint = number(joints[i + j], budget, false), weight = number(weights[i + j], budget);
+          if (!Number.isSafeInteger(joint) || joint < 0 || weight < 0 || weight > 1) reject();
+          bound(joint + 1, limits.joints);
+          maximumJoint = Math.max(maximumJoint, joint); jointBytes.writeUInt16LE(joint, (i + j) * 2); values.push(weight);
+        }
+        const total = values.reduce((a, b) => a + b, 0);
+        if (!total) reject();
+        if (Math.abs(total - 1) > 1e-5) normalized = true;
+        for (let j = 0; j < 4; j++) weightBytes.writeFloatLE(values[j] / total, (i + j) * 4);
+      }
+      if (normalized && !warnings.includes('骨骼权重已归一化。')) warnings.push('骨骼权重已归一化。');
+      attributes.JOINTS_0 = accessor(jointBytes, count, 'VEC4', 5123, 34962);
+      attributes.WEIGHTS_0 = accessor(weightBytes, count, 'VEC4', 5126, 34962);
+    }
+    meshJoints.push(maximumJoint);
     let indexAccessor, triangles;
     if (Object.hasOwn(mesh, 'indices')) {
       const indices = array(mesh.indices, 3, limits.triangles * 3, budget);
@@ -259,24 +291,165 @@ function build(snapshot, options) {
       indexAccessor = accessor(bytes, indices.length, 'SCALAR', small ? 5123 : 5125, 34963);
     } else { if (count % 3) reject(); triangles = count / 3; }
     triangleCount += triangles; bound(triangleCount, limits.triangles);
-    const material = Object.hasOwn(mesh, 'material') ? record(mesh.material, ['baseColorFactor', 'baseColorTexture', 'doubleSided']) : {};
+    const material = Object.hasOwn(mesh, 'material') ? record(mesh.material, ['baseColorFactor', 'baseColorTexture', 'doubleSided',
+      'metallicFactor', 'roughnessFactor', 'metallicRoughnessTexture', 'normalTexture', 'normalScale',
+      'occlusionTexture', 'occlusionStrength', 'emissiveTexture', 'emissiveFactor', 'emissiveStrength', 'alphaMode', 'alphaCutoff']) : {};
     if (Object.hasOwn(mesh, 'material')) budget.object(material);
     const pbr = { metallicFactor: 0, roughnessFactor: 1 }, renderedMaterial = { pbrMetallicRoughness: pbr };
+    function scalar(key, maximum = 1) {
+      const value = number(material[key], budget, false);
+      if (value < 0 || value > maximum) reject();
+      return value;
+    }
+    function textureInfo(key) {
+      const index = material[key]; number(index, budget, false);
+      if (!Number.isSafeInteger(index) || index < 0 || index >= images.length || attributes.TEXCOORD_0 === undefined) reject();
+      return { index };
+    }
     if (Object.hasOwn(material, 'baseColorFactor')) {
       pbr.baseColorFactor = array(material.baseColorFactor, 4, 4, budget).map(value => { number(value, budget, false); if (value < 0 || value > 1) reject(); return value; });
       if (pbr.baseColorFactor[3] < 1) renderedMaterial.alphaMode = 'BLEND';
     }
     if (Object.hasOwn(material, 'baseColorTexture')) {
-      const index = material.baseColorTexture; number(index, budget, false);
-      if (!Number.isSafeInteger(index) || index < 0 || index >= images.length || attributes.TEXCOORD_0 === undefined) reject();
-      pbr.baseColorTexture = { index }; if (images[index].hasAlpha) renderedMaterial.alphaMode = 'BLEND';
+      pbr.baseColorTexture = textureInfo('baseColorTexture');
+      if (images[pbr.baseColorTexture.index].hasAlpha) renderedMaterial.alphaMode = 'BLEND';
+    }
+    // A metallic-roughness texture stores roughness in G and metalness in B.
+    // Preserve the legacy nonmetal default when no metallic input was captured.
+    if (Object.hasOwn(material, 'metallicRoughnessTexture')) {
+      pbr.metallicRoughnessTexture = textureInfo('metallicRoughnessTexture');
+      pbr.metallicFactor = 1;
+    }
+    for (const key of ['metallicFactor', 'roughnessFactor']) if (Object.hasOwn(material, key)) pbr[key] = scalar(key);
+    if (Object.hasOwn(material, 'normalTexture')) renderedMaterial.normalTexture = textureInfo('normalTexture');
+    if (Object.hasOwn(material, 'normalScale')) {
+      if (!renderedMaterial.normalTexture) reject();
+      renderedMaterial.normalTexture.scale = scalar('normalScale', FLOAT_MAX);
+    }
+    if (Object.hasOwn(material, 'occlusionTexture')) renderedMaterial.occlusionTexture = textureInfo('occlusionTexture');
+    if (Object.hasOwn(material, 'occlusionStrength')) {
+      if (!renderedMaterial.occlusionTexture) reject();
+      renderedMaterial.occlusionTexture.strength = scalar('occlusionStrength');
+    }
+    if (Object.hasOwn(material, 'emissiveTexture')) {
+      renderedMaterial.emissiveTexture = textureInfo('emissiveTexture');
+      renderedMaterial.emissiveFactor = [1, 1, 1];
+    }
+    if (Object.hasOwn(material, 'emissiveFactor')) {
+      renderedMaterial.emissiveFactor = array(material.emissiveFactor, 3, 3, budget).map(value => {
+        number(value, budget, false); if (value < 0 || value > 1) reject(); return value;
+      });
+    }
+    if (Object.hasOwn(material, 'emissiveStrength')) {
+      if (!renderedMaterial.emissiveFactor) reject();
+      renderedMaterial.extensions = { KHR_materials_emissive_strength: { emissiveStrength: scalar('emissiveStrength', FLOAT_MAX) } };
+      doc.extensionsUsed = ['KHR_materials_emissive_strength'];
+    }
+    if (Object.hasOwn(material, 'alphaMode')) {
+      if (!['OPAQUE', 'MASK', 'BLEND'].includes(material.alphaMode)) reject();
+      budget.string(material.alphaMode); renderedMaterial.alphaMode = material.alphaMode;
+    }
+    if (Object.hasOwn(material, 'alphaCutoff')) {
+      if (material.alphaMode !== 'MASK') reject();
+      renderedMaterial.alphaCutoff = scalar('alphaCutoff');
     }
     if (Object.hasOwn(material, 'doubleSided')) { if (typeof material.doubleSided !== 'boolean') reject(); budget.add(material.doubleSided ? 4 : 5); renderedMaterial.doubleSided = material.doubleSided; }
     const materialIndex = doc.materials.push(renderedMaterial) - 1;
     const primitive = { attributes, mode: 4, material: materialIndex, ...(indexAccessor !== undefined ? { indices: indexAccessor } : {}) };
     const meshIndex = doc.meshes.push({ primitives: [primitive], ...(name !== undefined ? { name } : {}) }) - 1;
-    doc.scenes[0].nodes.push(doc.nodes.length);
-    doc.nodes.push({ mesh: meshIndex, ...(name !== undefined ? { name } : {}), ...(Object.hasOwn(mesh, 'matrix') ? { matrix: matrix(mesh.matrix, budget) } : {}) });
+    if (Object.hasOwn(input, 'scene')) {
+      if (Object.hasOwn(mesh, 'matrix')) reject();
+    } else {
+      doc.scenes[0].nodes.push(doc.nodes.length);
+      doc.nodes.push({ mesh: meshIndex, ...(name !== undefined ? { name } : {}), ...(Object.hasOwn(mesh, 'matrix') ? { matrix: matrix(mesh.matrix, budget) } : {}) });
+    }
+  }
+  if (Object.hasOwn(input, 'scene')) appendScene(input.scene);
+  function appendScene(source) {
+    const scene = record(source, ['nodes', 'skins', 'animations'], ['nodes']); budget.object(scene);
+    const nodes = array(scene.nodes, 1, limits.nodes, budget), parents = Array(nodes.length).fill(-1), usedMeshes = new Set();
+    const index = (value, length) => { number(value, budget, false); if (!Number.isSafeInteger(value) || value < 0 || value >= length) reject(); return value; };
+    const vector = (value, size) => array(value, size, size, budget).map(v => number(v, budget));
+    doc.nodes = nodes.map((source, nodeIndex) => {
+      const node = record(source, ['name', 'children', 'mesh', 'skin', 'matrix', 'translation', 'rotation', 'scale']); budget.object(node);
+      const out = {};
+      if (Object.hasOwn(node, 'name')) out.name = text(node.name, budget);
+      if (Object.hasOwn(node, 'mesh')) { out.mesh = index(node.mesh, doc.meshes.length); usedMeshes.add(out.mesh); }
+      if (Object.hasOwn(node, 'skin')) {
+        if (out.mesh === undefined || meshJoints[out.mesh] < 0) reject();
+        out.skin = index(node.skin, Array.isArray(scene.skins) ? scene.skins.length : 0);
+      } else if (out.mesh !== undefined && meshJoints[out.mesh] >= 0) reject();
+      if (Object.hasOwn(node, 'matrix')) {
+        if (['translation', 'rotation', 'scale'].some(key => Object.hasOwn(node, key))) reject();
+        out.matrix = matrix(node.matrix, budget);
+      } else {
+        for (const key of ['translation', 'scale']) if (Object.hasOwn(node, key)) out[key] = vector(node[key], 3);
+        if (Object.hasOwn(node, 'rotation')) {
+          out.rotation = vector(node.rotation, 4); const length = Math.hypot(...out.rotation);
+          if (!length || Math.abs(length - 1) > 1e-4) reject();
+          out.rotation = out.rotation.map(v => v / length);
+        }
+      }
+      if (Object.hasOwn(node, 'children')) {
+        out.children = array(node.children, 0, nodes.length, budget).map(value => {
+          const child = index(value, nodes.length);
+          if (child === nodeIndex || parents[child] !== -1) reject(); parents[child] = nodeIndex; return child;
+        });
+      }
+      return out;
+    });
+    const roots = parents.flatMap((parent, i) => parent === -1 ? [i] : []), reached = new Set();
+    function visit(i, depth) { if (depth > 256 || reached.has(i)) reject(); reached.add(i); for (const child of doc.nodes[i].children || []) visit(child, depth + 1); }
+    for (const root of roots) visit(root, 0);
+    if (reached.size !== nodes.length || usedMeshes.size !== doc.meshes.length) reject();
+    doc.scenes[0].nodes = roots;
+    if (Object.hasOwn(scene, 'skins')) {
+      doc.skins = array(scene.skins, 1, limits.skins, budget).map(source => {
+        const skin = record(source, ['name', 'joints', 'inverseBindMatrices', 'skeleton'], ['joints', 'inverseBindMatrices']); budget.object(skin);
+        const joints = array(skin.joints, 1, limits.joints, budget).map(value => index(value, nodes.length));
+        if (new Set(joints).size !== joints.length) reject();
+        const values = array(skin.inverseBindMatrices, joints.length * 16, joints.length * 16, budget), bytes = Buffer.alloc(values.length * 4);
+        for (let i = 0; i < values.length; i++) bytes.writeFloatLE(number(values[i], budget), i * 4);
+        const out = { joints, inverseBindMatrices: accessor(bytes, joints.length, 'MAT4', 5126) };
+        if (Object.hasOwn(skin, 'name')) out.name = text(skin.name, budget);
+        if (Object.hasOwn(skin, 'skeleton')) {
+          out.skeleton = index(skin.skeleton, nodes.length);
+          for (const joint of joints) { let i = joint; while (i !== -1 && i !== out.skeleton) i = parents[i]; if (i === -1) reject(); }
+        }
+        return out;
+      });
+      for (const node of doc.nodes) if (node.skin !== undefined && meshJoints[node.mesh] >= doc.skins[node.skin].joints.length) reject();
+    }
+    if (Object.hasOwn(scene, 'animations')) {
+      let channelCount = 0, keyframeCount = 0;
+      doc.animations = array(scene.animations, 1, limits.animations, budget).map(source => {
+        const animation = record(source, ['name', 'channels'], ['channels']); budget.object(animation);
+        const samplers = [], targets = new Set(), channels = array(animation.channels, 1, limits.animationChannels, budget).map(source => {
+          channelCount++; bound(channelCount, limits.animationChannels);
+          const channel = record(source, ['node', 'path', 'times', 'values', 'interpolation'], ['node', 'path', 'times', 'values']); budget.object(channel);
+          const node = index(channel.node, nodes.length), path = channel.path;
+          if (!['translation', 'rotation', 'scale'].includes(path) || doc.nodes[node].matrix) reject(); budget.string(path);
+          const target = node + ':' + path; if (targets.has(target)) reject(); targets.add(target);
+          let interpolation = 'LINEAR';
+          if (Object.hasOwn(channel, 'interpolation')) { interpolation = channel.interpolation; if (!['LINEAR', 'STEP'].includes(interpolation)) reject(); budget.string(interpolation); }
+          const times = array(channel.times, 1, limits.keyframes, budget), size = path === 'rotation' ? 4 : 3;
+          keyframeCount += times.length; bound(keyframeCount, limits.keyframes);
+          const values = array(channel.values, times.length * size, times.length * size, budget), timeBytes = Buffer.alloc(times.length * 4), valueBytes = Buffer.alloc(values.length * 4);
+          let previous = -1;
+          for (let i = 0; i < times.length; i++) { const value = number(times[i], budget); if (value < 0 || value <= previous) reject(); timeBytes.writeFloatLE(value, i * 4); previous = value; }
+          for (let i = 0; i < values.length; i += size) {
+            const row = []; for (let j = 0; j < size; j++) row.push(number(values[i + j], budget));
+            const length = path === 'rotation' ? Math.hypot(...row) : 1;
+            if (!length || (path === 'rotation' && Math.abs(length - 1) > 1e-4)) reject();
+            for (let j = 0; j < size; j++) valueBytes.writeFloatLE(row[j] / length, (i + j) * 4);
+          }
+          const input = accessor(timeBytes, times.length, 'SCALAR', 5126, undefined, { min: [timeBytes.readFloatLE(0)], max: [previous] });
+          const output = accessor(valueBytes, times.length, size === 4 ? 'VEC4' : 'VEC3', 5126);
+          return { sampler: samplers.push({ input, output, interpolation }) - 1, target: { node, path } };
+        });
+        return { samplers, channels, ...(Object.hasOwn(animation, 'name') ? { name: text(animation.name, budget) } : {}) };
+      });
+    }
   }
   if (input.coordinateSystem === 'sketchfab-z-up') {
     const children = doc.scenes[0].nodes;
@@ -291,7 +464,8 @@ function build(snapshot, options) {
   glb.writeUInt32LE(jsonLength, 12); glb.writeUInt32LE(0x4e4f534a, 16); glb.fill(0x20, 20, 20 + jsonLength); json.copy(glb, 20);
   const binHeader = 20 + jsonLength; glb.writeUInt32LE(binaryBytes, binHeader); glb.writeUInt32LE(0x004e4942, binHeader + 4);
   let cursor = binHeader + 8; for (const bytes of binary) { bytes.copy(glb, cursor); cursor += bytes.length; }
-  return { glb, stats: { meshCount: doc.meshes.length, vertexCount, triangleCount, imageCount: images.length, imageBytes, inputJsonBytes: budget.bytes, glbBytes: total }, warnings: [...new Set(warnings)] };
+  return { glb, stats: { meshCount: doc.meshes.length, vertexCount, triangleCount, imageCount: images.length, imageBytes, inputJsonBytes: budget.bytes, glbBytes: total,
+    ...(Object.hasOwn(input, 'scene') ? { nodeCount: doc.nodes.length, skinCount: doc.skins?.length || 0, animationCount: doc.animations?.length || 0 } : {}) }, warnings: [...new Set(warnings)] };
 }
 function exportSketchfabViewer(snapshot, options) {
   try { return build(snapshot, options); }

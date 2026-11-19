@@ -54,6 +54,31 @@ test('viewer export must use its capability and dedicated route', async t => {
   assert.equal((await enabled.request(enabled.body(), '/v1/capture')).ok, false);
   assert.equal(enabled.library.snapshot().assets.length, 0);
 });
+test('PBR material factors reach the imported GLB unchanged through the collector', async t => {
+  const f = await fixture(t), body = f.body();
+  body.viewerSnapshot.meshes[0].material = { metallicFactor: 0.65, roughnessFactor: 0.25,
+    emissiveFactor: [0.2, 0.8, 1], emissiveStrength: 4 };
+  const result = await f.request(body);
+  assert.equal(result.ok, true); assert.equal(result.imported, 1);
+  const file = await fs.readFile(f.library.getAssetPath(result.assetIds[0], 'original'));
+  const document = JSON.parse(file.subarray(20, 20 + file.readUInt32LE(12)));
+  assert.deepEqual(document.materials[0].pbrMetallicRoughness, { metallicFactor: 0.65, roughnessFactor: 0.25 });
+  assert.deepEqual(document.materials[0].emissiveFactor, [0.2, 0.8, 1]);
+  assert.equal(document.materials[0].extensions.KHR_materials_emissive_strength.emissiveStrength, 4);
+});
+test('a verified skeleton and animation are imported and reported as animated viewer content', async t => {
+  const f = await fixture(t), body = f.body();
+  body.viewerSnapshot.meshes[0].joints = Array(12).fill(0);
+  body.viewerSnapshot.meshes[0].weights = [1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0];
+  body.viewerSnapshot.scene = { nodes: [{ children: [1, 2] }, {}, { mesh: 0, skin: 0 }],
+    skins: [{ joints: [1], inverseBindMatrices: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1] }],
+    animations: [{ channels: [{ node: 1, path: 'translation', times: [0, 1], values: [0, 0, 0, 0, 1, 0] }] }] };
+  const result = await f.request(body);
+  assert.equal(result.ok, true); assert.equal(result.modelStats.skinCount, 1); assert.equal(result.modelStats.animationCount, 1);
+  const file = await fs.readFile(f.library.getAssetPath(result.assetIds[0], 'original'));
+  const document = JSON.parse(file.subarray(20, 20 + file.readUInt32LE(12)));
+  assert.equal(document.skins.length, 1); assert.equal(document.animations.length, 1);
+});
 test('viewer export rejects mixed archive credentials, foreign identity and malformed geometry before import', async t => {
   const f = await fixture(t);
   for (const extra of [{ archiveUrl: 'https://example.com/archive.zip' },

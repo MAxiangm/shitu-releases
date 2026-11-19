@@ -12,7 +12,7 @@
     SKETCHFAB_DOWNLOAD_TIMEOUT: '模型下载地址准备超时，请稍后重试。',
     SKETCHFAB_DOWNLOAD_FAILED: '无法读取 Sketchfab 官方下载地址，请稍后重试。',
     SKETCHFAB_VIEWER_UNAVAILABLE: '请刷新模型页，等待模型显示后再 Alt＋右键采集。',
-    SKETCHFAB_VIEWER_UNSUPPORTED: '此模型包含暂未支持的骨骼、动画或绘制方式，未保存不完整模型。',
+    SKETCHFAB_VIEWER_UNSUPPORTED: '此模型的动画结构或绘制方式暂不支持，未保存不完整模型。',
     SKETCHFAB_VIEWER_TOO_LARGE: '网页模型超过当前采集大小上限，未保存。',
     SKETCHFAB_VIEWER_INVALID: '网页模型数据无效，请刷新模型页后重新采集。',
     SKETCHFAB_VIEWER_INCOMPLETE: '网页模型或贴图尚未完整加载，请等待后重新采集。'

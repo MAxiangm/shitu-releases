@@ -6,7 +6,7 @@ const CONFIG_KEY = 'shituConnection';
 const LAST_KEY = 'shituLastCapture';
 const DESTINATIONS_KEY = 'shituCaptureDestinations';
 // A running worker can read an updated manifest without having loaded new code.
-const WORKER_VERSION = '0.11.30';
+const WORKER_VERSION = '0.11.31';
 const BROWSER_SESSION_SITES = {
   youtube: { label: 'YouTube', domain: 'youtube.com', capability: 'youtubeBrowserSession', field: 'youtubeSession' },
   bilibili: { label: 'Bilibili', domain: 'bilibili.com', capability: 'bilibiliBrowserSession', field: 'bilibiliSession' }
@@ -300,7 +300,8 @@ function captureResult(result) {
   const viewer = result.captureMethod === 'viewer';
   const warnings = viewer && Array.isArray(result.warnings) ? result.warnings.filter(value => typeof value === 'string' &&
     value.length <= 240 && !/https?:\/\/|[\x00-\x1f]/i.test(value)).slice(0, 5) : [];
-  if (viewer && imported) message = `已保存网页静态模型，可在 Mosaic 中预览。${warnings.length ? '\n' + warnings.join('；') : ''}`;
+  const animationCount = Number.isSafeInteger(result.modelStats?.animationCount) && result.modelStats.animationCount > 0 ? Math.min(result.modelStats.animationCount, 64) : 0;
+  if (viewer && imported) message = `已保存网页${animationCount ? '模型及 ' + animationCount + ' 段动画' : '静态模型'}，可在 Mosaic 中预览。${warnings.length ? '\n' + warnings.join('；') : ''}`;
   return { ok: true, imported, duplicates, existingAssets, message, status: inTrash || warnings.length ? 'warning' : 'success',
     ...(viewer ? { captureMethod: 'viewer', warnings } : {}),
     assetIds: Array.isArray(result.assetIds) ? result.assetIds.filter(exactId).slice(0, 20) : [],

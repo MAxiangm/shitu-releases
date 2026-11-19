@@ -26,6 +26,8 @@
     if (/(?:vertex|position|positions)0?$/.test(name) && !/morph|instance|previous/.test(name)) return 'position';
     if (/normal0?$/.test(name) && !/tangent|binormal/.test(name)) return 'normal';
     if (/(?:texcoord0|texcoord|uv0|uv)$/.test(name)) return 'uv';
+    if (/^(?:bones?|joints?)(?:0)?$/.test(name)) return 'joints';
+    if (/^weights?(?:0)?$/.test(name)) return 'weights';
     return null;
   }
   function half(value) {
@@ -58,9 +60,66 @@
     if (!Number.isSafeInteger(offset) || offset < 0 || size < 0 || offset * unit + size > value.byteLength) throw failure('SKETCHFAB_VIEWER_INVALID');
     return new Uint8Array(value.buffer, value.byteOffset + offset * unit, size);
   }
+  // Parse only the material expressions emitted by the observed viewer shaders.
+  // An arbitrary GLSL expression is not interchangeable with a glTF channel.
+  function functionBody(source, name) {
+    const match = new RegExp('\\b(?:float|vec[234])\\s+' + name + '\\s*\\([^)]*\\)\\s*\\{').exec(source);
+    if (!match) return null;
+    let depth = 1, end = match.index + match[0].length;
+    for (; end < source.length && end - match.index < 12000; end++) {
+      if (source[end] === '{') depth++;
+      if (source[end] === '}' && --depth === 0) return source.slice(match.index + match[0].length, end);
+    }
+    return null;
+  }
+  function scalarChannel(source, name, complement = false) {
+    const body = functionBody(source, name); if (body === null) return null;
+    const compact = body.replace(/\s+/g, ''), returned = /return([^;]+);/.exec(compact);
+    if (!returned) return { unsupported: true };
+    let expression = returned[1], variable, invertUniform, extraFactor, mixWhite = false;
+    if (/^[A-Za-z_]\w*$/.test(expression)) {
+      const initial = new RegExp('(?:^|;)float' + expression + '=([^;]+);|(?:^|;)' + expression + '=([^;]+);').exec(compact);
+      if (initial) { variable = expression; expression = initial[1] || initial[2]; }
+    }
+    if (variable) {
+      const inverted = new RegExp('if\\((\\w+)==1\\)' + variable + '=1(?:\\.0)?-' + variable + ';').exec(compact);
+      if (inverted) invertUniform = inverted[1];
+      const multiplied = new RegExp(variable + '\\*=([A-Za-z_]\\w*|[0-9.eE+-]+);').exec(compact);
+      if (multiplied) extraFactor = multiplied[1];
+      // Any extra assignment could change the meaning of a recognized channel.
+      const assignments = [...compact.matchAll(new RegExp('(?:^|[;})])' + variable + '(?:=|\\*=)', 'g'))].length;
+      const initialAssignment = new RegExp('(?:^|;)' + variable + '=').test(compact) ? 1 : 0;
+      if (assignments > initialAssignment + Boolean(inverted) + Boolean(multiplied)) return { unsupported: true };
+    } else {
+      for (const local of compact.matchAll(/(?:^|;)float(\w+)=([^;]+);/g)) {
+        if (new RegExp('\\b' + local[1] + '\\b').test(expression)) {
+          if (new RegExp('(?:^|[;})])' + local[1] + '(?:[+*/-]?=|\\+\\+|--)').test(compact)) return { unsupported: true };
+          expression = expression.replace(new RegExp('\\b' + local[1] + '\\b', 'g'), '(' + local[2] + ')');
+        }
+      }
+    }
+    expression = expression.replace(/\((texture(?:2D)?\(\w+,vTexCoord0\)\.[rgba])\)/g, '$1');
+    const mixed = /^mix\(1(?:\.0)?,(.+),(\w+)\)$/.exec(expression);
+    if (mixed) { expression = mixed[1]; extraFactor = mixed[2]; mixWhite = true; }
+    let sample;
+    expression = expression.replace(/texture(?:2D)?\((\w+),(vTexCoord0|vec2\(([0-9.eE+-]+),([0-9.eE+-]+)\))\)\.([rgba])/g, (_m, sampler, uv, x, y, channel) => {
+      if (sample) { sample = { unsupported: true }; return '@'; }
+      sample = { sampler, uv, channel: 'rgba'.indexOf(channel), ...(x === undefined ? {} : { constantUV: [Number(x), Number(y)] }) }; return '@';
+    });
+    if (sample?.unsupported) return { unsupported: true };
+    // Parentheses around one atom do not change multiplication. No shader eval.
+    expression = expression.replace(/\(([@\w.+-]+)\)/g, '$1');
+    const factors = expression.split('*');
+    if (factors.length > 3 || factors.some(value => value !== '@' && !/^(?:[A-Za-z_]\w*|(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)$/.test(value))) return { unsupported: true };
+    if (sample && !factors.includes('@')) return { unsupported: true };
+    if (extraFactor) factors.push(extraFactor);
+    return { ...sample, factors: factors.filter(value => value !== '@'), complement, invertUniform, mixWhite };
+  }
   function installSketchfabViewerRecorder(scope, options = {}) {
     if (!scope || !modelIdFromUrl(scope.location?.href)) return null;
     const limits = { ...DEFAULTS, ...options };
+    const sceneRecorder = options.sceneRecorder || scope.MosaicSketchfabSceneRecorder?.installSketchfabSceneRecorder?.(scope);
+    const meshVertices = new WeakMap();
     let currentId = modelIdFromUrl(scope.location.href), contexts = new Set(), states = new WeakMap();
     let shadowBytes = 0, nextId = 1, pending = null, disposed = false, lastRequest = -Infinity, unsupportedAt = -Infinity, tooLargeAt = -Infinity, capacityExceeded = false;
     let animationFrame = null, outsideFrame = 0, outsideBurst = false;
@@ -124,8 +183,21 @@
     }
     function program(s, object) {
       if (!object) return null;
-      if (!s.programs.has(object)) { if (s.programs.size >= 512) { capacityExceeded = true; return null; } s.programs.set(object, { id: nextId++, attributes: new Map(), locations: new Map(), uniforms: new Map(), samplers: new Set(), unsupported: false }); }
+      if (!s.programs.has(object)) { if (s.programs.size >= 512) { capacityExceeded = true; return null; } s.programs.set(object, { id: nextId++, object, attributes: new Map(), locations: new Map(), uniforms: new Map(), activeUniforms: new Set(), samplers: new Set(), unsupported: false }); }
       return s.programs.get(object);
+    }
+    function uniformFor(s, p, name) {
+      if (!name) return undefined;
+      if (p.uniforms.has(name)) return p.uniforms.get(name);
+      // The viewer skips uploading default-valued uniforms. Query their actual
+      // GL value once, rather than inventing a material default from the name.
+      if (!p.activeUniforms.has(name) || typeof s.gl.getUniform !== 'function') return undefined;
+      const location = s.gl.getUniformLocation(p.object, name);
+      if (location === null || location === undefined) return undefined;
+      const value = s.gl.getUniform(p.object, location);
+      const values = typeof value === 'number' ? [value] : ArrayBuffer.isView(value) || Array.isArray(value) ? Array.from(value) : [];
+      if (!values.length || values.length > 16 || !values.every(Number.isFinite)) return undefined;
+      p.uniforms.set(name, values); return values;
     }
     function shaderFacts(vertex, fragment) {
       const facts = {}, compact = vertex.replace(/\s+/g, '');
@@ -154,20 +226,48 @@
         facts.baseUV = sample[2];
         if (sample[3] !== undefined && [Number(sample[3]), Number(sample[4])].every(Number.isFinite)) facts.constantUV = [Number(sample[3]), Number(sample[4])];
         if (/uAlbedoPBRFactor/.test(albedo)) facts.colorFactor = 'uAlbedoPBRFactor';
+        facts.baseRgbOnly = /texture(?:2D)?\([^;]+?\)\.rgb/.test(albedo);
+        facts.baseSrgb = /\bsRGBToLinear\s*\(\s*texture/.test(albedo);
       }
       const opacity = /float\s+getMaterialOpacity\s*\([^)]*\)\s*\{([\s\S]{0,4000}?)return\s+alpha\s*;/.exec(fragment)?.[1];
       if (opacity) {
-        const texture = /alpha\s*=\s*\(?\s*texture(?:2D)?\(\s*(\w+)\s*,\s*vTexCoord0\s*\)\.(r|a)\s*\)?\s*;/.exec(opacity);
-        if (texture) { facts.opacitySampler = texture[1]; facts.opacityChannel = texture[2] === 'r' ? 0 : 3; }
+        const texture = /alpha\s*=\s*\(?\s*texture(?:2D)?\(\s*(\w+)\s*,\s*vTexCoord0\s*\)\.([rgba])\s*\)?\s*;/.exec(opacity);
+        if (texture) { facts.opacitySampler = texture[1]; facts.opacityChannel = 'rgba'.indexOf(texture[2]); }
         else if (/texture/.test(opacity)) facts.opacityUnsupported = true;
         facts.opacityFactor = /alpha\s*\*=\s*(\w+)\s*;/.exec(opacity)?.[1];
         facts.opacityInvert = /if\s*\(\s*uOpacityInvert\s*==\s*1\s*\)\s*alpha\s*=\s*1(?:\.0)?\s*-\s*alpha/.test(opacity);
       }
+      facts.pbr = {
+        metallic: scalarChannel(fragment, 'getMaterialMetalness'),
+        roughness: scalarChannel(fragment, 'getMaterialRoughness') ||
+          (/materialRoughness\s*=\s*1(?:\.0)?\s*-\s*getMaterialGlossiness\s*\(/.test(fragment) ? scalarChannel(fragment, 'getMaterialGlossiness', true) : null),
+        occlusion: scalarChannel(fragment, 'getMaterialAO') || scalarChannel(fragment, 'getMaterialOcclusion'),
+      };
+      const normal = functionBody(fragment, 'getMaterialNormalMap')?.replace(/\s+/g, '');
+      if (normal) {
+        const mapping = /^vec3(\w+)=\(?texture(?:2D)?\((\w+),vTexCoord0\)\.rgb\)?\*2(?:\.0)?-1(?:\.0)?;\1\.y=(\w+)==1\?-\1\.y:\1\.y;return\1;$/.exec(normal);
+        const transform = /materialNormal\s*=\s*transformNormal\(\s*(\w+)\s*,\s*materialNormal\s*,\s*tangent.xyz\s*,\s*binormal\s*,\s*frontNormal\s*\)/.exec(fragment);
+        const verifiedTransform = /normal\.xy=factor\*normal\.xy;returnnormalize\(normal\.x\*t\+normal\.y\*b\+normal\.z\*n\);/.test(functionBody(fragment, 'transformNormal')?.replace(/\s+/g, '') || '');
+        facts.normal = mapping && transform && verifiedTransform ? { sampler: mapping[2], flipUniform: mapping[3], scaleUniform: transform[1] } : { unsupported: true };
+      }
+      const emission = functionBody(fragment, 'getMaterialEmitColor')?.replace(/\s+/g, '');
+      if (emission) {
+        const mapping = /^return(\w+)\*sRGBToLinear\(texture(?:2D)?\((\w+),vTexCoord0\)\.rgb\);$/.exec(emission);
+        facts.emissive = mapping ? { sampler: mapping[2], factorUniform: mapping[1] } : { unsupported: true };
+      }
+      const f0 = /\bfloat\s+f0\s*=\s*(?:([\d.eE+-]+)\s*\*\s*)?getMaterialF0\(\s*\)/.exec(fragment);
+      if (f0) {
+        const channel = scalarChannel(fragment, 'getMaterialF0');
+        if (channel && !channel.unsupported && !channel.sampler) facts.dielectricF0 = { ...channel, multiplier: f0[1] ? Number(f0[1]) : 1 };
+      }
+      facts.unmappedFactors = ['uAnisotropyFactor', 'uClearCoatFactor', 'uClearcoatFactor', 'uCoatFactor', 'uSheenFactor']
+        .filter(name => new RegExp('\\b' + name + '\\b').test(fragment));
       return facts;
     }
     function inspectProgram(gl, object) {
       const s = state(gl); if (!s) return;
       const p = program(s, object); if (!p) return;
+      p.uniforms.clear(); p.locations.clear(); p.activeUniforms.clear(); p.samplers.clear(); p.unsupported = false; p.hasSkin = false; p.hasMorph = false;
       if (typeof gl.getAttachedShaders === 'function' && typeof gl.getShaderSource === 'function') {
         let vertex = '', fragment = '';
         for (const shader of gl.getAttachedShaders(object) || []) {
@@ -185,15 +285,18 @@
         const item = gl.getActiveAttrib(object, i); if (!item) continue;
         const location = gl.getAttribLocation(object, item.name), role = semantic(item.name);
         if (role && location >= 0) p.attributes.set(role, { location, type: item.type });
-        if (/joint|weight|bone|morph/i.test(item.name)) p.unsupported = true;
+        if (/joint|weight|bone/i.test(item.name)) p.hasSkin = true;
+        if (/morph/i.test(item.name)) p.hasMorph = true;
       }
       const uniforms = gl.getProgramParameter(object, gl.ACTIVE_UNIFORMS || 35718);
       p.hasModelTransform = false;
       if (Number.isInteger(uniforms) && uniforms >= 0 && uniforms <= 1024) for (let i = 0; i < uniforms; i++) {
         const item = gl.getActiveUniform(object, i); if (!item) continue;
+        p.activeUniforms.add(item.name);
         if (/model|world/i.test(item.name) && /matrix/i.test(item.name)) p.hasModelTransform = true;
         if (item.type === C.SAMPLER_2D) p.samplers.add(item.name);
-        if (/bone|joint|morph|skinning/i.test(item.name)) p.unsupported = true;
+        if (/bone|joint|skinning/i.test(item.name)) p.hasSkin = true;
+        if (/morph/i.test(item.name)) p.hasMorph = true;
       }
     }
     function texture(s, object) {
@@ -231,9 +334,9 @@
       let selected = null;
       for (const name of p.samplers) {
         if (/shadow|integrate|brdf|environment/i.test(name)) continue;
-        if (/normal|metal|rough|occlusion|emissive|specular|gloss|height|bump/i.test(name)) { warn('法线、粗糙度、金属度等附加材质通道尚未导出。'); continue; }
+        if (/normal|metal|rough|occlusion|emissive|specular|gloss|height|bump/i.test(name)) continue;
         if (name !== p.facts?.baseSampler && !/base.?color|albedo|diffuse/i.test(name)) continue;
-        const unit = p.uniforms.get(name)?.[0] ?? 0;
+        const unit = uniformFor(s, p, name)?.[0] ?? 0;
         const candidate = texture(s, s.units.get(unit)?.get(C.TEXTURE_2D));
         if (candidate && selected && candidate !== selected) warn('底色材质包含多个纹理，当前只保存一个通道。');
         if (candidate && !selected) selected = candidate;
@@ -243,10 +346,42 @@
     }
     function samplerTexture(s, p, name) {
       if (!name) return null;
-      return texture(s, s.units.get(p.uniforms.get(name)?.[0] ?? 0)?.get(C.TEXTURE_2D));
+      return texture(s, s.units.get(uniformFor(s, p, name)?.[0] ?? 0)?.get(C.TEXTURE_2D));
     }
     function expectsBaseTexture(p) {
       return [...p.samplers].some(name => name === p.facts?.baseSampler || /base.?color|albedo|diffuse/i.test(name));
+    }
+    function pbrFor(s, p) {
+      const channels = {};
+      for (const [name, spec] of Object.entries(p.facts?.pbr || {})) {
+        if (!spec) continue;
+        if (spec.unsupported) { warn('部分 PBR 材质表达式尚未支持，已保留基础材质。'); continue; }
+        let factor = 1;
+        for (const value of spec.factors) {
+          const number = /^[\d.]/.test(value) ? Number(value) : uniformFor(s, p, value)?.[0];
+          if (!Number.isFinite(number)) { factor = NaN; break; } factor *= number;
+        }
+        const selected = spec.sampler ? samplerTexture(s, p, spec.sampler) : null;
+        channels[name] = { ...spec, factor, texture: selected, version: selected?.version,
+          inverted: spec.invertUniform ? uniformFor(s, p, spec.invertUniform)?.[0] === 1 : false };
+      }
+      for (const name of ['normal', 'emissive']) {
+        const spec = p.facts?.[name]; if (!spec) continue;
+        if (spec.unsupported || name === 'emissive' && uniformFor(s, p, 'uEmitMultiplicative')?.[0] === 1) { warn('部分法线或自发光材质表达式尚未支持，已保留基础材质。'); continue; }
+        const selected = samplerTexture(s, p, spec.sampler);
+        channels[name] = { ...spec, texture: selected, version: selected?.version,
+          ...(name === 'normal' ? { flipY: uniformFor(s, p, spec.flipUniform)?.[0] === 1, scale: uniformFor(s, p, spec.scaleUniform)?.[0] } : { factor: uniformFor(s, p, spec.factorUniform)?.slice() }) };
+      }
+      const represented = new Set([p.facts?.baseSampler, p.facts?.opacitySampler, p.facts?.normal?.sampler, p.facts?.emissive?.sampler, ...Object.values(p.facts?.pbr || {}).map(value => value?.sampler)]);
+      for (const name of p.samplers) if (!represented.has(name) && /normal|metal|rough|occlusion|emissive|gloss|height|bump/i.test(name)) warn('部分附加材质通道尚未识别，已保留基础材质。');
+      const f0 = p.facts?.dielectricF0;
+      if (f0 && !(channels.metallic && !channels.metallic.sampler && channels.metallic.factor === 1)) {
+        let value = f0.multiplier;
+        for (const factor of f0.factors) value *= /^[\d.]/.test(factor) ? Number(factor) : uniformFor(s, p, factor)?.[0];
+        if (Number.isFinite(value) && Math.abs(value - 0.04) > 1e-5) warn('此材质使用非默认介电反射率（F0），当前按标准金属粗糙度材质导出。');
+      }
+      if (p.facts?.unmappedFactors.some(name => Math.abs(uniformFor(s, p, name)?.[0] || 0) > 1e-6)) warn('此材质含非零各向异性、清漆或织物效果，当前未导出这些附加通道。');
+      return channels;
     }
     function beginFrame(s) {
       if (animationFrame === null && !outsideBurst) {
@@ -280,7 +415,10 @@
       if (attributes.position.size < 3 || attributes.position.shaderType === 35664 || p.facts?.screenSpace && !p.hasModelTransform || p.facts?.viewerGround) return;
       beginFrame(s);
       if (count > limits.maxIndices) { s.drawError = 'SKETCHFAB_VIEWER_TOO_LARGE'; tooLargeAt = now(); if (pending) pending.tooLarge = true; return; }
-      if (instances !== 1 || p.unsupported || [...vao(s).attributes.values()].some(a => a.divisor > 0)) {
+      let sceneBinding = null;
+      try { if (!p.hasMorph) sceneBinding = sceneRecorder?.match(attributes.position.buffer, type ? vao(s).element : null) || null; }
+      catch { /* A partial scene must not enable an unsupported skin. */ }
+      if (instances !== 1 || p.unsupported || p.hasMorph || p.hasSkin && !sceneBinding?.isRig || [...vao(s).attributes.values()].some(a => a.divisor > 0)) {
         s.drawError = 'SKETCHFAB_VIEWER_UNSUPPORTED'; unsupportedAt = now(); warn('骨骼、变形或实例化网格尚未支持，不能作为完整静态模型导出。'); if (pending) pending.unsupported = true; return;
       }
       const pos = buffer(s, attributes.position.buffer); if (!pos) return;
@@ -288,11 +426,13 @@
       const matrix = matrixFor(p), textureInfo = selectedTexture(s, p);
       const opacityTexture = samplerTexture(s, p, p.facts?.opacitySampler);
       const descriptor = { s, attributes, element, elementVersion: element?.version, mode, count, type, offset, first, matrix, color: colorFor(p), texture: textureInfo, textureVersion: textureInfo?.version, requiresTexture: expectsBaseTexture(p),
-        opacityTexture, opacityVersion: opacityTexture?.version, opacityFactor: p.facts?.opacityFactor ? p.uniforms.get(p.facts.opacityFactor)?.[0] : 1,
-        opacityInvert: p.facts?.opacityInvert && p.uniforms.get('uOpacityInvert')?.[0] === 1,
+        sceneBinding,
+        pbr: pbrFor(s, p),
+        opacityTexture, opacityVersion: opacityTexture?.version, opacityFactor: p.facts?.opacityFactor ? uniformFor(s, p, p.facts.opacityFactor)?.[0] : 1,
+        opacityInvert: p.facts?.opacityInvert && uniformFor(s, p, 'uOpacityInvert')?.[0] === 1,
         quv0: p.uniforms.get('uQUV0'),
         qvs: [...p.uniforms].find(([name]) => cleanName(name) === 'uqvs')?.[1], qvt: [...p.uniforms].find(([name]) => cleanName(name) === 'uqvt')?.[1],
-        facts: p.facts || {}, scalarFactor: p.facts?.colorFactor ? p.uniforms.get(p.facts.colorFactor)?.[0] : undefined,
+        facts: p.facts || {}, scalarFactor: p.facts?.colorFactor ? uniformFor(s, p, p.facts.colorFactor)?.[0] : undefined,
         doubleSided: !s.cullEnabled, at: now() };
       descriptor.score = (matrix ? 4 : 0) + (attributes.normal ? 2 : 0) + (textureInfo ? 4 : 0) + (descriptor.facts.surface ? 4 : 0);
       const geometry = [pos.id, attributes.position.offset, attributes.position.stride, attributes.position.type, attributes.position.size, attributes.position.normalized,
@@ -389,6 +529,7 @@
       return out;
     }
     function meshFor(d) {
+      for (const attribute of Object.values(d.attributes)) if (buffer(d.s, attribute.buffer)?.version !== attribute.version) throw failure('SKETCHFAB_VIEWER_INCOMPLETE');
       const raw = [];
       if (d.type) {
         const size = elementSize(d.type);
@@ -462,6 +603,7 @@
         mesh.material.baseColorFactor[3] *= d.opacityFactor;
       }
       if (!color && !d.texture) warn('未识别底色参数，当前网格使用默认材质。');
+      meshVertices.set(mesh, vertices);
       return mesh;
     }
     async function pixelsFromTexture(t) {
@@ -511,8 +653,10 @@
       if (!data.startsWith('data:image/png;base64,')) throw failure('SKETCHFAB_VIEWER_INCOMPLETE');
       return { name, mimeType: 'image/png', data: data.slice(22) };
     }
-    async function pngFromTexture(t) {
-      return pngFromPixels(t.width, t.height, await pixelsFromTexture(t), 'base-color-' + t.id + '.png');
+    async function pngFromTexture(t, rgbOnly = false) {
+      const pixels = await pixelsFromTexture(t);
+      if (rgbOnly) for (let i = 3; i < pixels.length; i += 4) pixels[i] = 255;
+      return pngFromPixels(t.width, t.height, pixels, 'base-color-' + t.id + '.png');
     }
     async function pngWithOpacity(d) {
       const opacity = d.opacityTexture;
@@ -521,6 +665,7 @@
       if (base && d.facts.baseUV !== 'vTexCoord0') throw failure('SKETCHFAB_VIEWER_UNSUPPORTED');
       const width = base?.width || opacity.width, height = base?.height || opacity.height;
       const pixels = base ? new Uint8Array(await pixelsFromTexture(base)) : new Uint8Array(width * height * 4).fill(255);
+      if (d.facts.baseRgbOnly) for (let i = 3; i < pixels.length; i += 4) pixels[i] = 255;
       const readAlpha = (x, y) => alpha[(Math.max(0, Math.min(opacity.height - 1, y)) * opacity.width + Math.max(0, Math.min(opacity.width - 1, x))) * 4 + d.facts.opacityChannel] / 255;
       for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
         const u = (x + 0.5) / width * opacity.width - 0.5, v = (y + 0.5) / height * opacity.height - 0.5;
@@ -532,6 +677,90 @@
         pixels[i] = Math.round(pixels[i] * Math.max(0, Math.min(1, value * d.opacityFactor)));
       }
       return pngFromPixels(width, height, pixels, 'base-opacity-' + opacity.id + '.png');
+    }
+    async function scalarSource(channel) {
+      if (!Number.isFinite(channel.factor) || channel.sampler && !channel.texture) throw failure('SKETCHFAB_VIEWER_INCOMPLETE');
+      const adjust = value => {
+        if (channel.inverted) value = 1 - value;
+        value = channel.mixWhite ? 1 - (1 - value) * channel.factor : value * channel.factor;
+        if (channel.complement) value = 1 - value;
+        return Math.max(0, Math.min(1, value));
+      };
+      if (!channel.texture) return { value: adjust(1) };
+      const texture = channel.texture;
+      if (texture.version !== channel.version) throw failure('SKETCHFAB_VIEWER_INCOMPLETE');
+      const pixels = await pixelsFromTexture(texture);
+      if (texture.version !== channel.version) throw failure('SKETCHFAB_VIEWER_INCOMPLETE');
+      const at = (x, y) => pixels[(Math.max(0, Math.min(texture.height - 1, y)) * texture.width + Math.max(0, Math.min(texture.width - 1, x))) * 4 + channel.channel] / 255;
+      if (channel.constantUV) return { value: adjust(at(Math.floor(channel.constantUV[0] * texture.width), Math.floor(channel.constantUV[1] * texture.height))) };
+      return { width: texture.width, height: texture.height, read(x, y, width, height) {
+        const u = (x + 0.5) * texture.width / width - 0.5, v = (y + 0.5) * texture.height / height - 0.5;
+        const left = Math.floor(u), top = Math.floor(v), fx = u - left, fy = v - top;
+        return adjust((at(left, top) * (1 - fx) + at(left + 1, top) * fx) * (1 - fy) +
+          (at(left, top + 1) * (1 - fx) + at(left + 1, top + 1) * fx) * fy);
+      } };
+    }
+    async function applyPbr(d, mesh, addImage) {
+      const metallic = d.pbr.metallic && await scalarSource(d.pbr.metallic);
+      const roughness = d.pbr.roughness && await scalarSource(d.pbr.roughness);
+      const ao = d.pbr.occlusion && await scalarSource(d.pbr.occlusion);
+      for (const source of [metallic, roughness, ao]) if (source?.read && !mesh.texcoords) throw failure('SKETCHFAB_VIEWER_INCOMPLETE');
+      if (metallic?.read || roughness?.read) {
+        const width = Math.max(metallic?.width || 1, roughness?.width || 1), height = Math.max(metallic?.height || 1, roughness?.height || 1);
+        if (width * height > limits.maxTexturePixels) throw failure('SKETCHFAB_VIEWER_TOO_LARGE');
+        const pixels = new Uint8Array(width * height * 4);
+        for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
+          const at = (y * width + x) * 4;
+          pixels[at] = 255;
+          pixels[at + 1] = Math.round(255 * (roughness?.read ? roughness.read(x, y, width, height) : roughness?.value ?? 1));
+          pixels[at + 2] = Math.round(255 * (metallic?.read ? metallic.read(x, y, width, height) : metallic?.value ?? 0));
+          pixels[at + 3] = 255;
+        }
+        const key = 'mr:' + JSON.stringify([d.pbr.metallic && { ...d.pbr.metallic, texture: d.pbr.metallic.texture?.id }, d.pbr.roughness && { ...d.pbr.roughness, texture: d.pbr.roughness.texture?.id }]);
+        mesh.material.metallicRoughnessTexture = await addImage(key, () => pngFromPixels(width, height, pixels, 'metallic-roughness.png'));
+        mesh.material.metallicFactor = 1; mesh.material.roughnessFactor = 1;
+      } else {
+        if (metallic) mesh.material.metallicFactor = metallic.value;
+        if (roughness) mesh.material.roughnessFactor = roughness.value;
+      }
+      if (ao?.read || ao && ao.value !== 1) {
+        // glTF AO has no standalone scalar: bake a scalar AO to a 1x1 image.
+        if (!mesh.texcoords) { warn('无 UV 的环境遮蔽标量未导出。'); }
+        else {
+        const width = ao.width || 1, height = ao.height || 1, pixels = new Uint8Array(width * height * 4);
+        for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
+          const at = (y * width + x) * 4, value = Math.round(255 * (ao.read ? ao.read(x, y, width, height) : ao.value));
+          pixels[at] = value; pixels[at + 1] = value; pixels[at + 2] = value; pixels[at + 3] = 255;
+        }
+        const key = 'ao:' + JSON.stringify({ ...d.pbr.occlusion, texture: d.pbr.occlusion.texture?.id });
+        mesh.material.occlusionTexture = await addImage(key, () => pngFromPixels(width, height, pixels, 'occlusion.png'));
+        mesh.material.occlusionStrength = 1;
+        }
+      }
+      const normal = d.pbr.normal;
+      if (normal) {
+        if (!normal.texture || normal.texture.version !== normal.version || !Number.isFinite(normal.scale) || normal.scale < 0 || !mesh.texcoords || !mesh.normals) throw failure('SKETCHFAB_VIEWER_INCOMPLETE');
+        const t = normal.texture, pixels = new Uint8Array(await pixelsFromTexture(t));
+        if (t.version !== normal.version) throw failure('SKETCHFAB_VIEWER_INCOMPLETE');
+        for (let i = 0; i < pixels.length; i += 4) { if (normal.flipY) pixels[i + 1] = 255 - pixels[i + 1]; pixels[i + 3] = 255; }
+        const key = ['normal', t.id, normal.version, normal.flipY].join(':');
+        mesh.material.normalTexture = await addImage(key, () => pngFromPixels(t.width, t.height, pixels, 'normal.png'));
+        mesh.material.normalScale = normal.scale;
+      }
+      const emissive = d.pbr.emissive;
+      if (emissive) {
+        if (!emissive.texture || emissive.texture.version !== emissive.version || ![1, 3].includes(emissive.factor?.length) ||
+            !emissive.factor.every(value => Number.isFinite(value) && value >= 0) || !mesh.texcoords) throw failure('SKETCHFAB_VIEWER_INCOMPLETE');
+        const t = emissive.texture, pixels = new Uint8Array(await pixelsFromTexture(t));
+        if (t.version !== emissive.version) throw failure('SKETCHFAB_VIEWER_INCOMPLETE');
+        for (let i = 3; i < pixels.length; i += 4) pixels[i] = 255;
+        const key = ['emissive', t.id, emissive.version].join(':');
+        mesh.material.emissiveTexture = await addImage(key, () => pngFromPixels(t.width, t.height, pixels, 'emissive.png'));
+        const factor = emissive.factor.length === 1 ? Array(3).fill(emissive.factor[0]) : emissive.factor;
+        const strength = Math.max(1, ...factor);
+        mesh.material.emissiveFactor = factor.map(value => value / strength);
+        if (strength > 1) mesh.material.emissiveStrength = strength;
+      }
     }
     async function snapshot(modelId, { waitMs = limits.waitMs } = {}) {
       if (disposed || !syncModel() || modelId !== currentId) throw failure('SKETCHFAB_VIEWER_INVALID');
@@ -548,7 +777,16 @@
         }
         if (!job.draws.size) throw failure('SKETCHFAB_VIEWER_UNAVAILABLE');
         if (job.draws.size > limits.maxMeshes) throw failure('SKETCHFAB_VIEWER_TOO_LARGE');
-        const result = { version: 1, modelId, coordinateSystem: 'sketchfab-z-up', meshes: [], images: [] }, images = new Map(); let totalVertices = 0, totalIndices = 0, imageBytes = 0;
+        const result = { version: 1, modelId, coordinateSystem: 'sketchfab-z-up', meshes: [], images: [] }, images = new Map(), sceneEntries = []; let totalVertices = 0, totalIndices = 0, imageBytes = 0;
+        const addImage = async (key, create) => {
+          if (!images.has(key)) {
+            if (result.images.length >= limits.maxImages) throw failure('SKETCHFAB_VIEWER_TOO_LARGE');
+            const image = await create(); imageBytes += Math.floor(image.data.length * 3 / 4);
+            if (imageBytes > limits.maxImageBytes) throw failure('SKETCHFAB_VIEWER_TOO_LARGE');
+            images.set(key, result.images.length); result.images.push(image);
+          }
+          return images.get(key);
+        };
         for (const d of job.draws.values()) {
           if (syncModel() !== modelId || job.changed) throw failure('SKETCHFAB_VIEWER_INVALID');
           const mesh = meshFor(d); if (!mesh) continue;
@@ -560,15 +798,17 @@
               const pixels = await pixelsFromTexture(d.texture), uv = d.facts.constantUV;
               const x = Math.min(d.texture.width - 1, Math.max(0, Math.floor(uv[0] * d.texture.width))), y = Math.min(d.texture.height - 1, Math.max(0, Math.floor(uv[1] * d.texture.height)));
               const start = (y * d.texture.width + x) * 4, factor = d.scalarFactor ?? 1;
-              mesh.material.baseColorFactor = [pixels[start] / 255 * factor, pixels[start + 1] / 255 * factor, pixels[start + 2] / 255 * factor, pixels[start + 3] / 255];
+              const linear = value => d.facts.baseSrgb ? value <= 0.04045 ? value / 12.92 : Math.pow((value + 0.055) / 1.055, 2.4) : value;
+              mesh.material.baseColorFactor = [linear(pixels[start] / 255) * factor, linear(pixels[start + 1] / 255) * factor, linear(pixels[start + 2] / 255) * factor, d.facts.baseRgbOnly ? 1 : pixels[start + 3] / 255];
             } else if (!d.opacityTexture) {
-            if (!images.has(d.texture.id)) {
+            const baseKey = d.texture.id + ':rgb:' + Boolean(d.facts.baseRgbOnly);
+            if (!images.has(baseKey)) {
               if (result.images.length >= limits.maxImages) throw failure('SKETCHFAB_VIEWER_TOO_LARGE');
-              const image = await pngFromTexture(d.texture); imageBytes += Math.floor(image.data.length * 3 / 4);
+              const image = await pngFromTexture(d.texture, d.facts.baseRgbOnly); imageBytes += Math.floor(image.data.length * 3 / 4);
               if (imageBytes > limits.maxImageBytes) throw failure('SKETCHFAB_VIEWER_TOO_LARGE');
-              images.set(d.texture.id, result.images.length); result.images.push(image);
+              images.set(baseKey, result.images.length); result.images.push(image);
             }
-            mesh.material.baseColorTexture = images.get(d.texture.id);
+            mesh.material.baseColorTexture = images.get(baseKey);
             }
           }
           if (d.opacityTexture) {
@@ -581,10 +821,29 @@
             }
             mesh.material.baseColorTexture = images.get(key);
           }
+          await applyPbr(d, mesh, addImage);
+          if (d.facts.baseRgbOnly && !d.opacityTexture) mesh.material.alphaMode = (mesh.material.baseColorFactor?.[3] ?? 1) < 1 ? 'BLEND' : 'OPAQUE';
+          sceneEntries.push({ binding: d.sceneBinding, meshIndex: result.meshes.length, vertexIndices: meshVertices.get(mesh), worldMatrix: d.matrix });
           mesh.name = 'mesh-' + (result.meshes.length + 1); result.meshes.push(mesh);
         }
         if (syncModel() !== modelId || job.changed) throw failure('SKETCHFAB_VIEWER_INVALID');
         if (!result.meshes.length) throw failure('SKETCHFAB_VIEWER_UNAVAILABLE');
+        if (sceneEntries.some(entry => entry.binding?.isRig) || sceneRecorder?.requiresScene?.()) {
+          if (sceneEntries.some(entry => !entry.binding)) throw failure('SKETCHFAB_VIEWER_UNSUPPORTED');
+          const captured = sceneRecorder.buildScene(sceneEntries);
+          const rigCount = sceneEntries.filter(entry => entry.binding.isRig).length;
+          if (!captured?.scene || !Array.isArray(captured.skinData) || captured.skinData.length !== rigCount) throw failure('SKETCHFAB_VIEWER_INCOMPLETE');
+          const seen = new Set();
+          for (const data of captured.skinData) {
+            const mesh = result.meshes[data.meshIndex];
+            if (!Number.isSafeInteger(data.meshIndex) || !mesh || !sceneEntries[data.meshIndex].binding.isRig || seen.has(data.meshIndex) || !Array.isArray(data.joints) || !Array.isArray(data.weights) ||
+                data.joints.length !== mesh.positions.length / 3 * 4 || data.weights.length !== data.joints.length) throw failure('SKETCHFAB_VIEWER_INCOMPLETE');
+            seen.add(data.meshIndex); mesh.joints = data.joints; mesh.weights = data.weights;
+          }
+          for (const mesh of result.meshes) delete mesh.matrix;
+          result.scene = captured.scene;
+          for (const message of captured.warnings || []) if (typeof message === 'string') warn(message);
+        }
         if (warnings.size) result.warnings = [...warnings];
         const text = JSON.stringify(result), bytes = typeof TextEncoder === 'function' ? new TextEncoder().encode(text).length : text.length * 2;
         if (bytes > limits.maxJsonBytes) throw failure('SKETCHFAB_VIEWER_TOO_LARGE');
@@ -607,7 +866,7 @@
       }
     }
     scope.addEventListener?.('message', onMessage);
-    return Object.freeze({ snapshot, dispose() { disposed = true; if (pending) pending.changed = true; scope.removeEventListener?.('message', onMessage); for (const restore of restorers.reverse()) restore(); contexts.clear(); shadowBytes = 0; },
+    return Object.freeze({ snapshot, dispose() { disposed = true; if (pending) pending.changed = true; scope.removeEventListener?.('message', onMessage); for (const restore of restorers.reverse()) restore(); sceneRecorder?.dispose?.(); contexts.clear(); shadowBytes = 0; },
       limits: Object.freeze({ ...limits }) });
   }
   return { installSketchfabViewerRecorder, modelIdFromUrl, DEFAULT_LIMITS: DEFAULTS };

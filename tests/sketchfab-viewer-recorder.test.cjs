@@ -41,6 +41,7 @@ function fixture(t, options = {}) {
     getShaderSource(shader) { return shader.source; }
     getShaderParameter(shader) { return shader.type; }
     getUniformLocation(p, name) { return { p, name }; }
+    getUniform(p, location) { return p.defaultValues?.[location.name] ?? 0; }
     uniformMatrix4fv() {}
     uniform4fv() {}
     uniform3fv() {}
@@ -75,9 +76,9 @@ function fixture(t, options = {}) {
       if (target === 36160 || target === 36009) this.parameters.set(36006, value);
       if (target === 36160 || target === 36008) this.parameters.set(36010, value);
     }
-    framebufferTexture2D() {}
+    framebufferTexture2D(_target, _attachment, _type, texture) { this.readTexture = texture; }
     checkFramebufferStatus() { return this.framebufferComplete ? 36053 : 0; }
-    readPixels(_x, _y, _w, _h, _format, _type, data) { for (let i = 0; i < data.length; i++) data[i] = this.pixels[i % this.pixels.length]; }
+    readPixels(_x, _y, _w, _h, _format, _type, data) { const pixels = this.readTexture?.pixels || this.pixels; for (let i = 0; i < data.length; i++) data[i] = pixels[i % pixels.length]; }
     deleteFramebuffer() {}
   }
   const listeners = new Map(), responses = [], images = [], raf = [];
@@ -287,7 +288,7 @@ test('constant-UV palette is material color and is not mistaken for a UV image',
   f.gl.drawArrays(f.gl.TRIANGLES, 0, 3);
   const result = await f.recorder.snapshot(ID);
   assert.equal(result.images.length, 0);
-  assert.deepEqual(result.meshes[0].material.baseColorFactor, [0.5, 0, 0, 127 / 255]);
+  assert.deepEqual(result.meshes[0].material.baseColorFactor, [0.5, 0, 0, 1]);
 });
 
 test('quantized UVs and an independent red-channel opacity map preserve palette color and transparency', async t => {
@@ -312,6 +313,260 @@ test('quantized UVs and an independent red-channel opacity map preserve palette 
   assert.deepEqual(result.meshes[0].material.baseColorFactor, [64 / 255, 32 / 255, 16 / 255, 1]);
   assert.equal(result.images.length, 1);
   assert.deepEqual(f.images[0].pixels, [255, 255, 255, 64]);
+});
+
+// Material functions from the public Hologram Console viewer shader.
+const PBR_SHADER = `
+vec3 getMaterialAlbedo() { vec3 albedo = uAlbedoPBRFactor * sRGBToLinear(texture(Texture0, vTexCoord0).rgb); return albedo; }
+float getMaterialMetalness() { return uMetalnessPBRFactor * (texture(Texture1, vTexCoord0).a); }
+float getMaterialRoughness() { float fetch = (texture(Texture0, vTexCoord0).a); return uRoughnessPBRFactor * fetch; }
+float getMaterialAO() { return mix(1.0, (texture(Texture2, vTexCoord0).a), uAOPBRFactor); }
+vec3 getMaterialEmitColor() { return uEmitColorFactor * sRGBToLinear(texture(Texture2, vTexCoord0).rgb); }
+vec3 getMaterialNormalMap() { vec3 nmap = (texture(Texture1, vTexCoord0).rgb) * 2.0 - 1.0; nmap.y = uNormalMapFlipY == 1 ? -nmap.y : nmap.y; return nmap; }
+vec3 transformNormal(const in float factor, in vec3 normal, const in vec3 t, const in vec3 b, const in vec3 n) { normal.xy = factor * normal.xy; return normalize(normal.x * t + normal.y * b + normal.z * n); }
+void main() { vec3 materialNormal = getMaterialNormalMap(); materialNormal = transformNormal(uNormalMapFactor, materialNormal, tangent.xyz, binormal, frontNormal); }
+`;
+function pbrTriangle(f, source = PBR_SHADER, values = {}) {
+  f.triangle();
+  const p = f.program(['Vertex', 'Normal', 'TexCoord0'], ['Texture0', 'Texture1', 'Texture2'], [{ type: 35632, source }]);
+  const textures = [[20, 40, 80, 200], [128, 64, 255, 128], [40, 80, 160, 64]].map((pixels, unit) => {
+    const texture = { pixels };
+    f.gl.activeTexture(f.gl.TEXTURE0 + unit); f.gl.bindTexture(f.gl.TEXTURE_2D, texture);
+    f.gl.texImage2D(f.gl.TEXTURE_2D, 0, f.gl.RGBA, 1, 1, 0, f.gl.RGBA, f.gl.UNSIGNED_BYTE, new Uint8Array(pixels));
+    f.gl.uniform1i(f.gl.getUniformLocation(p, 'Texture' + unit), unit); return texture;
+  });
+  for (const [name, value] of Object.entries({ uAlbedoPBRFactor: 1, uMetalnessPBRFactor: 0.5, uRoughnessPBRFactor: 0.25,
+    uAOPBRFactor: 0.75, uNormalMapFactor: 2, uNormalMapFlipY: 1, uEmitColorFactor: 2, uEmitMultiplicative: 0, ...values })) {
+    f.gl.uniform1f(f.gl.getUniformLocation(p, name), value);
+  }
+  const matrix = IDENTITY.slice(); matrix[12] = 3;
+  f.gl.uniformMatrix4fv(f.gl.getUniformLocation(p, 'uModelMatrix'), false, matrix);
+  f.gl.drawElements(f.gl.TRIANGLES, 3, f.gl.UNSIGNED_SHORT, 0);
+  return { p, textures };
+}
+
+test('real PBR functions pack roughness into G, metalness into B, and preserve AO, normal and emissive meaning', async t => {
+  const f = fixture(t); pbrTriangle(f);
+  const result = await f.recorder.snapshot(ID), material = result.meshes[0].material;
+  assert.equal(result.meshes.length, 1);
+  assert.equal(material.metallicFactor, 1); assert.equal(material.roughnessFactor, 1);
+  assert.equal(material.normalScale, 2); assert.equal(material.occlusionStrength, 1);
+  assert.equal(material.alphaMode, 'OPAQUE');
+  assert.deepEqual(material.emissiveFactor, [1, 1, 1]); assert.equal(material.emissiveStrength, 2);
+  assert.deepEqual(f.images[material.baseColorTexture].pixels, [20, 40, 80, 255], 'roughness alpha must not cause transparency');
+  assert.deepEqual(f.images[material.metallicRoughnessTexture].pixels, [255, 50, 64, 255]);
+  assert.deepEqual(f.images[material.occlusionTexture].pixels, [112, 112, 112, 255]);
+  assert.deepEqual(f.images[material.normalTexture].pixels, [128, 191, 255, 255]);
+  assert.deepEqual(f.images[material.emissiveTexture].pixels, [40, 80, 160, 255]);
+  assert.ok(!(result.warnings || []).some(message => message.includes('PBR') || message.includes('附加材质')));
+});
+
+test('observed scalar metalness and glossiness are exported without inventing textures', async t => {
+  const f = fixture(t);
+  pbrTriangle(f, 'vec3 getMaterialAlbedo(){vec3 albedo=uAlbedoPBRFactor*texture(Texture0,vTexCoord0).rgb;return albedo;}' +
+    'float getMaterialMetalness(){return uMetalnessPBRFactor;} float getMaterialGlossiness(){return uGlossinessPBRFactor;} void main(){float materialRoughness=1.0-getMaterialGlossiness();}',
+  { uMetalnessPBRFactor: 0.7, uGlossinessPBRFactor: 0.25 });
+  const result = await f.recorder.snapshot(ID), material = result.meshes[0].material;
+  assert.equal(material.metallicFactor, 0.7); assert.equal(material.roughnessFactor, 0.75);
+  assert.equal(material.metallicRoughnessTexture, undefined); assert.equal(result.images.length, 1);
+});
+
+test('independent green opacity multiplies RGB-only base alpha instead of its packed roughness', async t => {
+  const f = fixture(t);
+  pbrTriangle(f, PBR_SHADER + 'float getMaterialOpacity(){float alpha=1.0;alpha=(texture(Texture2,vTexCoord0).g);alpha*=uOpacityFactor;return alpha;}', { uOpacityFactor: 0.5 });
+  const result = await f.recorder.snapshot(ID);
+  assert.deepEqual(f.images[result.meshes[0].material.baseColorTexture].pixels, [20, 40, 80, 40]);
+  assert.equal(result.meshes[0].material.alphaMode, undefined);
+});
+
+test('PBR textures changing after draw reject a stale capture', async t => {
+  const f = fixture(t); const { textures } = pbrTriangle(f);
+  f.gl.activeTexture(f.gl.TEXTURE0 + 1); f.gl.bindTexture(f.gl.TEXTURE_2D, textures[1]);
+  f.gl.texSubImage2D(f.gl.TEXTURE_2D, 0, 0, 0, 1, 1, f.gl.RGBA, f.gl.UNSIGNED_BYTE, new Uint8Array(4));
+  await assert.rejects(f.recorder.snapshot(ID), { code: 'SKETCHFAB_VIEWER_INCOMPLETE' });
+});
+
+test('unknown PBR expressions and multiplicative emissive explicitly warn instead of fabricating channels', async t => {
+  const f = fixture(t); pbrTriangle(f, PBR_SHADER.replace('return uMetalnessPBRFactor * (texture(Texture1, vTexCoord0).a);', 'return pow(texture(Texture1,vTexCoord0).a,2.0);'), { uEmitMultiplicative: 1 });
+  const result = await f.recorder.snapshot(ID);
+  assert.ok(result.warnings.some(message => message.includes('PBR')));
+  assert.ok(result.warnings.some(message => message.includes('自发光')));
+  assert.equal(result.meshes[0].material.emissiveTexture, undefined);
+});
+
+test('additional PBR images obey the combined image-count budget', async t => {
+  const f = fixture(t, { maxImages: 3 }); pbrTriangle(f);
+  await assert.rejects(f.recorder.snapshot(ID), { code: 'SKETCHFAB_VIEWER_TOO_LARGE' });
+});
+
+test('one source texture used with different material factors keeps separate packed images', async t => {
+  const f = fixture(t), { p } = pbrTriangle(f);
+  f.gl.uniform1f(f.gl.getUniformLocation(p, 'uRoughnessPBRFactor'), 0.5);
+  const matrix = IDENTITY.slice(); matrix[12] = 4;
+  f.gl.uniformMatrix4fv(f.gl.getUniformLocation(p, 'uModelMatrix'), false, matrix);
+  f.gl.drawElements(f.gl.TRIANGLES, 3, f.gl.UNSIGNED_SHORT, 0);
+  const result = await f.recorder.snapshot(ID), [first, second] = result.meshes.map(mesh => mesh.material);
+  assert.equal(result.meshes.length, 2);
+  assert.notEqual(first.metallicRoughnessTexture, second.metallicRoughnessTexture);
+  assert.deepEqual(f.images[first.metallicRoughnessTexture].pixels, [255, 50, 64, 255]);
+  assert.deepEqual(f.images[second.metallicRoughnessTexture].pixels, [255, 100, 64, 255]);
+  assert.equal(first.baseColorTexture, second.baseColorTexture);
+  assert.equal(first.normalTexture, second.normalTexture);
+});
+
+test('glossiness texture inversion and multiplication precede conversion to roughness', async t => {
+  const f = fixture(t);
+  const shader = PBR_SHADER.replace(/float getMaterialRoughness\(\)[^}]*}/,
+    'float getMaterialGlossiness(){float g=(texture(Texture0,vTexCoord0).a);if(uGlossinessPBRInvert==1)g=1.0-g;g*=uGlossinessPBRFactor;return g;}') +
+    'void material(){float materialRoughness=1.0-getMaterialGlossiness();}';
+  pbrTriangle(f, shader, { uGlossinessPBRInvert: 1, uGlossinessPBRFactor: 0.25 });
+  const result = await f.recorder.snapshot(ID), material = result.meshes[0].material;
+  assert.deepEqual(f.images[material.metallicRoughnessTexture].pixels, [255, 241, 64, 255]);
+});
+
+test('unknown local scalar mutations are not silently discarded', async t => {
+  const f = fixture(t);
+  pbrTriangle(f, PBR_SHADER.replace('return uRoughnessPBRFactor * fetch;', 'fetch=1.0-fetch; return uRoughnessPBRFactor * fetch;'));
+  const result = await f.recorder.snapshot(ID);
+  assert.ok(result.warnings.some(message => message.includes('PBR')));
+  assert.deepEqual(f.images[result.meshes[0].material.metallicRoughnessTexture].pixels, [255, 255, 64, 255]);
+});
+
+test('a constant palette explicitly decoded from sRGB exports linear material factors', async t => {
+  const f = fixture(t); f.gl.pixels = [128, 64, 32, 20];
+  const p = f.program(['Vertex'], ['Texture0'], [{ type: 35632, source: 'vec3 getMaterialAlbedo(){vec3 albedo=uAlbedoPBRFactor*sRGBToLinear(texture(Texture0,vec2(0.125,0.5)).rgb);return albedo;}' }]);
+  f.attribute(0, new Float32Array([0, 0, 0, 1, 0, 0, 0, 1, 0]), 3);
+  f.gl.bindTexture(f.gl.TEXTURE_2D, {}); f.gl.texImage2D(f.gl.TEXTURE_2D, 0, f.gl.RGBA, 1, 1, 0, f.gl.RGBA, f.gl.UNSIGNED_BYTE, new Uint8Array(f.gl.pixels));
+  f.gl.uniform1f(f.gl.getUniformLocation(p, 'uAlbedoPBRFactor'), 0.5);
+  f.gl.drawArrays(f.gl.TRIANGLES, 0, 3);
+  const factor = (await f.recorder.snapshot(ID)).meshes[0].material.baseColorFactor;
+  assert.ok(Math.abs(factor[0] - 0.10793025005694963) < 1e-10);
+  assert.equal(factor[3], 1);
+});
+
+test('only nondefault observed F0 and nonzero advanced factors warn', async t => {
+  const source = PBR_SHADER + 'float getMaterialF0(){return uSpecularF0Factor;} void advanced(){float f0=0.08*getMaterialF0();float anisotropy=uAnisotropyFactor;float coat=uClearCoatFactor;}';
+  const standard = fixture(t); pbrTriangle(standard, source, { uSpecularF0Factor: 0.5, uAnisotropyFactor: 0, uClearCoatFactor: 0 });
+  assert.ok(!(await standard.recorder.snapshot(ID)).warnings?.some(message => /F0|各向异性/.test(message)));
+  const advanced = fixture(t); pbrTriangle(advanced, source, { uSpecularF0Factor: 0, uAnisotropyFactor: 0.2, uClearCoatFactor: 0 });
+  const warnings = (await advanced.recorder.snapshot(ID)).warnings;
+  assert.ok(warnings.some(message => message.includes('F0')));
+  assert.ok(warnings.some(message => message.includes('各向异性')));
+});
+
+test('active default-valued PBR uniforms omitted by the viewer use their actual native GL value', async t => {
+  const f = fixture(t); f.triangle();
+  const p = f.program(['Vertex', 'Normal', 'TexCoord0'], ['uMetalnessPBRFactor'], [{ type: 35632, source: '#define SHADER_NAME PBR\nfloat getMaterialMetalness(){return uMetalnessPBRFactor;}' }]);
+  p.uniforms[0].type = f.gl.FLOAT; f.gl.linkProgram(p);
+  const matrix = IDENTITY.slice(); matrix[12] = 3;
+  f.gl.uniformMatrix4fv(f.gl.getUniformLocation(p, 'uModelMatrix'), false, matrix);
+  f.gl.drawElements(f.gl.TRIANGLES, 3, f.gl.UNSIGNED_SHORT, 0);
+  const result = await f.recorder.snapshot(ID);
+  assert.equal(result.meshes[0].material.metallicFactor, 0);
+  f.gl.uniform1f(f.gl.getUniformLocation(p, 'uMetalnessPBRFactor'), 0.8);
+  f.gl.drawElements(f.gl.TRIANGLES, 3, f.gl.UNSIGNED_SHORT, 0);
+  assert.equal((await f.recorder.snapshot(ID)).meshes[0].material.metallicFactor, 0.8);
+});
+
+function bindRig(f) {
+  const triangle = f.triangle();
+  const p = f.program(['Vertex', 'Normal', 'TexCoord0', 'Bones', 'Weights']);
+  const bones = f.attribute(3, new Uint16Array([0,0,0,0, 1,0,0,0, 0,0,0,0]), 4, f.gl.UNSIGNED_SHORT);
+  const weights = f.attribute(4, new Float32Array([1,0,0,0, 1,0,0,0, 1,0,0,0]), 4);
+  const matrix = IDENTITY.slice(); matrix[12] = 3;
+  f.gl.uniformMatrix4fv(f.gl.getUniformLocation(p, 'uModelMatrix'), false, matrix);
+  f.gl.bufferData(f.gl.ELEMENT_ARRAY_BUFFER, new Uint16Array([2,0,1]), 35044);
+  f.gl.drawElements(f.gl.TRIANGLES, 3, f.gl.UNSIGNED_SHORT, 0);
+  return { ...triangle, bones, weights };
+}
+function sceneStub() {
+  return {
+    calls: [], binding: { isRig: true },
+    match(position, element) { this.calls.push({ position, element }); return this.binding; },
+    buildScene(entries) {
+      this.entries = entries;
+      return { scene: { nodes: [{ mesh: 0, skin: 0 }, {}, {}], skins: [{ joints: [1, 2], inverseBindMatrices: IDENTITY.concat(IDENTITY) }] },
+        skinData: entries.map(entry => ({ meshIndex: entry.meshIndex,
+          joints: entry.vertexIndices.flatMap(index => [index === 1 ? 1 : 0, 0, 0, 0]), weights: entry.vertexIndices.flatMap(() => [1,0,0,0]) })), warnings: ['测试动画来源。'] };
+    }, dispose() {}
+  };
+}
+
+test('verified scene binding allows skinning and receives the exact compacted vertex remap', async t => {
+  const sceneRecorder = sceneStub(), f = fixture(t, { sceneRecorder }), rig = bindRig(f);
+  const snapshot = await f.recorder.snapshot(ID), mesh = snapshot.meshes[0];
+  assert.equal(sceneRecorder.calls.at(-1).position, rig.vertex);
+  assert.equal(sceneRecorder.calls.at(-1).element, rig.indices);
+  assert.deepEqual(sceneRecorder.entries[0].vertexIndices, [2,0,1]);
+  assert.equal(sceneRecorder.entries[0].worldMatrix[12], 3);
+  assert.deepEqual(mesh.positions, [0,1,0, 0,0,0, 1,0,0]);
+  assert.deepEqual(mesh.joints, [0,0,0,0, 0,0,0,0, 1,0,0,0]);
+  assert.equal(mesh.weights.length, 12); assert.equal(mesh.matrix, undefined);
+  assert.ok(snapshot.scene.skins.length); assert.ok(snapshot.warnings.includes('测试动画来源。'));
+});
+
+test('an unmatched or static scene binding never enables skinning', async t => {
+  for (const binding of [null, { isRig: false }]) {
+    const sceneRecorder = sceneStub(); sceneRecorder.binding = binding;
+    const f = fixture(t, { sceneRecorder }); bindRig(f);
+    await assert.rejects(f.recorder.snapshot(ID), { code: 'SKETCHFAB_VIEWER_UNSUPPORTED' });
+  }
+});
+
+test('a verified skin cannot hide morphs or modified bone attribute buffers', async t => {
+  const sceneRecorder = sceneStub(), f = fixture(t, { sceneRecorder }), rig = bindRig(f);
+  f.gl.bindBuffer(f.gl.ARRAY_BUFFER, rig.weights); f.gl.bufferSubData(f.gl.ARRAY_BUFFER, 0, new Float32Array([0.5]));
+  await assert.rejects(f.recorder.snapshot(ID), { code: 'SKETCHFAB_VIEWER_INCOMPLETE' });
+  const morph = fixture(t, { sceneRecorder: sceneStub() });
+  morph.program(['Vertex', 'MorphTarget']); morph.attribute(0, new Float32Array([0,0,0, 1,0,0, 0,1,0]), 3);
+  morph.gl.drawArrays(morph.gl.TRIANGLES, 0, 3);
+  await assert.rejects(morph.recorder.snapshot(ID), { code: 'SKETCHFAB_VIEWER_UNSUPPORTED' });
+});
+
+test('skin snapshots reject unbound attachments and incomplete skin data', async t => {
+  const sceneRecorder = sceneStub();
+  const originalMatch = sceneRecorder.match; let allowedPosition;
+  sceneRecorder.match = function(position, element) { return position === allowedPosition ? originalMatch.call(this, position, element) : null; };
+  const f = fixture(t, { sceneRecorder }); f.triangle();
+  const p = f.program(['Vertex', 'Bones']);
+  allowedPosition = f.attribute(0, new Float32Array([0,0,0, 2,0,0, 0,2,0]), 3);
+  f.attribute(1, new Uint16Array(12), 4, f.gl.UNSIGNED_SHORT);
+  f.gl.uniformMatrix4fv(f.gl.getUniformLocation(p, 'uModelMatrix'), false, IDENTITY);
+  f.gl.drawArrays(f.gl.TRIANGLES, 0, 3);
+  await assert.rejects(f.recorder.snapshot(ID), { code: 'SKETCHFAB_VIEWER_UNSUPPORTED' });
+  const incomplete = sceneStub(); incomplete.buildScene = () => ({ scene: { nodes: [{}] }, skinData: [] });
+  const second = fixture(t, { sceneRecorder: incomplete }); bindRig(second);
+  await assert.rejects(second.recorder.snapshot(ID), { code: 'SKETCHFAB_VIEWER_INCOMPLETE' });
+});
+
+test('known node animation without a complete scene cannot silently become a static model', async t => {
+  const f = fixture(t, { sceneRecorder: { match: () => null, requiresScene: () => true, buildScene() { assert.fail('Unbound scene cannot be built'); } } });
+  f.triangle();
+  await assert.rejects(f.recorder.snapshot(ID), { code: 'SKETCHFAB_VIEWER_UNSUPPORTED' });
+});
+
+test('complete scene capture keeps static attachments alongside the animated mesh', async t => {
+  const staticBinding = { isRig: false }, rigBinding = { isRig: true }, bindings = new Map();
+  const sceneRecorder = { match: position => bindings.get(position), buildScene(entries) {
+    assert.deepEqual(entries.map(x => x.binding.isRig), [false, true]);
+    return { scene: { nodes: [{ mesh: 0 }, { mesh: 1, skin: 0 }, {}], skins: [{ joints: [2], inverseBindMatrices: IDENTITY }] },
+      skinData: [{ meshIndex: 1, joints: Array(12).fill(0), weights: [1,0,0,0,1,0,0,0,1,0,0,0] }] };
+  } };
+  const f = fixture(t, { sceneRecorder });
+  const first = f.triangle(); bindings.set(first.vertex, staticBinding);
+  f.gl.drawElements(f.gl.TRIANGLES, 3, f.gl.UNSIGNED_SHORT, 0);
+  const second = bindRig(f); bindings.set(second.vertex, rigBinding);
+  // The previous draw was intentionally unbound; a fresh frame now has both verified bindings.
+  f.scope.requestAnimationFrame(() => {
+    f.gl.useProgram(first.p); f.gl.bindBuffer(f.gl.ARRAY_BUFFER, first.vertex); f.gl.vertexAttribPointer(0,3,f.gl.FLOAT,false,0,0);
+    f.gl.bindBuffer(f.gl.ELEMENT_ARRAY_BUFFER, first.indices); f.gl.drawElements(f.gl.TRIANGLES,3,f.gl.UNSIGNED_SHORT,0);
+    const p = f.program(['Vertex','Bones']); f.gl.bindBuffer(f.gl.ARRAY_BUFFER,second.vertex); f.gl.vertexAttribPointer(0,3,f.gl.FLOAT,false,0,0);
+    f.gl.bindBuffer(f.gl.ELEMENT_ARRAY_BUFFER,second.indices); f.gl.uniformMatrix4fv(f.gl.getUniformLocation(p,'uModelMatrix'),false,IDENTITY); f.gl.drawElements(f.gl.TRIANGLES,3,f.gl.UNSIGNED_SHORT,0);
+  });
+  f.runFrame(2); f.setTime(2000);
+  const snapshot = await f.recorder.snapshot(ID);
+  assert.equal(snapshot.meshes.length, 2); assert.equal(snapshot.meshes[0].joints, undefined);
+  assert.equal(snapshot.meshes[1].joints.length, 12); assert.ok(snapshot.meshes.every(mesh => !mesh.matrix));
 });
 
 test('screen-space shaders and active vec2 attributes never become model geometry', async t => {
