@@ -6,7 +6,7 @@ const CONFIG_KEY = 'shituConnection';
 const LAST_KEY = 'shituLastCapture';
 const DESTINATIONS_KEY = 'shituCaptureDestinations';
 // A running worker can read an updated manifest without having loaded new code.
-const WORKER_VERSION = '0.11.28';
+const WORKER_VERSION = '0.11.29';
 const BROWSER_SESSION_SITES = {
   youtube: { label: 'YouTube', domain: 'youtube.com', capability: 'youtubeBrowserSession', field: 'youtubeSession' },
   bilibili: { label: 'Bilibili', domain: 'bilibili.com', capability: 'bilibiliBrowserSession', field: 'bilibiliSession' }
@@ -140,6 +140,7 @@ function appStatus(result) {
     ...(result.youtubeBrowserSession === true ? { youtubeBrowserSession: true } : {}),
     ...(result.bilibiliBrowserSession === true ? { bilibiliBrowserSession: true } : {}),
     ...(result.sketchfabDownload === true ? { sketchfabDownload: true } : {}),
+    ...(result.sketchfabBrowserDownload === true ? { sketchfabBrowserDownload: true } : {}),
     ...(result.youtubeBrowserRead === true ? { youtubeBrowserRead: true } : {}),
     ...(result.siteVideoDownload === true ? { siteVideoDownload: true } : {}),
     ...(result.vimeoBrowserRead === true ? { vimeoBrowserRead: true } : {}) };
@@ -439,13 +440,27 @@ function notifyTab(sender, message, { status = 'working', locateReceipt, clientC
   }, pageTarget(sender))).catch(() => {});
 }
 
-function readFromPage(sender, message) {
+function readFromPage(sender, message, timeout = PAGE_READ_TIMEOUT) {
   let timer;
   const deadline = new Promise((_resolve, reject) => {
-    timer = setTimeout(() => reject(issue('网页读取超时，请刷新页面后重试。', 'PAGE_READ_TIMEOUT')), PAGE_READ_TIMEOUT);
+    timer = setTimeout(() => reject(issue('网页读取超时，请刷新页面后重试。', 'PAGE_READ_TIMEOUT')), timeout);
   });
   const reply = Promise.resolve().then(() => chrome.tabs.sendMessage(sender.tab.id, message, pageTarget(sender)));
   return Promise.race([reply, deadline]).finally(() => clearTimeout(timer));
+}
+
+async function readSketchfabFromPage(media, sender, clientCaptureId, requestId) {
+  const helper = globalThis.MosaicSketchfab;
+  if (!Number.isInteger(sender?.tab?.id) || !clientCaptureId) throw helper.downloadError('SKETCHFAB_SOURCE_CHANGED');
+  let reply;
+  try {
+    reply = await readFromPage(sender, { type: 'shitu:resolve-sketchfab', modelId: media.modelId, clientCaptureId, requestId },
+      helper.DOWNLOAD_TIMEOUT + 5000);
+  } catch (error) {
+    throw helper.downloadError(error?.code === 'PAGE_READ_TIMEOUT' ? 'SKETCHFAB_DOWNLOAD_TIMEOUT' : 'SKETCHFAB_SOURCE_CHANGED');
+  }
+  if (!reply?.ok) throw helper.downloadError(reply?.code);
+  return helper.checkedArchiveUrl(reply.archiveUrl, media.modelId);
 }
 
 async function readVideoFromPage(body, sender, clientCaptureId) {
@@ -675,7 +690,7 @@ async function capture(input, sender, clientCaptureId) {
     async function submit(media) {
       const { youtubeSelectionId, ...transfer } = media;
       async function attempt() {
-        if (media.sourceType === 'sketchfab' && !connection.status.sketchfabDownload) throw issue('请更新桌面 Mosaic 后采集 Sketchfab 模型。', 'INCOMPATIBLE_APP');
+        if (media.sourceType === 'sketchfab' && !connection.status.sketchfabBrowserDownload) throw issue('请更新桌面 Mosaic 后使用当前 Chrome 采集 Sketchfab 模型。', 'INCOMPATIBLE_APP');
         if (media.sourceType === 'youtube-browser' && !connection.status.youtubeBrowserRead) throw issue('请更新桌面 Mosaic 以读取 YouTube 浏览器播放文件。', 'INCOMPATIBLE_APP');
         if (media.playback && !connection.status.vimeoPlayback) throw issue('请将桌面 Mosaic 更新到支持 Vimeo 播放采集的版本。', 'INCOMPATIBLE_APP');
         if (media.sourceType === 'youtube' && !connection.status.youtubeDownload) throw issue('请将桌面 Mosaic 更新到支持 YouTube 下载的版本。', 'INCOMPATIBLE_APP');
@@ -685,6 +700,10 @@ async function capture(input, sender, clientCaptureId) {
         if (media.sourceType === 'site-video' && !connection.status.siteVideoDownload) throw issue('请将桌面 Mosaic 更新到支持视频帖子下载的版本。', 'INCOMPATIBLE_APP');
         if (media.browserRead && !connection.status.vimeoBrowserRead) throw issue('请更新桌面 Mosaic 后重试 Vimeo 浏览器采集。', 'INCOMPATIBLE_APP');
         const payload = { ...transfer, requestId, ...(destination ? { destination } : {}) };
+        if (media.sourceType === 'sketchfab') {
+          await publish('reading', '正在通过当前 Chrome 准备模型下载…');
+          payload.archiveUrl = await readSketchfabFromPage(media, sender, job.clientCaptureId, requestId);
+        }
         if (sessionSite && await mayReadBrowserSession(sessionSite)) {
           payload[sessionSite.field] = await readBrowserSession(sender, sessionSite);
         }
@@ -699,7 +718,7 @@ async function capture(input, sender, clientCaptureId) {
               ['youtube', 'site-video'].includes(media.sourceType) ? PAGE_VIDEO_CAPTURE_TIMEOUT :
               media.sourceType === 'youtube-browser' ? YOUTUBE_CAPTURE_TIMEOUT : CAPTURE_TIMEOUT);
           return await (browserRead ? Promise.race([response, browserRead.failure]) : response);
-        } finally { delete payload.youtubeSession; delete payload.bilibiliSession; browserRead?.stop(); stop?.(); }
+        } finally { delete payload.youtubeSession; delete payload.bilibiliSession; delete payload.archiveUrl; browserRead?.stop(); stop?.(); }
       }
       try { return await attempt(); }
       catch (error) {

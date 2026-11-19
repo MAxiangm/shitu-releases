@@ -236,7 +236,7 @@ test('Sketchfab selection rejects a page change before preparation and has a mod
   assert.equal(changed.messages.some(value => value.type === 'shitu:capture'), false);
   const waiting = await content({ kind: 'model', pageUrl, siteResolvers: adapter, reply: () => new Promise(() => {}) });
   const saving = waiting.capture();
-  const deadline = await until(() => [...waiting.timers.values()].find(value => value.delay === 18 * 60000 + 40000), 'Model receipt timeout missing');
+  const deadline = await until(() => [...waiting.timers.values()].find(value => value.delay === (3 + 18) * 60000 + 40000), 'Model receipt timeout missing');
   deadline.callback();
   assert.match((await saving).message, /未收到保存确认/);
   assert.deepEqual(waiting.fetches, []);

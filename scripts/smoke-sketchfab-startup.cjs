@@ -34,16 +34,16 @@ require(${JSON.stringify(path.join(root, 'src', 'main.cjs'))});
             headers:{'Content-Type':'application/json','X-Shitu-Token':token}, body:JSON.stringify(body), signal:AbortSignal.timeout(1000) });
           const response = await request('/v1/ping', {}), status = await response.json();
           if (!response.ok || status.version !== ${JSON.stringify(version)}) continue;
-          if (status.sketchfabDownload !== true) throw new Error('Actual desktop entry point did not wire model imports into the collector.');
+          if (status.sketchfabDownload !== true || status.sketchfabBrowserDownload !== true) throw new Error('Actual desktop entry point did not wire model imports into the collector.');
           const id = '0123456789abcdef0123456789abcdef', page = 'https://sketchfab.com/3d-models/' + id;
           const capture = await (await request('/v1/capture', {kind:'model',sourceType:'sketchfab',modelId:id,url:page,pageUrl:page})).json();
-          if (capture.ok || capture.code !== 'SKETCHFAB_ACCOUNT_REQUIRED') throw new Error('Unconnected model capture did not reach the real Sketchfab account service.');
-          result = {ok:true, version:status.version, ready:status.ready, sketchfabDownload:status.sketchfabDownload, unconnectedCode:capture.code};
+          if (capture.ok || capture.code !== 'SKETCHFAB_BROWSER_DOWNLOAD_REQUIRED') throw new Error('Unconnected model capture did not reach the real Sketchfab browser-download service.');
+          result = {ok:true, version:status.version, ready:status.ready, sketchfabDownload:status.sketchfabDownload, sketchfabBrowserDownload:status.sketchfabBrowserDownload, unconnectedCode:capture.code};
           break;
-        } catch (error) { if (/wire model|account service/.test(error.message)) throw error; }
+        } catch (error) { if (/wire model|account service|browser-download service/.test(error.message)) throw error; }
       }
       if (result) break;
-    } catch (error) { if (/wire model|account service/.test(error.message)) throw error; }
+    } catch (error) { if (/wire model|account service|browser-download service/.test(error.message)) throw error; }
     await new Promise(resolve => setTimeout(resolve, 250));
   }
   if (!result) throw new Error('Isolated desktop collector did not become available.');
@@ -56,11 +56,22 @@ require(${JSON.stringify(path.join(root, 'src', 'main.cjs'))});
 });
 `);
   const env = { ...process.env }; delete env.ELECTRON_RUN_AS_NODE;
+  let completedReport;
   const exitCode = await new Promise((resolve, reject) => {
     const child = spawn(electronPath(), [directory, '--background'], { cwd: root, env, windowsHide: true, stdio: 'ignore' });
-    const timeout = setTimeout(() => { child.kill(); reject(new Error('Isolated Sketchfab desktop startup timed out.')); }, 45000);
-    child.once('error', error => { clearTimeout(timeout); reject(error); });
-    child.once('exit', code => { clearTimeout(timeout); resolve(code); });
+    // app.exit can race asynchronous window creation in this bootstrap. Once
+    // the live collector has written its result, only this isolated child is
+    // stopped; this test does not assert the application shutdown lifecycle.
+    const reportPoll = setInterval(async () => {
+      try {
+        const value = JSON.parse(await fs.readFile(path.join(directory, 'result.json'), 'utf8'));
+        if (typeof value.ok !== 'boolean' || completedReport) return;
+        completedReport = value; clearInterval(reportPoll); child.kill();
+      } catch {}
+    }, 100);
+    const timeout = setTimeout(() => { clearInterval(reportPoll); child.kill(); reject(new Error('Isolated Sketchfab desktop startup timed out.')); }, 45000);
+    child.once('error', error => { clearInterval(reportPoll); clearTimeout(timeout); reject(error); });
+    child.once('exit', code => { clearInterval(reportPoll); clearTimeout(timeout); resolve(completedReport ? completedReport.ok ? 0 : 1 : code); });
   });
   const result = JSON.parse(await fs.readFile(path.join(directory, 'result.json'), 'utf8'));
   console.log(JSON.stringify({ ...result, reportDirectory: directory }));

@@ -3024,59 +3024,6 @@ function toggleDetails(show = !state.details) {
 }
 let refreshingCollector = false;
 let collectorRefreshTimer;
-let sketchfabConnecting = false;
-let sketchfabConnectionRevision = 0;
-let sketchfabConnectionState;
-
-function renderSketchfabConnection(value, message) {
-  const connected = value?.connected === true;
-  sketchfabConnectionState = connected;
-  $('sketchfabTokenEntry').classList.toggle('hidden', connected);
-  $('sketchfabConnect').classList.toggle('hidden', connected);
-  $('sketchfabDisconnect').classList.toggle('hidden', !connected);
-  $('sketchfabConnect').disabled = sketchfabConnecting;
-  $('sketchfabDisconnect').disabled = sketchfabConnecting;
-  $('sketchfabToken').disabled = sketchfabConnecting;
-  $('sketchfabConnectionStatus').textContent = message || (connected ? '已连接 Sketchfab，可采集作者开放官方下载的模型。' : '尚未连接 Sketchfab。Token 只需在本机输入，不要发送到聊天中。');
-}
-async function refreshSketchfabConnection(quiet = false) {
-  if (sketchfabConnecting) return;
-  const revision = ++sketchfabConnectionRevision;
-  try {
-    const value = await api.getSketchfabAccountState();
-    if (revision === sketchfabConnectionRevision && (!quiet || value?.connected !== sketchfabConnectionState)) renderSketchfabConnection(value);
-  } catch (error) {
-    if (!quiet && revision === sketchfabConnectionRevision) renderSketchfabConnection(null, error.message || '无法读取 Sketchfab 连接状态。');
-  }
-}
-async function connectSketchfabAccount(event) {
-  event.preventDefault();
-  if (sketchfabConnecting) return;
-  let token = $('sketchfabToken').value;
-  $('sketchfabToken').value = '';
-  if (!token.trim()) { renderSketchfabConnection(null, '请先在本机输入自己的 Sketchfab API Token。'); $('sketchfabToken').focus(); return; }
-  sketchfabConnecting = true; sketchfabConnectionRevision++;
-  renderSketchfabConnection(null, '正在验证 Sketchfab 连接…');
-  let value, message;
-  try {
-    const pending = api.connectSketchfabAccount(token);
-    token = '';
-    value = await pending;
-  } catch (error) { message = error.message || 'Sketchfab 连接失败，请重试。'; }
-  finally { token = ''; sketchfabConnecting = false; }
-  renderSketchfabConnection(value, message);
-}
-async function disconnectSketchfabAccount() {
-  if (sketchfabConnecting) return;
-  sketchfabConnecting = true; sketchfabConnectionRevision++;
-  $('sketchfabToken').value = '';
-  renderSketchfabConnection({ connected: true }, '正在断开 Sketchfab 连接…');
-  let value = { connected: true }, message;
-  try { value = await api.disconnectSketchfabAccount(); }
-  catch (error) { message = error.message || '无法断开 Sketchfab 连接，请重试。'; }
-  finally { sketchfabConnecting = false; }
-  renderSketchfabConnection(value, message);
-}
 async function showCapturedAssets(result) {
   if (!await waitForMetadata()) return;
   const snapshot = await api.getLibrary();
@@ -3118,7 +3065,6 @@ function renderCaptureResult(result) {
 }
 async function refreshCollector(quiet = false) {
   if (refreshingCollector) return;
-  void refreshSketchfabConnection(quiet);
   if (!hasLibrary()) {
     $('collectorStatus').classList.add('unavailable');
     $('collectorStatus').textContent = '请先选择素材库位置，再连接浏览器采集。采集的图片和视频会存入你选择的素材库。';
@@ -3158,7 +3104,7 @@ function showCollector() {
     refreshCollector(true);
   }, 1500);
 }
-function closeCollector() { clearInterval(collectorRefreshTimer); $('sketchfabToken').value = ''; $('collectorOverlay').classList.add('hidden'); $('collectorButton').focus(); }
+function closeCollector() { clearInterval(collectorRefreshTimer); $('collectorOverlay').classList.add('hidden'); $('collectorButton').focus(); }
 
 $('newFolder').addEventListener('click', () => createFolder());
 $('createFolderHere').addEventListener('click', () => { if (canNavigateFolders()) createFolder(currentFolder()); });
@@ -3461,8 +3407,6 @@ $('collectorClose').addEventListener('click', closeCollector);
 $('collectorOverlay').addEventListener('click', (event) => { if (event.target === $('collectorOverlay')) closeCollector(); });
 $('refreshCollector').addEventListener('click', refreshCollector);
 $('openExtensionFolder').addEventListener('click', () => run(() => api.openExtensionFolder()));
-$('sketchfabAccountForm').addEventListener('submit', connectSketchfabAccount);
-$('sketchfabDisconnect').addEventListener('click', disconnectSketchfabAccount);
 $('libraryInfo').addEventListener('click', showLibraryManager);
 $('setupCreateLibrary').addEventListener('click', () => changeLibrary('create'));
 $('setupOpenLibrary').addEventListener('click', () => changeLibrary('open'));

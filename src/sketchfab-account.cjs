@@ -18,6 +18,8 @@ const MESSAGES = Object.freeze({
   SKETCHFAB_STORAGE_UNAVAILABLE: '系统加密不可用，无法安全保存 Sketchfab 连接。',
   SKETCHFAB_STORAGE_FAILED: '无法安全读取或保存 Sketchfab 连接，请检查应用数据目录。',
   SKETCHFAB_MODEL_INVALID: 'Sketchfab 模型编号无效。',
+  SKETCHFAB_BROWSER_SOURCE_INVALID: 'Sketchfab 官网下载地址与所选模型不符，请在当前 Chrome 页面重新采集。',
+  SKETCHFAB_PUBLIC_MODEL_UNAVAILABLE: '此 Sketchfab 模型无法公开下载或当前不可访问，请在官网确认后重试。',
   SKETCHFAB_NOT_DOWNLOADABLE: '模型作者未开放官方下载，无法采集此模型。',
   SKETCHFAB_MODEL_NOT_FOUND: 'Sketchfab 模型不存在或当前账号无权访问。',
   SKETCHFAB_MODEL_METADATA: 'Sketchfab 模型的作者或许可证信息不完整，无法采集。',
@@ -149,7 +151,7 @@ function createSketchfabAccount({ filePath, safeStorage, request = globalThis.fe
     return { connected: Boolean(await readToken()) };
   }
 
-  async function requestJson(endpoint, token, { signal, connecting = false } = {}) {
+  async function requestJson(endpoint, token, { signal, connecting = false, publicModel = false } = {}) {
     if (closed || signal?.aborted) throw cancelled();
     const controller = new AbortController();
     const abort = () => controller.abort();
@@ -162,13 +164,15 @@ function createSketchfabAccount({ filePath, safeStorage, request = globalThis.fe
       // Keep credentials on the exact official API origin; never follow redirects.
       // Official API token syntax: https://docs.sketchfab.com/data-api/v3/index.html
       const url = `${API}${endpoint}`;
-      const response = await request(url, { method: 'GET', headers: { Authorization: `Token ${token}`, Accept: 'application/json' },
+      const headers = { ...(!publicModel ? { Authorization: `Token ${token}` } : {}), Accept: 'application/json' };
+      const response = await request(url, { method: 'GET', headers,
         redirect: 'error', credentials: 'omit', cache: 'no-store', referrerPolicy: 'no-referrer', signal: controller.signal });
       if (controller.signal.aborted) throw cancelled();
       if (response.redirected || (response.url && response.url !== url)) throw issue('SKETCHFAB_REQUEST_FAILED');
       if (response.status < 200 || response.status >= 300) {
         try { await response.body?.cancel(); } catch {}
-        const code = response.status === 401 ? (connecting ? 'SKETCHFAB_TOKEN_INVALID' : 'SKETCHFAB_ACCOUNT_EXPIRED') :
+        const code = publicModel && [401, 403].includes(response.status) ? 'SKETCHFAB_PUBLIC_MODEL_UNAVAILABLE' :
+          response.status === 401 ? (connecting ? 'SKETCHFAB_TOKEN_INVALID' : 'SKETCHFAB_ACCOUNT_EXPIRED') :
           response.status === 403 ? 'SKETCHFAB_ACCOUNT_FORBIDDEN' : response.status === 404 ? 'SKETCHFAB_MODEL_NOT_FOUND' :
             response.status === 400 ? 'SKETCHFAB_NOT_DOWNLOADABLE' : response.status === 429 ? 'SKETCHFAB_RATE_LIMITED' : 'SKETCHFAB_REQUEST_FAILED';
         throw issue(code);
@@ -255,8 +259,22 @@ function createSketchfabAccount({ filePath, safeStorage, request = globalThis.fe
       throw error;
     } finally { token = ''; }
   }
+  async function resolveBrowserModel({ modelId, archiveUrl, signal } = {}) {
+    if (typeof modelId !== 'string' || !MODEL_ID.test(modelId)) throw issue('SKETCHFAB_MODEL_INVALID');
+    if (closed || signal?.aborted) throw cancelled();
+    let validatedUrl;
+    try { validatedUrl = validateSketchfabArchiveUrl(archiveUrl, modelId); }
+    catch { throw issue('SKETCHFAB_BROWSER_SOURCE_INVALID'); }
+    // The current Chrome page obtains the official temporary archive URL.
+    // Verify public metadata here without reading saved tokens or sending credentials.
+    const model = await requestJson(`/models/${modelId}`, undefined, { signal, publicModel: true });
+    if (closed || signal?.aborted) throw cancelled();
+    if (model.uid !== modelId) throw issue('SKETCHFAB_MODEL_INVALID');
+    if (model.isDownloadable !== true) throw issue('SKETCHFAB_NOT_DOWNLOADABLE');
+    return { archiveUrl: validatedUrl, attribution: attributionFor(model, modelId) };
+  }
   async function shutdown() { closed = true; revision++; stopRequests(); await fileQueue; }
-  return Object.freeze({ state, setToken, disconnect, resolveModel, shutdown });
+  return Object.freeze({ state, setToken, disconnect, resolveModel, resolveBrowserModel, shutdown });
 }
 
 module.exports = { createSketchfabAccount };

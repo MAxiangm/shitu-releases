@@ -940,7 +940,8 @@ else {
     youtubeBrowserSession:true,
     bilibiliBrowserSession:true,
     downloadSiteVideo:authenticatedVideo.downloadSiteVideo,
-    resolveSketchfabModel:options=>sketchfabAccount.resolveModel(options),
+    resolveSketchfabModel:options=>sketchfabAccount.resolveBrowserModel(options),
+    sketchfabBrowserDownload:true,
     probeVideo:(filename,options)=>videoEngine.probe(filename,options),
     listFolders:()=>requireLibrary().listFolders(),hasAsset:id=>requireLibrary().hasAsset(id),
     onLocate:result=>{

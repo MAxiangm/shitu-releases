@@ -10,7 +10,7 @@
   const DESKTOP_RECEIPT_TIMEOUT = 320000;
   const YOUTUBE_RECEIPT_TIMEOUT = 32 * 60000;
   const SITE_FALLBACK_RECEIPT_TIMEOUT = DESKTOP_RECEIPT_TIMEOUT + YOUTUBE_RECEIPT_TIMEOUT;
-  const MODEL_RECEIPT_TIMEOUT = 18 * 60000 + 40000;
+  const MODEL_RECEIPT_TIMEOUT = 21 * 60000 + 40000;
   let toastHost;
   let toastTimer;
   let toastReceipt;
@@ -18,6 +18,7 @@
   let videoMenu;
   let youtubeContext;
   const youtubeSelections = new Map();
+  const sketchfabCaptures = new Map();
   let youtubeSelectionSerial = 0;
   const videoMenuEvents = new WeakSet();
   let captureSerial = 0;
@@ -574,6 +575,9 @@
   }
   async function capture(media) {
     const captureId = `${Date.now()}-${++captureSerial}`;
+    if (media.kind === 'model' && media.sketchfabSelection) sketchfabCaptures.set(captureId, {
+      selection: media.sketchfabSelection, modelId: media.modelId, pageUrl: location.href, requestId: null, resolving: false
+    });
     activeCaptureId = captureId;
     let submitted = false;
     showCapture(captureId, media.kind === 'model' ? '正在识别模型来源…' : media.kind === 'video' ? '正在识别视频来源…' : '浏览器正在读取素材…');
@@ -602,7 +606,7 @@
       if (!submitted) {
         try { void chrome.runtime.sendMessage({ type: 'shitu:capture-failed', name: media?.name, error: message }).catch(() => {}); } catch {}
       }
-    } finally { if (activeCaptureId === captureId) activeCaptureId = null; }
+    } finally { sketchfabCaptures.delete(captureId); if (activeCaptureId === captureId) activeCaptureId = null; }
   }
   function takeGesture(event) {
     event.preventDefault();
@@ -722,6 +726,22 @@
       const options = { browserVideo: message.browserVideo === true };
       if (message.clientCaptureId) options.onRead = browserProgress(message.clientCaptureId);
       resolveMedia(message.media, options).then(media => sendResponse({ ok: true, media }), error => sendResponse({ ok: false, error: error.message }));
+      return true;
+    }
+    if (message?.type === 'shitu:resolve-sketchfab') {
+      const helper = globalThis.MosaicSketchfab, selected = sketchfabCaptures.get(message.clientCaptureId);
+      const current = () => selected && sketchfabCaptures.get(message.clientCaptureId) === selected &&
+        selected.modelId === message.modelId && selected.pageUrl === location.href &&
+        helper.selectionCurrent(selected.selection, location.href);
+      if (!helper || !current() || selected.resolving || typeof message.requestId !== 'string' ||
+          !/^\d{13}-\d{1,10}$/.test(message.requestId) || selected.requestId && selected.requestId !== message.requestId) {
+        sendResponse({ ok: false, code: 'SKETCHFAB_SOURCE_CHANGED' }); return;
+      }
+      selected.requestId = message.requestId; selected.resolving = true;
+      helper.resolveDownload({ modelId: message.modelId, pageUrl: selected.pageUrl, isCurrent: current }).then(
+        archiveUrl => sendResponse(current() ? { ok: true, archiveUrl } : { ok: false, code: 'SKETCHFAB_SOURCE_CHANGED' }),
+        error => sendResponse({ ok: false, code: helper.downloadError(error?.code).code })
+      ).finally(() => { selected.resolving = false; });
       return true;
     }
     if (message?.type === 'shitu:resolve-youtube') {

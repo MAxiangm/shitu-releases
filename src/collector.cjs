@@ -17,7 +17,7 @@ const { videoPageSource } = require('./video-page-source.cjs');
 const { videoExpectations, checkCapturedVideo } = require('./captured-video-check.cjs');
 const { youtubeMediaUrl, youtubeBrowserSource, stageYouTubeBrowser } = require('./youtube-browser-source.cjs');
 const { youtubeRecordingUrl, youtubeRecordingSource, stageYouTubeRecording } = require('./youtube-recording-source.cjs');
-const { stageSketchfabModel, checkedSketchfabPage } = require('./sketchfab-download.cjs');
+const { stageSketchfabModel, checkedSketchfabPage, checkedSketchfabArchiveUrl } = require('./sketchfab-download.cjs');
 
 const DEFAULT_ORIGIN = 'chrome-extension://mdleapcbplpefdgchdklofdnpjgokdhh';
 const INLINE_LIMIT = 20 * 1024 * 1024;
@@ -84,7 +84,7 @@ function createCollector({ library, configPath, onImported = () => {}, onLocate,
   isReady=()=>true, allowedOrigin = DEFAULT_ORIGIN, port = 38475, allowPrivate = false, maxDownloadBytes = 512 * 1024 * 1024, timeout = 90000,
   appVersion = require('../package.json').version, muxVimeoPlayback, playbackTimeout = 240000,
   downloadYouTube, downloadSiteVideo, youtubeBrowserSession = false, bilibiliBrowserSession = false, youtubeTimeout = 1800000, probeVideo, youtubeFfmpegPath,
-  resolveSketchfabModel, sketchfabTimeout = 18 * 60 * 1000 } = {}) {
+  resolveSketchfabModel, sketchfabBrowserDownload = false, sketchfabTimeout = 18 * 60 * 1000 } = {}) {
   let server, token, listeningPort, active = 0, disabledError, lastCapture;
   const sockets = new Set();
   const captures = new Map();
@@ -117,6 +117,7 @@ function createCollector({ library, configPath, onImported = () => {}, onLocate,
       ...(typeof downloadYouTube === 'function' && youtubeBrowserSession ? { youtubeBrowserSession: true } : {}),
       ...(typeof downloadSiteVideo === 'function' && bilibiliBrowserSession ? { bilibiliBrowserSession: true } : {}),
       ...(typeof resolveSketchfabModel === 'function' && typeof library.importModelPackage === 'function' ? { sketchfabDownload: true } : {}),
+      ...(sketchfabBrowserDownload === true && typeof resolveSketchfabModel === 'function' && typeof library.importModelPackage === 'function' ? { sketchfabBrowserDownload: true } : {}),
       ...(typeof downloadSiteVideo === 'function' ? { siteVideoDownload: true } : {}), ...(id ? { libraryId: id } : {}) };
   }
   function currentDestination(destination, id) {
@@ -227,6 +228,7 @@ function createCollector({ library, configPath, onImported = () => {}, onLocate,
   }
   async function captureSketchfab(body, job, cancellationSignal) {
     const permitted = new Set(['kind', 'sourceType', 'modelId', 'url', 'pageUrl', 'name', 'title', 'requestId', 'destination']);
+    if (sketchfabBrowserDownload === true) permitted.add('archiveUrl');
     if (body.kind !== 'model' || body.sourceType !== 'sketchfab' || Object.keys(body).some(key => !permitted.has(key))) {
       throw captureError('SKETCHFAB_SOURCE_INVALID', 'Sketchfab 模型采集请求无效。');
     }
@@ -237,18 +239,26 @@ function createCollector({ library, configPath, onImported = () => {}, onLocate,
     if (body.url !== pageUrl || body.pageUrl !== pageUrl) {
       throw captureError('SKETCHFAB_SOURCE_INVALID', 'Sketchfab 模型与所选页面不一致。');
     }
+    let browserArchiveUrl;
+    if (sketchfabBrowserDownload === true) {
+      if (!Object.hasOwn(body, 'archiveUrl')) {
+        throw captureError('SKETCHFAB_BROWSER_DOWNLOAD_REQUIRED', '请刷新 Sketchfab 模型页并重新 Alt＋右键，或先在原 Chrome 登录。');
+      }
+      browserArchiveUrl = checkedSketchfabArchiveUrl(body.modelId, body.archiveUrl).href;
+      delete body.archiveUrl;
+    }
     const currentId = libraryId(getLibraryRoot());
     const folderId = currentDestination(body.destination, currentId);
     const deadline = AbortSignal.timeout(sketchfabTimeout);
     const signal = cancellationSignal ? AbortSignal.any([deadline, cancellationSignal]) : deadline;
-    let temporary;
+    let temporary, resolved;
     try {
       progress(job, 'reading');
-      const resolved = await resolveSketchfabModel({ modelId: body.modelId, signal });
+      resolved = await resolveSketchfabModel({ modelId: body.modelId, ...(browserArchiveUrl ? { archiveUrl: browserArchiveUrl } : {}), signal });
       signal.throwIfAborted();
       temporary = await fs.mkdtemp(path.join(os.tmpdir(), 'mosaic-sketchfab-'));
       const staged = await stageSketchfabModel({
-        modelId: body.modelId, pageUrl, archiveUrl: resolved?.archiveUrl, attribution: resolved?.attribution,
+        modelId: body.modelId, pageUrl, archiveUrl: browserArchiveUrl || resolved?.archiveUrl, attribution: resolved?.attribution,
         directory: temporary, signal, limits: { compressedBytes: maxDownloadBytes },
         onProgress: event => {
           const phase = ['downloading', 'extracting', 'verifying'].includes(event?.phase) ? event.phase : 'downloading';
@@ -311,7 +321,15 @@ function createCollector({ library, configPath, onImported = () => {}, onLocate,
       progress(job, 'complete', result);
       try { await onImported(result); } catch {}
       return result;
+    } catch (error) {
+      if (error?.name === 'AbortError' || error?.name === 'TimeoutError' ||
+          ['CAPTURE_LIBRARY_CHANGED', 'CAPTURE_FOLDER_MISSING'].includes(error?.code)) throw error;
+      const known = typeof error?.code === 'string' && error.code.startsWith('SKETCHFAB_');
+      if (known && typeof error.message === 'string' && !/https?:\/\/|(?:signature|token|credential)\s*=/i.test(error.message)) throw error;
+      throw captureError(known ? error.code : 'SKETCHFAB_DOWNLOAD_FAILED', 'Sketchfab 模型下载或校验失败，请回到原模型页面重试。');
     } finally {
+      delete body.archiveUrl;
+      if (resolved && typeof resolved === 'object') delete resolved.archiveUrl;
       if (temporary) await fs.rm(temporary, { recursive: true, force: true }).catch(() => {});
     }
   }
@@ -528,6 +546,7 @@ function createCollector({ library, configPath, onImported = () => {}, onLocate,
     } finally {
       if (body && typeof body === 'object') delete body.youtubeSession;
       if (body && typeof body === 'object') delete body.bilibiliSession;
+      if (body && typeof body === 'object') delete body.archiveUrl;
       await browserSession?.close();
       if (temporary) await fs.rm(temporary,{recursive:true,force:true}).catch(() => {});
     }

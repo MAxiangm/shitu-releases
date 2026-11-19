@@ -92,7 +92,7 @@ test('model transport accepts only canonical identity fields, never credentials 
   assert.throws(() => sketchfab.checkedSource(model(), 'https://sketchfab.com.evil.test/'), { code: 'SKETCHFAB_SOURCE_INVALID' });
 });
 
-async function worker({ capable = true, reply, progress = [] } = {}) {
+async function worker({ capable = true, reply, progress = [], resolveReply } = {}) {
   const requests = [], messages = [], timeoutValues = [], storage = { shituConnection: { port: 38475, token: 'a'.repeat(64) } };
   let listener;
   const chrome = {
@@ -102,7 +102,11 @@ async function worker({ capable = true, reply, progress = [] } = {}) {
     permissions: { contains() { assert.fail('model capture must not inspect browser-session permissions'); } },
     cookies: { getAll() { assert.fail('model capture must not read browser cookies'); } },
     contextMenus: { removeAll: fn => fn(), create: (_entry, fn) => fn?.(), onClicked: { addListener() {} } },
-    tabs: { sendMessage: async (_id, message) => { messages.push(structuredClone(message)); } }
+    tabs: { sendMessage: async (_id, message, target) => {
+      messages.push({ ...structuredClone(message), target: structuredClone(target) });
+      if (message.type === 'shitu:resolve-sketchfab') return resolveReply || { ok: true,
+        archiveUrl: `https://sketchfab-prod-media.s3.amazonaws.com/archives/${id}/gltf/model.zip?Signature=fixture-only` };
+    } }
   };
   const context = vm.createContext({ chrome, URL, AbortController, AbortSignal, clearTimeout, clearInterval,
     setTimeout: (fn, delay) => { timeoutValues.push(delay); return setTimeout(fn, delay === 1000 ? 0 : delay); },
@@ -111,24 +115,46 @@ async function worker({ capable = true, reply, progress = [] } = {}) {
       const route = new URL(address).pathname, body = JSON.parse(options.body); requests.push({ route, body });
       if (route === '/v1/capture') return reply ? reply() : Response.json({ ok: true, imported: 1, duplicates: 0, assetIds: ['new-model'] });
       if (route === '/v1/capture-progress') return Response.json({ ok: true, progress: progress.shift() });
-      return Response.json({ ok: true, app: '拾图', version: '0.29.25', ready: true, sketchfabDownload: capable, captureProgress: progress.length > 0 });
+      return Response.json({ ok: true, app: '拾图', version: '0.29.25', ready: true, sketchfabDownload: true, sketchfabBrowserDownload: capable, captureProgress: progress.length > 0 });
     } });
   vm.runInContext(await fs.readFile(path.join(root, 'extension/sketchfab-source.js'), 'utf8'), context);
   vm.runInContext(await fs.readFile(path.join(root, 'extension/background.js'), 'utf8'), context);
-  return { requests, messages, timeoutValues, storage, send: input => new Promise(resolve => listener({ type: 'shitu:capture', media: input },
-    { id: 'fixture-extension', url, tab: { id: 7, url }, frameId: 0 }, resolve)) };
+  return { requests, messages, timeoutValues, storage, send: input => new Promise(resolve => listener({ type: 'shitu:capture', media: input, clientCaptureId: '1795100000000-1' },
+    { id: 'fixture-extension', url, tab: { id: 7, url }, frameId: 0, documentId: 'selected-document' }, resolve)) };
 }
 
-test('Sketchfab worker sends a bounded identity-only model request and waits for the saved receipt', async () => {
+test('Sketchfab worker adds only its validated browser archive to the bounded model request', async () => {
   const instance = await worker();
   const result = await instance.send(model());
   assert.equal(result.ok, true, result.error);
-  assert.deepEqual(instance.requests.find(value => value.route === '/v1/capture').body, { ...model(), requestId: instance.requests.find(value => value.route === '/v1/capture').body.requestId });
+  assert.deepEqual(instance.requests.find(value => value.route === '/v1/capture').body, { ...model(),
+    archiveUrl: `https://sketchfab-prod-media.s3.amazonaws.com/archives/${id}/gltf/model.zip?Signature=fixture-only`,
+    requestId: instance.requests.find(value => value.route === '/v1/capture').body.requestId });
+  const resolving = instance.messages.find(value => value.type === 'shitu:resolve-sketchfab');
+  assert.equal(resolving.clientCaptureId, '1795100000000-1');
+  assert.equal(resolving.modelId, id);
+  assert.deepEqual(resolving.target, { documentId: 'selected-document' });
+  assert.equal(JSON.stringify(instance.storage).includes('Signature'), false);
+  assert.equal(JSON.stringify(instance.messages).includes('Signature'), false);
   assert.ok(instance.timeoutValues.includes(18 * 60000));
   assert.equal(instance.messages.some(value => /音视频/.test(value.message)), false);
   const old = await worker({ capable: false });
   assert.equal((await old.send(model())).code, 'INCOMPATIBLE_APP');
   assert.equal(old.requests.some(value => value.route === '/v1/capture'), false);
+  assert.equal(old.messages.some(value => value.type === 'shitu:resolve-sketchfab'), false);
+});
+
+test('Sketchfab worker rejects forged browser archives and uses fixed resolution errors', async () => {
+  for (const archiveUrl of ['https://example.com/model.zip', `https://sketchfab-prod-media.s3.amazonaws.com/archives/${other}/gltf/model.zip`]) {
+    const instance = await worker({ resolveReply: { ok: true, archiveUrl } });
+    assert.equal((await instance.send(model())).code, 'SKETCHFAB_DOWNLOAD_FAILED');
+    assert.equal(instance.requests.some(value => value.route === '/v1/capture'), false);
+  }
+  const instance = await worker({ resolveReply: { ok: false, code: 'SKETCHFAB_LOGIN_REQUIRED', error: 'secret-signed-url' } });
+  const result = await instance.send(model());
+  assert.equal(result.code, 'SKETCHFAB_LOGIN_REQUIRED');
+  assert.equal(result.error.includes('secret'), false);
+  assert.equal(instance.requests.some(value => value.route === '/v1/capture'), false);
 });
 
 test('Sketchfab worker rejects injected archive and reports official connection errors without a fallback request', async () => {
@@ -148,11 +174,11 @@ test('model extraction and dependency verification progress never uses video-spe
   ] });
   const saving = instance.send(model());
   const deadline = Date.now() + 2000;
-  while (!instance.messages.some(value => value.message.includes('核对模型')) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 5));
+  while (!instance.messages.some(value => value.message?.includes('核对模型')) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 5));
   finish();
   assert.equal((await saving).ok, true);
-  assert.ok(instance.messages.some(value => value.message.includes('解析模型')));
-  assert.ok(instance.messages.some(value => value.message.includes('安全解压模型')));
-  assert.ok(instance.messages.some(value => value.message.includes('核对模型和贴图依赖')));
+  assert.ok(instance.messages.some(value => value.message?.includes('解析模型')));
+  assert.ok(instance.messages.some(value => value.message?.includes('安全解压模型')));
+  assert.ok(instance.messages.some(value => value.message?.includes('核对模型和贴图依赖')));
   assert.equal(instance.messages.some(value => /视频|声音/.test(value.message)), false);
 });

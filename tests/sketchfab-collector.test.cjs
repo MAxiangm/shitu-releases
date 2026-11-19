@@ -87,6 +87,93 @@ test('Sketchfab capability requires a configured model resolver', async t => {
   assert.equal(result.ok, false); assert.equal(result.code, 'SKETCHFAB_UNAVAILABLE');
 });
 
+test('browser-download capability requires explicit mode plus both resolver and package importer', async t => {
+  const legacy = await fixture(t, { resolveSketchfabModel: async () => ({}) });
+  assert.equal((await legacy.request('/v1/ping', {})).sketchfabBrowserDownload, undefined);
+  const absent = await fixture(t, { sketchfabBrowserDownload: true });
+  assert.equal((await absent.request('/v1/ping', {})).sketchfabBrowserDownload, undefined);
+  const enabled = await fixture(t, { sketchfabBrowserDownload: true, resolveSketchfabModel: async () => ({}) });
+  const status = await enabled.request('/v1/ping', {});
+  assert.equal(status.sketchfabDownload, true); assert.equal(status.sketchfabBrowserDownload, true);
+  const noImporter = await fixture(t, { sketchfabBrowserDownload: true, resolveSketchfabModel: async () => ({}),
+    library: { root: 'unavailable', listFolders: () => [], snapshot: () => ({}) } });
+  assert.equal((await noImporter.request('/v1/ping', {})).sketchfabBrowserDownload, undefined);
+});
+
+test('browser model download imports without a user Token and persists only verified public metadata', async t => {
+  const calls = [];
+  const setup = await fixture(t, { sketchfabBrowserDownload: true, resolveSketchfabModel: async options => {
+    calls.push(options);
+    assert.deepEqual(Object.keys(options).sort(), ['archiveUrl', 'modelId', 'signal']);
+    assert.equal(options.modelId, ID); assert.equal(options.archiveUrl, ARCHIVE);
+    assert.ok(options.signal instanceof AbortSignal);
+    return { attribution };
+  } });
+  const fixtures = path.join(setup.directory, 'fixtures'); await createModelFixtures(fixtures);
+  const entries = await Promise.all(['triangle.gltf', 'mesh.bin', 'textures/green.png'].map(async name => [name, await fs.readFile(path.join(fixtures, 'gltf', name))]));
+  entries.push(['license.txt', Buffer.from('Public model license')]);
+  const archive = zip(entries), requests = mockCdn(t, () => ({ body: archive }));
+  const result = await setup.capture({ archiveUrl: ARCHIVE, requestId: '12345-11' });
+  assert.equal(result.ok, true, result.error); assert.equal(result.imported, 1);
+  const asset = setup.library.snapshot().assets[0], bundle = setup.library.getModelBundleDirectory(asset.id);
+  assert.equal(asset.sourceUrl, PAGE); assert.equal(asset.name, attribution.title);
+  assert.equal(await fs.readFile(path.join(bundle, 'license.txt'), 'utf8'), 'Public model license');
+  const index = await fs.readFile(setup.library.indexPath, 'utf8');
+  const savedAttribution = await fs.readFile(path.join(bundle, 'sketchfab-attribution.json'), 'utf8');
+  for (const serialized of [index, savedAttribution, JSON.stringify(result), JSON.stringify(setup.collector.info())]) {
+    assert.equal(serialized.includes('not-for-metadata'), false);
+    assert.equal(serialized.includes('archiveUrl'), false);
+  }
+  const duplicate = await setup.capture({ archiveUrl: ARCHIVE, requestId: '12345-12' });
+  assert.equal(duplicate.duplicates, 1); assert.equal(duplicate.existingAssets[0].id, asset.id);
+  assert.equal(calls.length, 2); assert.equal(requests.length, 2);
+});
+
+test('browser mode requires a fresh archive URL and rejects mixed identity or page-supplied metadata before resolving', async t => {
+  let calls = 0;
+  const setup = await fixture(t, { sketchfabBrowserDownload: true, resolveSketchfabModel: async () => { calls++; return { attribution }; } });
+  const missing = await setup.capture({});
+  assert.equal(missing.code, 'SKETCHFAB_BROWSER_DOWNLOAD_REQUIRED');
+  assert.match(missing.error, /刷新.*Sketchfab.*Alt.*Chrome/); assert.equal(/Token|令牌/.test(missing.error), false);
+  for (const extra of [
+    { archiveUrl: ARCHIVE.replace(ID, 'a'.repeat(32)) },
+    { archiveUrl: ARCHIVE.replace('sketchfab-prod-media.s3.amazonaws.com', 'evil.example') },
+    { archiveUrl: ARCHIVE.replace('https:', 'http:') },
+    { archiveUrl: ARCHIVE, pageUrl: PAGE.replace(ID, 'a'.repeat(32)) },
+    { archiveUrl: ARCHIVE, modelId: 'a'.repeat(32) },
+    { archiveUrl: ARCHIVE, attribution }, { archiveUrl: ARCHIVE, token: 'forged' },
+    { archiveUrl: ARCHIVE, headers: { Cookie: 'forged' } }, { archiveUrl: ARCHIVE, youtubeSession: {} }
+  ]) {
+    const result = await setup.capture(extra);
+    assert.equal(result.code, 'SKETCHFAB_SOURCE_INVALID'); assert.equal(result.ok, false);
+    assert.equal(result.error.includes('not-for-metadata'), false);
+  }
+  assert.equal(calls, 0); assert.equal(setup.library.snapshot().assets.length, 0);
+});
+
+test('browser public-metadata permission failures never fall back to legacy account or download', async t => {
+  let calls = 0;
+  const setup = await fixture(t, { sketchfabBrowserDownload: true, resolveSketchfabModel: async options => {
+    calls++; assert.equal(options.archiveUrl, ARCHIVE);
+    throw Object.assign(new Error('Sketchfab 未授权下载当前模型。'), { code: 'SKETCHFAB_NOT_DOWNLOADABLE' });
+  } });
+  const requests = mockCdn(t, () => { throw new Error('must not download'); });
+  const result = await setup.capture({ archiveUrl: ARCHIVE });
+  assert.equal(result.code, 'SKETCHFAB_NOT_DOWNLOADABLE'); assert.match(result.error, /未授权/);
+  assert.equal(calls, 1); assert.equal(requests.length, 0); assert.equal(setup.library.snapshot().assets.length, 0);
+});
+
+test('resolver exceptions cannot place a signed archive URL in errors, receipts or progress records', async t => {
+  for (const code of [undefined, 'SKETCHFAB_METADATA_FAILED']) await t.test(String(code), async t => {
+    const setup = await fixture(t, { sketchfabBrowserDownload: true, resolveSketchfabModel: async () => {
+      throw Object.assign(new Error(`failed ${ARCHIVE}`), code ? { code } : {});
+    } });
+    const result = await setup.capture({ archiveUrl: ARCHIVE });
+    assert.equal(result.ok, false); assert.equal(result.code, code || 'SKETCHFAB_DOWNLOAD_FAILED');
+    assert.equal(JSON.stringify([result, setup.collector.info()]).includes('not-for-metadata'), false);
+  });
+});
+
 test('Sketchfab imports one self-contained model with textures, license and attribution; repeated capture locates it', async t => {
   const setup = await fixture(t, { resolveSketchfabModel: async ({ modelId }) => {
     assert.equal(modelId, ID); return { archiveUrl: ARCHIVE, attribution };

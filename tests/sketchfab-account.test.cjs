@@ -207,3 +207,72 @@ test('existing symlink credential files are refused', async t => {
   await rejectsCode(f.account.setToken(TOKEN), 'SKETCHFAB_STORAGE_FAILED');
   assert.equal(await fs.readFile(target, 'utf8'), 'must remain untouched');
 });
+
+test('browser downloads verify public metadata without reading saved credentials or using Authorization', async t => {
+  const unavailableStorage = new Proxy({}, { get() { throw new Error('must not access OS credentials'); } });
+  const f = await fixture(t, { safeStorage: unavailableStorage });
+  const legacyBytes = Buffer.from('legacy ciphertext retained without access');
+  await fs.writeFile(f.filePath, legacyBytes);
+  f.answers.push(response(MODEL));
+  const result = await f.account.resolveBrowserModel({ modelId: ID, archiveUrl: ARCHIVE });
+  assert.equal(result.archiveUrl, ARCHIVE);
+  assert.deepEqual(result.attribution, { title: 'Sample model', author: { name: 'Artist', url: 'https://sketchfab.com/artist' },
+    license: { name: 'CC Attribution', slug: 'by', url: 'https://creativecommons.org/licenses/by/4.0/' } });
+  assert.equal(f.calls.length, 1);
+  assert.equal(f.calls[0].url, `https://api.sketchfab.com/v3/models/${ID}`);
+  assert.deepEqual(f.calls[0].init.headers, { Accept: 'application/json' });
+  assert.equal(f.calls[0].init.credentials, 'omit');
+  assert.equal(f.calls[0].init.redirect, 'error');
+  assert.deepEqual(await fs.readFile(f.filePath), legacyBytes);
+  assert.ok(!JSON.stringify(result.attribution).includes(TOKEN));
+});
+
+test('browser downloads reject mismatched archive hosts and IDs before public requests', async t => {
+  const f = await fixture(t);
+  for (const archiveUrl of [ARCHIVE.replace(ID, OTHER), ARCHIVE.replace('sketchfab-prod-media.s3.amazonaws.com', 'attacker.invalid'),
+    'https://sketchfab.com/models/' + ID, ARCHIVE.replace('/gltf/', '/source/'), ARCHIVE + '#fragment']) {
+    await rejectsCode(f.account.resolveBrowserModel({ modelId: ID, archiveUrl }), 'SKETCHFAB_BROWSER_SOURCE_INVALID');
+  }
+  await rejectsCode(f.account.resolveBrowserModel({ modelId: '../me', archiveUrl: ARCHIVE }), 'SKETCHFAB_MODEL_INVALID');
+  assert.equal(f.calls.length, 0);
+});
+
+test('browser downloads require public matching downloadable model metadata', async t => {
+  const f = await fixture(t);
+  for (const [model, code] of [
+    [{ ...MODEL, uid: OTHER }, 'SKETCHFAB_MODEL_INVALID'],
+    [{ ...MODEL, isDownloadable: false }, 'SKETCHFAB_NOT_DOWNLOADABLE'],
+    [{ ...MODEL, isDownloadable: 'true' }, 'SKETCHFAB_NOT_DOWNLOADABLE'],
+    [{ ...MODEL, isDownloadable: undefined }, 'SKETCHFAB_NOT_DOWNLOADABLE'],
+    [{ ...MODEL, license: null }, 'SKETCHFAB_MODEL_METADATA']
+  ]) {
+    f.answers.push(response(model));
+    await rejectsCode(f.account.resolveBrowserModel({ modelId: ID, archiveUrl: ARCHIVE }), code);
+  }
+  assert.equal(f.calls.length, 5);
+});
+
+test('browser 401 and 403 report unavailable public models and retain legacy credentials', async t => {
+  const f = await fixture(t), legacyBytes = Buffer.from('leave old encrypted account untouched');
+  await fs.writeFile(f.filePath, legacyBytes);
+  for (const status of [401, 403]) {
+    f.answers.push(response({ details: `${TOKEN} ${ARCHIVE}` }, status));
+    await rejectsCode(f.account.resolveBrowserModel({ modelId: ID, archiveUrl: ARCHIVE }), 'SKETCHFAB_PUBLIC_MODEL_UNAVAILABLE');
+    assert.deepEqual(await fs.readFile(f.filePath), legacyBytes);
+  }
+});
+
+test('browser verification cancellation aborts metadata requests without touching credentials', async t => {
+  let entered;
+  const started = new Promise(resolve => { entered = resolve; });
+  const f = await fixture(t, { request: async (_url, init) => {
+    entered();
+    return new Promise((_resolve, reject) => init.signal.addEventListener('abort', () => reject(new Error(ARCHIVE)), { once: true }));
+  } });
+  const abort = new AbortController();
+  const pending = f.account.resolveBrowserModel({ modelId: ID, archiveUrl: ARCHIVE, signal: abort.signal });
+  await started;
+  const rejected = rejectsCode(pending, 'SKETCHFAB_CANCELLED');
+  abort.abort(); await rejected;
+  assert.deepEqual(await fs.readdir(f.directory), []);
+});
