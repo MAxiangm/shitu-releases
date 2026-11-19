@@ -18,6 +18,7 @@ const { videoExpectations, checkCapturedVideo } = require('./captured-video-chec
 const { youtubeMediaUrl, youtubeBrowserSource, stageYouTubeBrowser } = require('./youtube-browser-source.cjs');
 const { youtubeRecordingUrl, youtubeRecordingSource, stageYouTubeRecording } = require('./youtube-recording-source.cjs');
 const { stageSketchfabModel, checkedSketchfabPage, checkedSketchfabArchiveUrl } = require('./sketchfab-download.cjs');
+const { stageSketchfabViewerModel } = require('./sketchfab-viewer-download.cjs');
 
 const DEFAULT_ORIGIN = 'chrome-extension://mdleapcbplpefdgchdklofdnpjgokdhh';
 const INLINE_LIMIT = 20 * 1024 * 1024;
@@ -84,7 +85,7 @@ function createCollector({ library, configPath, onImported = () => {}, onLocate,
   isReady=()=>true, allowedOrigin = DEFAULT_ORIGIN, port = 38475, allowPrivate = false, maxDownloadBytes = 512 * 1024 * 1024, timeout = 90000,
   appVersion = require('../package.json').version, muxVimeoPlayback, playbackTimeout = 240000,
   downloadYouTube, downloadSiteVideo, youtubeBrowserSession = false, bilibiliBrowserSession = false, youtubeTimeout = 1800000, probeVideo, youtubeFfmpegPath,
-  resolveSketchfabModel, sketchfabBrowserDownload = false, sketchfabTimeout = 18 * 60 * 1000 } = {}) {
+  resolveSketchfabModel, sketchfabBrowserDownload = false, sketchfabViewerCapture = false, sketchfabTimeout = 18 * 60 * 1000 } = {}) {
   let server, token, listeningPort, active = 0, disabledError, lastCapture;
   const sockets = new Set();
   const captures = new Map();
@@ -118,6 +119,7 @@ function createCollector({ library, configPath, onImported = () => {}, onLocate,
       ...(typeof downloadSiteVideo === 'function' && bilibiliBrowserSession ? { bilibiliBrowserSession: true } : {}),
       ...(typeof resolveSketchfabModel === 'function' && typeof library.importModelPackage === 'function' ? { sketchfabDownload: true } : {}),
       ...(sketchfabBrowserDownload === true && typeof resolveSketchfabModel === 'function' && typeof library.importModelPackage === 'function' ? { sketchfabBrowserDownload: true } : {}),
+      ...(sketchfabViewerCapture === true && typeof library.importModelPackage === 'function' ? { sketchfabViewerCapture: true } : {}),
       ...(typeof downloadSiteVideo === 'function' ? { siteVideoDownload: true } : {}), ...(id ? { libraryId: id } : {}) };
   }
   function currentDestination(destination, id) {
@@ -229,18 +231,23 @@ function createCollector({ library, configPath, onImported = () => {}, onLocate,
   async function captureSketchfab(body, job, cancellationSignal) {
     const permitted = new Set(['kind', 'sourceType', 'modelId', 'url', 'pageUrl', 'name', 'title', 'requestId', 'destination']);
     if (sketchfabBrowserDownload === true) permitted.add('archiveUrl');
+    if (sketchfabViewerCapture === true) permitted.add('viewerSnapshot');
+    const viewerCapture = Object.hasOwn(body, 'viewerSnapshot');
     if (body.kind !== 'model' || body.sourceType !== 'sketchfab' || Object.keys(body).some(key => !permitted.has(key))) {
       throw captureError('SKETCHFAB_SOURCE_INVALID', 'Sketchfab 模型采集请求无效。');
     }
-    if (typeof resolveSketchfabModel !== 'function' || typeof library.importModelPackage !== 'function') {
+    if ((!viewerCapture && typeof resolveSketchfabModel !== 'function') || typeof library.importModelPackage !== 'function') {
       throw captureError('SKETCHFAB_UNAVAILABLE', '请更新桌面 Mosaic 后采集 Sketchfab 模型。');
+    }
+    if (viewerCapture && (sketchfabViewerCapture !== true || Object.hasOwn(body, 'archiveUrl'))) {
+      throw captureError('SKETCHFAB_VIEWER_INVALID', '网页模型数据无效，请重新采集。');
     }
     const pageUrl = checkedSketchfabPage(body.modelId, body.url);
     if (body.url !== pageUrl || body.pageUrl !== pageUrl) {
       throw captureError('SKETCHFAB_SOURCE_INVALID', 'Sketchfab 模型与所选页面不一致。');
     }
     let browserArchiveUrl;
-    if (sketchfabBrowserDownload === true) {
+    if (sketchfabBrowserDownload === true && !viewerCapture) {
       if (!Object.hasOwn(body, 'archiveUrl')) {
         throw captureError('SKETCHFAB_BROWSER_DOWNLOAD_REQUIRED', '请刷新 Sketchfab 模型页并重新 Alt＋右键，或先在原 Chrome 登录。');
       }
@@ -254,10 +261,12 @@ function createCollector({ library, configPath, onImported = () => {}, onLocate,
     let temporary, resolved;
     try {
       progress(job, 'reading');
-      resolved = await resolveSketchfabModel({ modelId: body.modelId, ...(browserArchiveUrl ? { archiveUrl: browserArchiveUrl } : {}), signal });
+      if (!viewerCapture) resolved = await resolveSketchfabModel({ modelId: body.modelId, ...(browserArchiveUrl ? { archiveUrl: browserArchiveUrl } : {}), signal });
       signal.throwIfAborted();
       temporary = await fs.mkdtemp(path.join(os.tmpdir(), 'mosaic-sketchfab-'));
-      const staged = await stageSketchfabModel({
+      const staged = viewerCapture ? await stageSketchfabViewerModel({ modelId: body.modelId, pageUrl,
+        snapshot: body.viewerSnapshot, title: body.name || body.title, directory: temporary, signal,
+        onProgress: event => progress(job, event.phase) }) : await stageSketchfabModel({
         modelId: body.modelId, pageUrl, archiveUrl: browserArchiveUrl || resolved?.archiveUrl, attribution: resolved?.attribution,
         directory: temporary, signal, limits: { compressedBytes: maxDownloadBytes },
         onProgress: event => {
@@ -316,6 +325,7 @@ function createCollector({ library, configPath, onImported = () => {}, onLocate,
       })) : [];
       const folderName = folderId ? snapshot?.folders?.find(folder => folder.id === folderId)?.name : undefined;
       const result = { ok: true, imported: report.imported, duplicates: report.duplicates, assetIds: report.assetIds || [], existingAssets,
+        ...(viewerCapture ? { captureMethod: 'viewer', warnings: staged.warnings || [], modelStats: staged.stats } : {}),
         libraryRoot: typeof snapshot?.root === 'string' ? snapshot.root : getLibraryRoot() || null,
         ...(currentId ? { libraryId: currentId, ...(report.imported ? { folderId, ...(folderName ? { folderName } : {}) } : {}) } : {}) };
       progress(job, 'complete', result);
@@ -323,12 +333,13 @@ function createCollector({ library, configPath, onImported = () => {}, onLocate,
       return result;
     } catch (error) {
       if (error?.name === 'AbortError' || error?.name === 'TimeoutError' ||
-          ['CAPTURE_LIBRARY_CHANGED', 'CAPTURE_FOLDER_MISSING'].includes(error?.code)) throw error;
+          ['CAPTURE_CANCELLED', 'CAPTURE_LIBRARY_CHANGED', 'CAPTURE_FOLDER_MISSING'].includes(error?.code)) throw error;
       const known = typeof error?.code === 'string' && error.code.startsWith('SKETCHFAB_');
       if (known && typeof error.message === 'string' && !/https?:\/\/|(?:signature|token|credential)\s*=/i.test(error.message)) throw error;
       throw captureError(known ? error.code : 'SKETCHFAB_DOWNLOAD_FAILED', 'Sketchfab 模型下载或校验失败，请回到原模型页面重试。');
     } finally {
       delete body.archiveUrl;
+      delete body.viewerSnapshot;
       if (resolved && typeof resolved === 'object') delete resolved.archiveUrl;
       if (temporary) await fs.rm(temporary, { recursive: true, force: true }).catch(() => {});
     }
@@ -553,6 +564,7 @@ function createCollector({ library, configPath, onImported = () => {}, onLocate,
   }
   async function handler(request,response) {
     const origin = request.headers.origin;
+    const isCaptureRequest = ['/v1/capture', '/v1/capture-sketchfab-viewer'].includes(request.url);
     const cors = origin === allowedOrigin ? {'Access-Control-Allow-Origin':allowedOrigin,'Vary':'Origin'} : {};
     const json = (status,body) => { response.writeHead(status,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store',...cors}); response.end(JSON.stringify(body)); };
     if (request.headers.host !== `127.0.0.1:${listeningPort}` || (origin && origin !== allowedOrigin)) return json(403,{ok:false,error:'不允许的请求来源'});
@@ -574,13 +586,15 @@ function createCollector({ library, configPath, onImported = () => {}, onLocate,
     }
     const supplied = request.headers['x-shitu-token'];
     if (typeof supplied !== 'string' || !/^[a-f0-9]{64}$/.test(supplied) || !crypto.timingSafeEqual(Buffer.from(supplied),Buffer.from(token))) return json(401,{ok:false,error:'连接已失效，采集助手需要自动重新连接'});
-    if (request.method !== 'POST' || !['/v1/ping','/v1/capture','/v1/capture-progress','/v1/capture-browser-read','/v1/capture-browser-data','/v1/capture-browser-cancel','/v1/folders','/v1/locate'].includes(request.url)) return json(404,{ok:false,error:'接口不存在'});
+    if (request.method !== 'POST' || !['/v1/ping','/v1/capture','/v1/capture-sketchfab-viewer','/v1/capture-progress','/v1/capture-browser-read','/v1/capture-browser-data','/v1/capture-browser-cancel','/v1/folders','/v1/locate'].includes(request.url)) return json(404,{ok:false,error:'接口不存在'});
     if (!String(request.headers['content-type']).startsWith('application/json')) {
-      if (request.url === '/v1/capture') rejectedCapture(new Error('只支持 JSON 请求'));
+      if (isCaptureRequest) rejectedCapture(new Error('只支持 JSON 请求'));
       return json(415,{ok:false,error:'只支持 JSON 请求'});
     }
     try {
-      const body = await readJSON(request, request.url === '/v1/capture' ? 28*1024*1024+32768 : request.url === '/v1/capture-browser-data' ? BROWSER_MESSAGE_LIMIT : 4096);
+      const body = await readJSON(request, request.url === '/v1/capture-sketchfab-viewer' ? 48*1024*1024+32768 : request.url === '/v1/capture' ? 28*1024*1024+32768 : request.url === '/v1/capture-browser-data' ? BROWSER_MESSAGE_LIMIT : 4096);
+      if ((request.url === '/v1/capture-sketchfab-viewer' && (sketchfabViewerCapture !== true || body?.sourceType !== 'sketchfab' || !Object.hasOwn(body || {}, 'viewerSnapshot'))) ||
+          (request.url === '/v1/capture' && Object.hasOwn(body || {}, 'viewerSnapshot'))) throw captureError('SKETCHFAB_VIEWER_INVALID', '网页模型采集接口无效，请更新后重试。');
       if (request.url === '/v1/ping') return json(200,{ok:true,app:'拾图',version:appVersion,...readyStatus()});
       if (['/v1/capture-browser-read', '/v1/capture-browser-data', '/v1/capture-browser-cancel'].includes(request.url)) {
         if (!validCaptureRequestId(body?.requestId)) return json(400,{ok:false,error:'采集任务编号无效'});
@@ -588,9 +602,9 @@ function createCollector({ library, configPath, onImported = () => {}, onLocate,
         if (request.url === '/v1/capture-browser-cancel') {
           // Once importing starts, cancellation cannot revoke the library's
           // commit. Report uncertainty instead of promising an absent file.
-          const cancellable = Boolean(record?.browserRead && !record.finishedAt && record.cancelController &&
+          const cancellable = Boolean((record?.browserRead || record?.viewerCapture) && !record.finishedAt && record.cancelController &&
             !['importing', 'complete'].includes(record.job.status));
-          if (cancellable) record.cancelController.abort(captureError('CAPTURE_CANCELLED', '浏览器视频读取已取消，未保存视频'));
+          if (cancellable) record.cancelController.abort(captureError('CAPTURE_CANCELLED', record.viewerCapture ? '网页模型采集已取消，未保存模型' : '浏览器视频读取已取消，未保存视频'));
           return json(200,{ok:true,cancelled:cancellable});
         }
         if (request.url === '/v1/capture-browser-read') return json(200,{ok:true,read:browserRelay.poll(body.requestId),done:Boolean(record?.browserRead && record.finishedAt)});
@@ -633,6 +647,7 @@ function createCollector({ library, configPath, onImported = () => {}, onLocate,
       const job = { status:'receiving', at:Date.now(), receivedBytes:0, name:typeof body?.name === 'string' ? body.name.slice(0,240) : '',
         kind:['image','video','model'].includes(body?.kind) ? body.kind : undefined };
       const record = { job, browserRead: body?.browserRead === true || ['youtube-browser', 'youtube-recording'].includes(body?.sourceType),
+        viewerCapture: body?.sourceType === 'sketchfab' && Object.hasOwn(body || {}, 'viewerSnapshot'),
         ...(body?.browserRead === true || ['youtube', 'site-video', 'youtube-browser', 'youtube-recording', 'sketchfab'].includes(body?.sourceType) ? { cancelController: new AbortController() } : {}) };
       if (id !== undefined) {
         captures.delete(id);
@@ -646,7 +661,7 @@ function createCollector({ library, configPath, onImported = () => {}, onLocate,
       catch(error) { if (!response.destroyed) response.end(JSON.stringify({ok:false,error:error.message,...(error.code ? {code:error.code} : {})})); }
       finally { clearInterval(heartbeat); record.finishedAt = Date.now(); active--; }
     } catch(error) {
-      if (request.url === '/v1/capture') rejectedCapture(error);
+      if (isCaptureRequest) rejectedCapture(error);
       if (!response.headersSent) json(400,{ok:false,error:error.message});
     }
   }

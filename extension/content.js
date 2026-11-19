@@ -738,8 +738,24 @@
         sendResponse({ ok: false, code: 'SKETCHFAB_SOURCE_CHANGED' }); return;
       }
       selected.requestId = message.requestId; selected.resolving = true;
-      helper.resolveDownload({ modelId: message.modelId, pageUrl: selected.pageUrl, isCurrent: current }).then(
-        archiveUrl => sendResponse(current() ? { ok: true, archiveUrl } : { ok: false, code: 'SKETCHFAB_SOURCE_CHANGED' }),
+      const resolveChosen = async () => {
+        try { return { archiveUrl: await helper.resolveDownload({ modelId: message.modelId, pageUrl: selected.pageUrl, isCurrent: current }) }; }
+        catch (error) {
+          if (message.allowViewer !== true || error?.code === 'SKETCHFAB_SOURCE_CHANGED' || !current()) throw error;
+          const bridge = globalThis.MosaicSketchfabViewerBridge;
+          if (!bridge) throw helper.downloadError('SKETCHFAB_VIEWER_UNAVAILABLE');
+          const element = selected.selection.element;
+          let target = window, origin = location.origin;
+          if (element?.tagName === 'IFRAME') {
+            target = element.contentWindow;
+            try { origin = new URL(element.getAttribute?.('src') || element.src, location.href).origin; } catch { throw helper.downloadError('SKETCHFAB_SOURCE_CHANGED'); }
+          }
+          const viewerSnapshot = await bridge.capture({ modelId: message.modelId, target, origin, isCurrent: current });
+          return { viewerSnapshot };
+        }
+      };
+      resolveChosen().then(
+        result => sendResponse(current() ? { ok: true, ...result } : { ok: false, code: 'SKETCHFAB_SOURCE_CHANGED' }),
         error => sendResponse({ ok: false, code: helper.downloadError(error?.code).code })
       ).finally(() => { selected.resolving = false; });
       return true;

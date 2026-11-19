@@ -6,7 +6,7 @@ const CONFIG_KEY = 'shituConnection';
 const LAST_KEY = 'shituLastCapture';
 const DESTINATIONS_KEY = 'shituCaptureDestinations';
 // A running worker can read an updated manifest without having loaded new code.
-const WORKER_VERSION = '0.11.29';
+const WORKER_VERSION = '0.11.30';
 const BROWSER_SESSION_SITES = {
   youtube: { label: 'YouTube', domain: 'youtube.com', capability: 'youtubeBrowserSession', field: 'youtubeSession' },
   bilibili: { label: 'Bilibili', domain: 'bilibili.com', capability: 'bilibiliBrowserSession', field: 'bilibiliSession' }
@@ -141,6 +141,7 @@ function appStatus(result) {
     ...(result.bilibiliBrowserSession === true ? { bilibiliBrowserSession: true } : {}),
     ...(result.sketchfabDownload === true ? { sketchfabDownload: true } : {}),
     ...(result.sketchfabBrowserDownload === true ? { sketchfabBrowserDownload: true } : {}),
+    ...(result.sketchfabViewerCapture === true ? { sketchfabViewerCapture: true } : {}),
     ...(result.youtubeBrowserRead === true ? { youtubeBrowserRead: true } : {}),
     ...(result.siteVideoDownload === true ? { siteVideoDownload: true } : {}),
     ...(result.vimeoBrowserRead === true ? { vimeoBrowserRead: true } : {}) };
@@ -294,9 +295,14 @@ function captureResult(result) {
     folderId: typeof asset?.folderId === 'string' ? safeText(asset.folderId, 128) : null
   })) : [];
   const inTrash = !imported && existingAssets.length > 0 && existingAssets.every(asset => asset.trashedAt);
-  const message = imported ? '已保存到素材库，可在“全部素材”或“最近导入”查看。'
+  let message = imported ? '已保存到素材库，可在“全部素材”或“最近导入”查看。'
     : inTrash ? '这份素材已在回收站，请到 Mosaic 恢复后查看。' : '素材库中已有这份文件，可清除搜索和格式筛选后查看。';
-  return { ok: true, imported, duplicates, existingAssets, message, status: inTrash ? 'warning' : 'success',
+  const viewer = result.captureMethod === 'viewer';
+  const warnings = viewer && Array.isArray(result.warnings) ? result.warnings.filter(value => typeof value === 'string' &&
+    value.length <= 240 && !/https?:\/\/|[\x00-\x1f]/i.test(value)).slice(0, 5) : [];
+  if (viewer && imported) message = `已保存网页静态模型，可在 Mosaic 中预览。${warnings.length ? '\n' + warnings.join('；') : ''}`;
+  return { ok: true, imported, duplicates, existingAssets, message, status: inTrash || warnings.length ? 'warning' : 'success',
+    ...(viewer ? { captureMethod: 'viewer', warnings } : {}),
     assetIds: Array.isArray(result.assetIds) ? result.assetIds.filter(exactId).slice(0, 20) : [],
     ...(typeof result.libraryRoot === 'string' ? { libraryRoot: safeText(result.libraryRoot, 4096) } : {}) };
 }
@@ -449,18 +455,24 @@ function readFromPage(sender, message, timeout = PAGE_READ_TIMEOUT) {
   return Promise.race([reply, deadline]).finally(() => clearTimeout(timer));
 }
 
-async function readSketchfabFromPage(media, sender, clientCaptureId, requestId) {
+async function readSketchfabFromPage(media, sender, clientCaptureId, requestId, allowViewer = false) {
   const helper = globalThis.MosaicSketchfab;
   if (!Number.isInteger(sender?.tab?.id) || !clientCaptureId) throw helper.downloadError('SKETCHFAB_SOURCE_CHANGED');
   let reply;
   try {
-    reply = await readFromPage(sender, { type: 'shitu:resolve-sketchfab', modelId: media.modelId, clientCaptureId, requestId },
-      helper.DOWNLOAD_TIMEOUT + 5000);
+    reply = await readFromPage(sender, { type: 'shitu:resolve-sketchfab', modelId: media.modelId, clientCaptureId, requestId,
+      ...(allowViewer ? { allowViewer: true } : {}) }, helper.DOWNLOAD_TIMEOUT + 25000);
   } catch (error) {
     throw helper.downloadError(error?.code === 'PAGE_READ_TIMEOUT' ? 'SKETCHFAB_DOWNLOAD_TIMEOUT' : 'SKETCHFAB_SOURCE_CHANGED');
   }
   if (!reply?.ok) throw helper.downloadError(reply?.code);
-  return helper.checkedArchiveUrl(reply.archiveUrl, media.modelId);
+  if (Object.hasOwn(reply, 'viewerSnapshot')) {
+    if (!allowViewer || Object.hasOwn(reply, 'archiveUrl') || reply.viewerSnapshot?.version !== 1 || reply.viewerSnapshot?.modelId !== media.modelId ||
+        !Array.isArray(reply.viewerSnapshot.meshes) || !reply.viewerSnapshot.meshes.length || reply.viewerSnapshot.meshes.length > 512 ||
+        new TextEncoder().encode(JSON.stringify(reply.viewerSnapshot)).byteLength > 48 * 1024 * 1024) throw helper.downloadError('SKETCHFAB_VIEWER_INVALID');
+    return { viewerSnapshot: reply.viewerSnapshot };
+  }
+  return { archiveUrl: helper.checkedArchiveUrl(reply.archiveUrl, media.modelId) };
 }
 
 async function readVideoFromPage(body, sender, clientCaptureId) {
@@ -702,23 +714,23 @@ async function capture(input, sender, clientCaptureId) {
         const payload = { ...transfer, requestId, ...(destination ? { destination } : {}) };
         if (media.sourceType === 'sketchfab') {
           await publish('reading', '正在通过当前 Chrome 准备模型下载…');
-          payload.archiveUrl = await readSketchfabFromPage(media, sender, job.clientCaptureId, requestId);
+          Object.assign(payload, await readSketchfabFromPage(media, sender, job.clientCaptureId, requestId, connection.status.sketchfabViewerCapture === true));
         }
         if (sessionSite && await mayReadBrowserSession(sessionSite)) {
           payload[sessionSite.field] = await readBrowserSession(sender, sessionSite);
         }
-        await publish(media.dataBase64 ? 'receiving' : 'downloading',
-          media.dataBase64 ? '正在把素材交给桌面…' : '正在下载素材…');
+        await publish(media.dataBase64 || payload.viewerSnapshot ? 'receiving' : 'downloading',
+          payload.viewerSnapshot ? '正在把模型和贴图交给 Mosaic…' : media.dataBase64 ? '正在把素材交给桌面…' : '正在下载素材…');
         const stop = connection.status.captureProgress ? watchProgress(requestId, connection.config, publish, media.kind) : null;
         const browserRead = media.browserRead || media.sourceType === 'youtube-browser'
           ? startVimeoBrowserRead(requestId, connection.config, sender, media.sourceType, media.streams) : null;
         try {
-          const response = localRequest('/v1/capture', payload, connection.config,
+          const response = localRequest(payload.viewerSnapshot ? '/v1/capture-sketchfab-viewer' : '/v1/capture', payload, connection.config,
             media.sourceType === 'sketchfab' ? MODEL_CAPTURE_TIMEOUT :
               ['youtube', 'site-video'].includes(media.sourceType) ? PAGE_VIDEO_CAPTURE_TIMEOUT :
               media.sourceType === 'youtube-browser' ? YOUTUBE_CAPTURE_TIMEOUT : CAPTURE_TIMEOUT);
           return await (browserRead ? Promise.race([response, browserRead.failure]) : response);
-        } finally { delete payload.youtubeSession; delete payload.bilibiliSession; delete payload.archiveUrl; browserRead?.stop(); stop?.(); }
+        } finally { delete payload.youtubeSession; delete payload.bilibiliSession; delete payload.archiveUrl; delete payload.viewerSnapshot; browserRead?.stop(); stop?.(); }
       }
       try { return await attempt(); }
       catch (error) {
@@ -769,7 +781,7 @@ async function capture(input, sender, clientCaptureId) {
     const location = savedLocation(result, confirmed);
     if (location) rememberLocateReceipt(requestId, location, sender);
     const folderName = safeText(result.folderName, 240).trim();
-    const popupMessage = confirmed.imported && folderName ? `已保存到「${folderName}」。` : confirmed.message;
+    const popupMessage = confirmed.imported && folderName && confirmed.captureMethod !== 'viewer' ? `已保存到「${folderName}」。` : confirmed.message;
     await recordCapture({ ...confirmed, requestId, at: Date.now(), pending: false, status: confirmed.imported ? 'saved' : 'duplicate', name,
       message: popupMessage, ...(location ? { location } : {}) });
     const reply = location ? { ...confirmed, locateReceipt: requestId } : confirmed;

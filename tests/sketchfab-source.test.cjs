@@ -92,7 +92,7 @@ test('model transport accepts only canonical identity fields, never credentials 
   assert.throws(() => sketchfab.checkedSource(model(), 'https://sketchfab.com.evil.test/'), { code: 'SKETCHFAB_SOURCE_INVALID' });
 });
 
-async function worker({ capable = true, reply, progress = [], resolveReply } = {}) {
+async function worker({ capable = true, viewerCapable = false, reply, progress = [], resolveReply } = {}) {
   const requests = [], messages = [], timeoutValues = [], storage = { shituConnection: { port: 38475, token: 'a'.repeat(64) } };
   let listener;
   const chrome = {
@@ -108,14 +108,14 @@ async function worker({ capable = true, reply, progress = [], resolveReply } = {
         archiveUrl: `https://sketchfab-prod-media.s3.amazonaws.com/archives/${id}/gltf/model.zip?Signature=fixture-only` };
     } }
   };
-  const context = vm.createContext({ chrome, URL, AbortController, AbortSignal, clearTimeout, clearInterval,
+  const context = vm.createContext({ chrome, URL, TextEncoder, AbortController, AbortSignal, clearTimeout, clearInterval,
     setTimeout: (fn, delay) => { timeoutValues.push(delay); return setTimeout(fn, delay === 1000 ? 0 : delay); },
     setInterval: (...args) => { const timer = setInterval(...args); timer.unref(); return timer; },
     fetch: async (address, options) => {
       const route = new URL(address).pathname, body = JSON.parse(options.body); requests.push({ route, body });
-      if (route === '/v1/capture') return reply ? reply() : Response.json({ ok: true, imported: 1, duplicates: 0, assetIds: ['new-model'] });
+      if (route === '/v1/capture' || route === '/v1/capture-sketchfab-viewer') return reply ? reply() : Response.json({ ok: true, imported: 1, duplicates: 0, assetIds: ['new-model'] });
       if (route === '/v1/capture-progress') return Response.json({ ok: true, progress: progress.shift() });
-      return Response.json({ ok: true, app: '拾图', version: '0.29.25', ready: true, sketchfabDownload: true, sketchfabBrowserDownload: capable, captureProgress: progress.length > 0 });
+      return Response.json({ ok: true, app: '拾图', version: '0.29.25', ready: true, sketchfabDownload: true, sketchfabBrowserDownload: capable, sketchfabViewerCapture: viewerCapable, captureProgress: progress.length > 0 });
     } });
   vm.runInContext(await fs.readFile(path.join(root, 'extension/sketchfab-source.js'), 'utf8'), context);
   vm.runInContext(await fs.readFile(path.join(root, 'extension/background.js'), 'utf8'), context);
@@ -142,6 +142,32 @@ test('Sketchfab worker adds only its validated browser archive to the bounded mo
   assert.equal((await old.send(model())).code, 'INCOMPATIBLE_APP');
   assert.equal(old.requests.some(value => value.route === '/v1/capture'), false);
   assert.equal(old.messages.some(value => value.type === 'shitu:resolve-sketchfab'), false);
+});
+
+test('Sketchfab worker relays viewer data only with desktop capability and never stores the geometry', async () => {
+  const snapshot = { version: 1, modelId: id, meshes: [{ positions: [0,0,0,1,0,0,0,1,0] }], images: [] };
+  const instance = await worker({ viewerCapable: true, resolveReply: { ok: true, viewerSnapshot: snapshot },
+    reply: () => Response.json({ ok: true, imported: 1, duplicates: 0, assetIds: ['new-model'], captureMethod: 'viewer', warnings: ['已保存静态模型。'] }) });
+  const result = await instance.send(model());
+  assert.equal(result.ok, true, result.error); assert.equal(result.status, 'warning');
+  const request = instance.requests.find(value => value.route === '/v1/capture-sketchfab-viewer');
+  assert.deepEqual(request.body.viewerSnapshot, snapshot); assert.equal(Object.hasOwn(request.body, 'archiveUrl'), false);
+  assert.equal(instance.messages.find(value => value.type === 'shitu:resolve-sketchfab').allowViewer, true);
+  assert.equal(JSON.stringify(instance.storage).includes('positions'), false);
+  const unavailable = await worker({ resolveReply: { ok: true, viewerSnapshot: snapshot } });
+  assert.equal((await unavailable.send(model())).ok, false);
+  assert.equal(unavailable.requests.some(value => value.route === '/v1/capture-sketchfab-viewer'), false);
+});
+
+test('Sketchfab worker refuses mixed or wrong-model viewer responses before a desktop request', async () => {
+  for (const response of [
+    { ok: true, viewerSnapshot: { version: 1, modelId: 'f'.repeat(32), meshes: [{}], images: [] } },
+    { ok: true, viewerSnapshot: { version: 1, modelId: id, meshes: [{}], images: [] }, archiveUrl: 'https://example.com/file.zip' }
+  ]) {
+    const instance = await worker({ viewerCapable: true, resolveReply: response });
+    assert.equal((await instance.send(model())).ok, false);
+    assert.equal(instance.requests.some(value => value.route === '/v1/capture-sketchfab-viewer'), false);
+  }
 });
 
 test('Sketchfab worker rejects forged browser archives and uses fixed resolution errors', async () => {

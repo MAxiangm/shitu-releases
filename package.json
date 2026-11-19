@@ -1,7 +1,7 @@
 {
   "name": "shitu",
   "productName": "Mosaic",
-  "version": "0.29.26",
+  "version": "0.29.27",
   "description": "A local-first creative asset library for Windows",
   "main": "src/main.cjs",
   "private": true,
@@ -32,6 +32,8 @@
     "test:undo": "node scripts/smoke-undo.cjs",
     "test:video:hover": "node scripts/smoke-hover-video.cjs",
     "test:models": "node scripts/smoke-model.cjs",
+    "test:sketchfab": "node scripts/smoke-sketchfab-viewer.cjs",
+    "test:sketchfab:live": "node scripts/smoke-sketchfab-viewer.cjs --live",
     "test:collector": "node scripts/smoke-collector.cjs",
     "test:ae": "node scripts/smoke-ae.cjs",
     "test:bundles": "node scripts/smoke-bundle.cjs",

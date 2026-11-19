@@ -95,7 +95,7 @@ test('202 preparation is bounded and a changed selection stops before the next r
   assert.equal(changed.calls.length, 1);
 });
 
-function contentHarness({ beforeResolve, beforeFetch, synthetic = false } = {}) {
+function contentHarness({ beforeResolve, beforeFetch, synthetic = false, viewerReply, viewerCapable = false, officialDenied = false } = {}) {
   const events = new Map(), calls = [], notices = [], timers = new Set();
   let listener, finished;
   const completion = new Promise(resolve => { finished = resolve; });
@@ -116,17 +116,21 @@ function contentHarness({ beforeResolve, beforeFetch, synthetic = false } = {}) 
     const pending = listener(message, { id: 'fixture-extension' }, resolve); if (pending !== true) resolve(undefined);
   });
   const context = vm.createContext({ URL, Element, AbortController, TextDecoder, document, location, setTimeout: timer, clearTimeout,
+    ...(viewerReply ? { MosaicSketchfabViewerBridge: { capture: async options => {
+      assert.equal(options.modelId, id); assert.equal(options.isCurrent(), true); return structuredClone(viewerReply);
+    } } } : {}),
     performance: { now: () => Date.now() }, window: { addEventListener: (type, fn) => events.set(type, [...(events.get(type) || []), fn]) },
     chrome: { runtime: { id: 'fixture-extension', onMessage: { addListener: fn => { listener = fn; } }, sendMessage: async message => {
       if (message.type !== 'shitu:capture') return { ok: true };
       notices.push(structuredClone(message));
-      const resolveMessage = { type: 'shitu:resolve-sketchfab', modelId: id, clientCaptureId: message.clientCaptureId, requestId: '1795100000000-1' };
+      const resolveMessage = { type: 'shitu:resolve-sketchfab', modelId: id, clientCaptureId: message.clientCaptureId, requestId: '1795100000000-1', ...(viewerCapable ? { allowViewer: true } : {}) };
       beforeResolve?.({ location, canvas, resolveMessage, dispatch });
       const result = await dispatch(resolveMessage); finished(result);
       return result?.ok ? { ok: true, imported: 1, duplicates: 0 } : { ok: false, error: 'fixture failure' };
     } } },
     fetch: async (url, options) => {
       calls.push({ url, options }); beforeFetch?.({ location, canvas, calls });
+      if (officialDenied) return new Response('{}', { status: 403 });
       return url.endsWith(`/models/${id}`) ? Response.json(metadata()) : url.endsWith('/download') ? Response.json(authorized()) : Response.json({ url: archive });
     }
   });
@@ -148,6 +152,19 @@ test('real content gesture binds resolution to its temporary selection without c
     assert.equal((await fixture.dispatch({ type: 'shitu:resolve-sketchfab', modelId: id,
       clientCaptureId: fixture.notices[0].clientCaptureId, requestId: '1795100000000-1' })).code, 'SKETCHFAB_SOURCE_CHANGED');
   } finally { fixture.stop(); }
+});
+
+test('selected content can export the current viewer after archive resolution fails, only when enabled', async () => {
+  const viewerReply = { version: 1, modelId: id, meshes: [{ positions: [0,0,0,1,0,0,0,1,0] }], images: [] };
+  const enabled = contentHarness({ viewerCapable: true, viewerReply, officialDenied: true });
+  try {
+    enabled.gesture(); const result = await enabled.completion;
+    assert.equal(result.ok, true); assert.deepEqual(result.viewerSnapshot, viewerReply);
+    assert.equal(Object.hasOwn(result, 'archiveUrl'), false);
+  } finally { enabled.stop(); }
+  const disabled = contentHarness({ viewerReply, officialDenied: true });
+  try { disabled.gesture(); assert.equal((await disabled.completion).code, 'SKETCHFAB_NOT_DOWNLOADABLE'); }
+  finally { disabled.stop(); }
 });
 
 test('real content rejects navigation, detached selection, altered request identity and concurrent resolver replay', async () => {

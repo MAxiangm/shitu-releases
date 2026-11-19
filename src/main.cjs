@@ -942,6 +942,7 @@ else {
     downloadSiteVideo:authenticatedVideo.downloadSiteVideo,
     resolveSketchfabModel:options=>sketchfabAccount.resolveBrowserModel(options),
     sketchfabBrowserDownload:true,
+    sketchfabViewerCapture:true,
     probeVideo:(filename,options)=>videoEngine.probe(filename,options),
     listFolders:()=>requireLibrary().listFolders(),hasAsset:id=>requireLibrary().hasAsset(id),
     onLocate:result=>{
