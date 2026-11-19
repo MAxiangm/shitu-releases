@@ -8,4 +8,4 @@ Mosaic bundles unmodified Windows x64 releases of yt-dlp and Deno for YouTube vi
 
 yt-dlp itself uses the Unlicense; its standalone executable also contains third-party components and the bundled yt-dlp-ejs YouTube JavaScript solver. See `yt-dlp-LICENSE.txt` and `yt-dlp-THIRD_PARTY_LICENSES.txt` for their full license texts. Deno is distributed under the MIT license; see `deno-LICENSE.md` and the source release for third-party acknowledgements.
 
-The application does not enable yt-dlp plugins, load user configuration, read browser cookies or automatically update these executables. Dependency updates are verified and shipped as part of an application update.
+The application does not enable yt-dlp plugins, load user configuration, read browser cookie databases or automatically update these executables. With the user's optional, site-specific authorization, the capture extension supplies that site's cookies to Mosaic only for the current local download; the temporary cookie file is removed after the download. Dependency updates are verified and shipped as part of an application update.

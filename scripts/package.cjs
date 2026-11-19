@@ -3,7 +3,7 @@
 // Rebuild a portable application using the preserved Electron runtime.
 const fs = require('node:fs/promises');
 const path = require('node:path');
-const { root, recoveredRuntime, installedExecutable, inside, exists, readProject, resetDistDirectory, copyTree, packagePath } = require('./release-utils.cjs');
+const { root, recoveredRuntime, installedExecutable, inside, exists, readProject, resetDistDirectory, copyTree, assertNoLinks, packagePath } = require('./release-utils.cjs');
 const { verifyVideoRuntime } = require('./prepare-video-runtime.cjs');
 const { verifyYouTubeRuntime } = require('./prepare-youtube-runtime.cjs');
 const { brandWindowsExecutable } = require('./brand-windows-executable.cjs');
@@ -55,6 +55,21 @@ async function normalizeBundledAiMarkers(appDirectory) {
   }
 }
 
+async function copyApplicationSource(source, destination) {
+  await assertNoLinks(source);
+  await fs.mkdir(path.dirname(destination), { recursive: true });
+  const nativeSource = path.join(source, 'video-auth-native');
+  await fs.cp(source, destination, { recursive: true, errorOnExist: false, force: true,
+    filter(file) {
+      const relative = path.relative(nativeSource, file);
+      if (!relative || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) return true;
+      // The helper is rebuilt from these top-level sources at runtime. Never
+      // ship a stale local binary, symbols, or build output beside the sources.
+      return path.basename(relative) === relative && /^[A-Za-z0-9_.-]+\.cs$/i.test(relative);
+    }
+  });
+}
+
 async function createPackage() {
   const project = await readProject();
   await verifyVideoRuntime();
@@ -85,7 +100,8 @@ async function createPackage() {
   if (await exists(path.join(recoveredRuntime, 'resources', 'default_app.asar'))) {
     await copyTree(path.join(recoveredRuntime, 'resources', 'default_app.asar'), path.join(target, 'resources', 'default_app.asar'));
   }
-  for (const directory of ['src', 'assets', 'ai-runtime', 'video-runtime']) await copyTree(path.join(root, directory), path.join(appDirectory, directory));
+  await copyApplicationSource(path.join(root, 'src'), path.join(appDirectory, 'src'));
+  for (const directory of ['assets', 'ai-runtime', 'video-runtime']) await copyTree(path.join(root, directory), path.join(appDirectory, directory));
   await normalizeBundledAiMarkers(appDirectory);
   const updateConfig = JSON.parse(await fs.readFile(path.join(root, 'update-config.json'), 'utf8'));
   if (updateConfig.repository !== '' && !/^[A-Za-z0-9][A-Za-z0-9-]*\/[A-Za-z0-9_.-]+$/.test(updateConfig.repository || '')) {
@@ -108,4 +124,4 @@ async function createPackage() {
 }
 
 if (require.main === module) createPackage().catch(error => { console.error(`Packaging failed: ${error.message}`); process.exitCode = 1; });
-module.exports = { createPackage, normalizeBundledAiMarkers };
+module.exports = { createPackage, normalizeBundledAiMarkers, copyApplicationSource };
