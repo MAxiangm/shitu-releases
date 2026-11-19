@@ -3026,9 +3026,11 @@ let refreshingCollector = false;
 let collectorRefreshTimer;
 let sketchfabConnecting = false;
 let sketchfabConnectionRevision = 0;
+let sketchfabConnectionState;
 
 function renderSketchfabConnection(value, message) {
   const connected = value?.connected === true;
+  sketchfabConnectionState = connected;
   $('sketchfabTokenEntry').classList.toggle('hidden', connected);
   $('sketchfabConnect').classList.toggle('hidden', connected);
   $('sketchfabDisconnect').classList.toggle('hidden', !connected);
@@ -3037,14 +3039,14 @@ function renderSketchfabConnection(value, message) {
   $('sketchfabToken').disabled = sketchfabConnecting;
   $('sketchfabConnectionStatus').textContent = message || (connected ? '已连接 Sketchfab，可采集作者开放官方下载的模型。' : '尚未连接 Sketchfab。Token 只需在本机输入，不要发送到聊天中。');
 }
-async function refreshSketchfabConnection() {
+async function refreshSketchfabConnection(quiet = false) {
   if (sketchfabConnecting) return;
   const revision = ++sketchfabConnectionRevision;
   try {
     const value = await api.getSketchfabAccountState();
-    if (revision === sketchfabConnectionRevision) renderSketchfabConnection(value);
+    if (revision === sketchfabConnectionRevision && (!quiet || value?.connected !== sketchfabConnectionState)) renderSketchfabConnection(value);
   } catch (error) {
-    if (revision === sketchfabConnectionRevision) renderSketchfabConnection(null, error.message || '无法读取 Sketchfab 连接状态。');
+    if (!quiet && revision === sketchfabConnectionRevision) renderSketchfabConnection(null, error.message || '无法读取 Sketchfab 连接状态。');
   }
 }
 async function connectSketchfabAccount(event) {
@@ -3116,7 +3118,7 @@ function renderCaptureResult(result) {
 }
 async function refreshCollector(quiet = false) {
   if (refreshingCollector) return;
-  if (!quiet) void refreshSketchfabConnection();
+  void refreshSketchfabConnection(quiet);
   if (!hasLibrary()) {
     $('collectorStatus').classList.add('unavailable');
     $('collectorStatus').textContent = '请先选择素材库位置，再连接浏览器采集。采集的图片和视频会存入你选择的素材库。';
