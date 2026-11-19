@@ -931,6 +931,10 @@ else {
       if (installingUpdate) throw new Error('正在安装更新，暂时无法采集');
       if (historyBusy || closing) throw new Error('正在保存撤销或重做，暂时无法采集');
       return requireLibrary().importPaths(...args);
+    },importModelPackage:(...args)=>{
+      if (installingUpdate) throw new Error('正在安装更新，暂时无法采集');
+      if (historyBusy || closing) throw new Error('正在保存撤销或重做，暂时无法采集');
+      return requireLibrary().importModelPackage(...args);
     }},getLibraryRoot:()=>library?.root,muxVimeoPlayback:videoEngine.muxVimeoPlayback,
     downloadYouTube:authenticatedVideo.downloadYouTube,
     youtubeBrowserSession:true,
@@ -1013,6 +1017,6 @@ else {
     audioPreviewService?.invalidate();
     videoTranscodeService?.shutdown().catch(()=>{}); videoTranscoder?.shutdown().catch(()=>{});
     Promise.resolve(transcodeDevices?.shutdown?.()).catch(()=>{});
-    imagePlugins?.shutdown().catch(()=>{}); collector?.close().catch(()=>{}); videoSiteAuth?.shutdown().catch(()=>{}); videoEngine?.shutdown().catch(()=>{}); Promise.resolve(audioEngine?.shutdown()).catch(()=>{}); modelService?.shutdown().catch(()=>{}); fontExporter?.shutdown().catch(()=>{}); fontService?.shutdown().catch(()=>{}); aeProjects?.shutdown().catch(()=>{}); aePreviewService?.shutdown().catch(()=>{});
+    imagePlugins?.shutdown().catch(()=>{}); collector?.close().catch(()=>{}); videoSiteAuth?.shutdown().catch(()=>{}); sketchfabAccount?.shutdown().catch(()=>{}); videoEngine?.shutdown().catch(()=>{}); Promise.resolve(audioEngine?.shutdown()).catch(()=>{}); modelService?.shutdown().catch(()=>{}); fontExporter?.shutdown().catch(()=>{}); fontService?.shutdown().catch(()=>{}); aeProjects?.shutdown().catch(()=>{}); aePreviewService?.shutdown().catch(()=>{});
   });
 }
