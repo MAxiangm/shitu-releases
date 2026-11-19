@@ -23,6 +23,7 @@ function harness() {
     el: (...args) => { const node = element(...args); nodes.push(node); return node; },
     $: () => ({ append(node) { nodes.push(node); } }), document: { querySelectorAll: () => [] },
     renderHeader() {}, filteredAssets: () => [], renderLibraryState() {}, renderSelection() {}, renderHistory() {},
+    applyLibrary: snapshot => { state.library = snapshot; },
     toast: (...args) => notices.push(args), messageError: error => errors.push(error.message)
   };
   vm.createContext(context); vm.runInContext(controller, context);
@@ -43,6 +44,14 @@ test('individual asset exports do not mislabel package directories as classifica
   await h.context.exportLibraryItems('assets', ['one'], 'library-a');
   assert.match(h.notices[0][0], /1 个素材/);
   assert.doesNotMatch(h.notices[0][0], /分类文件夹/);
+});
+
+test('export refreshes the current library with persisted dependency diagnostics', async () => {
+  const h = harness();
+  const snapshot = { root: 'library-a', folders: h.state.library.folders, assets: [{ id: 'model', modelBundle: { missing: ['normal.png'] } }] };
+  h.context.api.exportAssets = async () => ({ count: 1, path: 'export', snapshot });
+  await h.context.exportLibraryItems('assets', ['model'], 'library-a');
+  assert.equal(h.state.library, snapshot);
 });
 
 test('a library switch while metadata is draining prevents an export into the new library', async () => {

@@ -9,6 +9,7 @@ const { Library } = require('../src/library.cjs');
 const { LibraryManager } = require('../src/library-manager.cjs');
 const { resolveAssetFiles } = require('../src/asset-actions.cjs');
 const { MODEL, MODEL_NATIVE, SUPPORTED } = require('../src/media-formats.cjs');
+const { createBundleRepair } = require('../src/bundle-repair.cjs');
 
 const fixturesRoot = path.resolve(__dirname, '..', '.recovery', 'tests');
 async function fixture(t) {
@@ -220,4 +221,60 @@ test('a missing model dependency is visible in import warnings without discardin
   assert.ok(imported.warnings.some(item => item.message.includes('未收集')));
   assert.ok(instance.snapshot().assets[0].modelBundle.missing.length);
   assert.equal(await fs.readFile(instance.getAssetPath(imported.assetIds[0]), 'utf8'), await fs.readFile(source.filename, 'utf8'));
+});
+
+test('rechecking a legacy FBX persists missing dependencies and inventory then unlocks repair without changing source bytes', async t => {
+  const base = await fixture(t), source = path.join(base, 'model.fbx');
+  const bytes = Buffer.from(`Objects: {
+    Video: 1, "Video::Paint", "Clip" { RelativeFilename: "model.fbm/paint.png" Content: , "YWJj" }
+    Texture: 2, "Texture::Paint", "" { RelativeFilename: "model.fbm/paint.png" }
+    Video: 3, "Video::External", "Clip" { RelativeFilename: "other/normal.png" }
+  }
+  Connections: { C: "OO", 1, 2 }`);
+  await fs.writeFile(source, bytes);
+  const instance = await library(base), imported = await instance.importPaths([source]), id = imported.assetIds[0];
+  const legacy = instance.data.assets.find(asset => asset.id === id);
+  const originalHash = legacy.hash;
+  legacy.modelBundle.missing = [];
+  legacy.modelBundle.warnings = ['FBX 含内嵌资源，同时保留找到的外置贴图；混合引用请在预览中核对。'];
+  delete legacy.modelBundle.resources; delete legacy.modelBundle.diagnostics;
+  await instance._persist(instance.data);
+  const result = await instance.recheckBundles([id], { expectedRoot: instance.root });
+  assert.equal(result.checked, 1); assert.deepEqual(result.errors, []);
+  const current = result.snapshot.assets[0];
+  assert.equal(current.hash, originalHash); assert.deepEqual(current.modelBundle.missing, ['other/normal.png']);
+  assert.deepEqual(current.modelBundle.warnings, []);
+  assert.equal(current.modelBundle.resources.models, 1); assert.equal(current.modelBundle.resources.embeddedTextures, 1);
+  assert.equal(current.modelBundle.resources.missingTextures, 1); assert.equal(current.modelBundle.diagnostics.sourceHash, originalHash);
+  assert.deepEqual(await fs.readFile(source), bytes); assert.deepEqual(await fs.readFile(instance.getAssetPath(id)), bytes);
+  const reopened = await library(base);
+  assert.deepEqual(reopened.snapshot().assets[0].modelBundle, current.modelBundle);
+  const replacements = path.join(base, 'replacement'); await fs.mkdir(replacements); await fs.writeFile(path.join(replacements, 'normal.png'), 'texture bytes');
+  const repair = createBundleRepair({ cacheDir: path.join(base, 'cache'), currentLibrary: () => instance });
+  const planned = await repair.plan(instance, id, replacements);
+  assert.equal(planned.matches, 1);
+  const repaired = await repair.apply(instance, id, planned.token);
+  assert.equal(repaired.repaired, 1); assert.deepEqual(repaired.snapshot.assets[0].modelBundle.missing, []);
+  assert.equal(repaired.snapshot.assets[0].modelBundle.resources.externalTextures, 1);
+  assert.equal(repaired.snapshot.assets[0].modelBundle.diagnostics.sourceHash, repaired.snapshot.assets[0].hash);
+  assert.deepEqual(await fs.readFile(instance.getAssetPath(id)), bytes);
+});
+
+test('recheck rejects unsafe or changed packages and failed publication leaves diagnostics unchanged', async t => {
+  const base = await fixture(t), source = await project(base), instance = await library(base);
+  const id = (await instance.importPaths([source.directory])).assetIds[0];
+  const before = instance.snapshot(), disk = await fs.readFile(instance.indexPath);
+  await assert.rejects(instance.recheckBundles([id], { expectedRoot: path.join(base, 'wrong') }), /素材库已切换/);
+  await assert.rejects(instance.recheckBundles(['../outside']), /资源包/);
+  const publish = instance._persist; instance._persist = async () => { throw new Error('publish failed'); };
+  await assert.rejects(instance.recheckBundles([id]), /publish failed/); instance._persist = publish;
+  assert.deepEqual(instance.snapshot(), before); assert.deepEqual(await fs.readFile(instance.indexPath), disk);
+  const controller = new AbortController(); controller.abort(new Error('cancelled'));
+  await assert.rejects(instance.recheckBundles([id], { signal: controller.signal }), /cancelled/);
+  assert.deepEqual(instance.snapshot(), before);
+  const filename = instance.getAssetPath(id), content = await fs.readFile(filename);
+  const changed = Buffer.from(content); changed[changed.length - 1] ^= 1; await fs.writeFile(filename, changed);
+  const result = await instance.recheckBundles([id]);
+  assert.equal(result.checked, 0); assert.match(result.errors[0].message, /内容已变化/);
+  assert.deepEqual(instance.snapshot(), before); assert.deepEqual(await fs.readFile(instance.indexPath), disk);
 });

@@ -19,6 +19,7 @@
   <link rel="stylesheet" href="./skin-picker.css">
   <link rel="stylesheet" href="./window-header.css">
   <link rel="stylesheet" href="./asset-health.css">
+  <link rel="stylesheet" href="./bundle-details.css">
   <link rel="stylesheet" href="./similar-images.css">
   <link rel="stylesheet" href="./task-center.css">
 </head>
@@ -158,12 +159,28 @@
         <label for="fontPreviewText">预览文字<textarea id="fontPreviewText" maxlength="2000" spellcheck="false" placeholder="输入文字，查看字体效果"></textarea></label>
         <div class="font-preview-options">
           <label id="fontPreviewFaceField" class="hidden" for="fontPreviewFace">合集中的字体<select id="fontPreviewFace"></select></label>
-          <label for="fontPreviewSize"><span class="font-preview-size-heading">字号<output id="fontPreviewSizeValue" for="fontPreviewSize">72 px</output></span><input id="fontPreviewSize" type="range" min="16" max="160" value="72" step="1"></label>
-          <button id="fontPreviewReset" class="text-button" type="button">恢复示例文字</button>
+          <label for="fontPreviewSize"><span class="font-preview-size-heading">字号<output id="fontPreviewSizeValue" for="fontPreviewSize">72 px</output></span><input id="fontPreviewSize" type="range" min="8" max="600" value="72" step="1"></label>
+          <div class="font-preview-actions"><button id="fontPreviewReset" class="text-button" type="button">恢复示例文字</button><button id="fontPreviewExport" class="primary-button" type="button" disabled>导出 PNG</button></div>
         </div>
       </div>
-      <div class="font-preview-stage"><p id="fontPreviewStatus" class="font-preview-status" role="status">正在载入字体…</p><div id="fontPreviewSample" class="font-preview-sample hidden" aria-label="字体效果"></div></div>
-      <p class="font-preview-note">无需安装即可预览。字体未包含的字符可能显示系统替代字形；导出保留原字体文件。</p>
+      <div class="font-preview-workspace">
+        <div class="font-preview-stage" id="fontPreviewStage">
+          <p id="fontPreviewStatus" class="font-preview-status" role="status">正在载入字体…</p>
+          <div id="fontPreviewPaper" class="font-preview-paper hidden"><canvas id="fontPreviewCanvas" aria-hidden="true"></canvas><div id="fontPreviewSample" class="font-preview-sample hidden" aria-label="字体效果"></div></div>
+        </div>
+        <div class="font-preview-layout" aria-label="文字排版设置">
+          <label for="fontPreviewPreset">排版预设<select id="fontPreviewPreset"><option value="custom">自定义</option></select></label>
+          <label for="fontPreviewWritingMode">排版方向<select id="fontPreviewWritingMode"><option value="horizontal-tb">横排</option><option value="vertical-rl">竖排 · 从右向左</option><option value="vertical-lr">竖排 · 从左向右</option></select></label>
+          <div class="font-preview-field-row"><label for="fontPreviewAlign">水平对齐<select id="fontPreviewAlign"><option value="left">左对齐</option><option value="center">居中</option><option value="right">右对齐</option></select></label><label for="fontPreviewVerticalAlign">垂直对齐<select id="fontPreviewVerticalAlign"><option value="top">顶部</option><option value="center">居中</option><option value="bottom">底部</option></select></label></div>
+          <div class="font-preview-field-row"><label for="fontPreviewLetterSpacing">字距（px）<input id="fontPreviewLetterSpacing" type="number" min="-20" max="100" step="1" value="0"></label><label for="fontPreviewLineHeight">行距（倍）<input id="fontPreviewLineHeight" type="number" min="0.6" max="4" step="0.05" value="1.55"></label></div>
+          <div class="font-preview-field-row"><label for="fontPreviewWidth">画布宽（px）<input id="fontPreviewWidth" type="number" min="64" max="4096" value="1920"></label><label for="fontPreviewHeight">画布高（px）<input id="fontPreviewHeight" type="number" min="64" max="4096" value="1080"></label></div>
+          <fieldset class="font-preview-margins"><legend>四边留白（px）</legend><div class="font-preview-field-row"><label for="fontPreviewPaddingTop">上<input id="fontPreviewPaddingTop" type="number" min="0" max="2047" value="64"></label><label for="fontPreviewPaddingBottom">下<input id="fontPreviewPaddingBottom" type="number" min="0" max="2047" value="64"></label><label for="fontPreviewPaddingLeft">左<input id="fontPreviewPaddingLeft" type="number" min="0" max="2047" value="64"></label><label for="fontPreviewPaddingRight">右<input id="fontPreviewPaddingRight" type="number" min="0" max="2047" value="64"></label></div></fieldset>
+          <div class="font-preview-field-row"><label for="fontPreviewTextColor">文字颜色<input id="fontPreviewTextColor" type="color" value="#191919"></label><label for="fontPreviewBackgroundColor">背景颜色<input id="fontPreviewBackgroundColor" type="color" value="#eae8e2"></label></div>
+          <label class="font-preview-check" for="fontPreviewTransparent"><input id="fontPreviewTransparent" type="checkbox" checked>透明背景（Alpha 通道）</label>
+          <p id="fontPreviewLayoutStatus" class="font-preview-layout-status" role="status" aria-live="polite"></p>
+        </div>
+      </div>
+      <p class="font-preview-note">输入文字即可试排，PNG 按画布尺寸导出。无需安装字体；缺失字符会使用系统替代字形。</p>
     </section>
     <div class="preview-bottom"><div class="preview-status"><span id="previewIndex"></span><button id="previewDensity" type="button" aria-label="显示行数，点击切换" title="Ctrl＋滚轮调整行数；点击切换"></button><button id="previewMotion" class="preview-motion" type="button" aria-pressed="true" title="开启或关闭背景图片的上下浮动">浮动：开</button><button id="previewZoomReset" class="preview-motion" type="button" aria-label="重置当前图片缩放" title="恢复默认显示尺寸">100%</button></div><span id="previewHelp">双击单图查看 · 滚轮转动 · Ctrl＋滚轮调整行数</span></div>
     </div>
@@ -271,10 +288,12 @@
   <script src="./history-ui.js"></script>
   <script src="./batch-rename.js"></script>
   <script src="./font-compare.js"></script>
+  <script src="./font-layout.js"></script>
   <script src="./smart-folders.js"></script>
   <script src="./smart-folders-ui.js"></script>
   <script src="./skin-picker.js"></script>
   <script src="./asset-health.js"></script>
+  <script src="./bundle-details.js"></script>
   <script src="./similar-images.js"></script>
   <script src="./task-center-ui.js"></script>
   <script src="./audio-preview.js"></script>

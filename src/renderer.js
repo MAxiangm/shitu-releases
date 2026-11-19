@@ -9,6 +9,7 @@ const colorLabels = window.ShituColorLabels;
 const folderIcons = window.ShituFolderIcons;
 const historyControls = window.ShituHistoryUi;
 const assetHealth = window.ShituAssetHealth;
+const bundleDetails = window.ShituBundleDetails;
 const state = { library: { assets: [], folders: [], smartFolders: [], tags: [], stats: {}, root: null, needsLibrary: true }, view: 'all', folder: null, smartFolder: null, tag: null, selected: new Set(), selectionMode: false, anchor: null, search: '', format: 'all', missingResources: false, sort: 'newest', limit: 240, previewId: null, details: false, busy: false, libraryChanging: false };
 let modalResolve = null;
 let modalHasParent = false;
@@ -43,6 +44,7 @@ let marqueeFrame = 0;
 let suppressMarqueeClick = false;
 let deletingAssets = false;
 let activeExport = null;
+let pendingBundleCheck = null;
 let videoPreviewSerial = 0;
 let videoPreviewRequestSerial = 0;
 let videoPreviewSession = null;
@@ -52,6 +54,15 @@ let modelViewerModule;
 let fontPreviewSession = null;
 let fontPreviewText = null;
 let fontPreviewSize = 72;
+let fontPreviewLayout = window.ShituFontLayout.normalizeSettings();
+let fontPreviewExporting = false;
+const fontLayoutFields = {
+  writingMode: 'fontPreviewWritingMode',
+  width: 'fontPreviewWidth', height: 'fontPreviewHeight', align: 'fontPreviewAlign', verticalAlign: 'fontPreviewVerticalAlign',
+  letterSpacing: 'fontPreviewLetterSpacing', lineHeight: 'fontPreviewLineHeight', paddingTop: 'fontPreviewPaddingTop',
+  paddingRight: 'fontPreviewPaddingRight', paddingBottom: 'fontPreviewPaddingBottom', paddingLeft: 'fontPreviewPaddingLeft',
+  textColor: 'fontPreviewTextColor', backgroundColor: 'fontPreviewBackgroundColor', transparent: 'fontPreviewTransparent'
+};
 const audioPreview = window.ShituAudioPreview.create({
   panel: $('previewAudio'), audio: $('previewAudioPlayer'), title: $('previewAudioTitle'),
   artist: $('previewAudioArtist'), album: $('previewAudioAlbum'), details: $('previewAudioMeta'),
@@ -625,6 +636,35 @@ function toast(message, error = false, duration = 4500, link) {
 }
 function messageError(error) { toast(error?.message || String(error), true, 8000); }
 async function run(fn) { try { return await fn(); } catch (error) { messageError(error); return null; } }
+async function recheckAssetBundle(id, expectedRoot = state.library.root) {
+  if (!hasLibrary() || state.libraryChanging || closing || expectedRoot !== state.library.root) return;
+  if (state.busy || activeExport || pendingBundleCheck || folderMoveSaving || deletingAssets || historyUi.pending) { toast('请等待当前素材操作完成'); return; }
+  if (!await waitForMetadata() || expectedRoot !== state.library.root || state.libraryChanging || state.busy || closing) return;
+  pendingBundleCheck = { id, root: expectedRoot }; state.busy = true;
+  stopGalleryPreviews(); modelWarmup.pause(); renderDetails();
+  let showMissing = false;
+  try {
+    const result = await api.recheckBundles([id], expectedRoot);
+    if (state.library.root !== expectedRoot || state.libraryChanging) return;
+    if (result.snapshot?.root === expectedRoot) applyLibrary(result.snapshot);
+    const failure = result.errors?.find(item => item.id === id);
+    if (failure) throw new Error(failure.message);
+    const asset = state.library.assets.find(item => item.id === id);
+    const bundle = asset?.modelBundle || asset?.projectBundle;
+    const missing = bundle?.missing?.length || 0;
+    showMissing = missing > 0;
+    const needsReview = (bundle?.warnings?.length || 0) > 0 || bundle?.resources?.complete === false;
+    toast(missing ? `检查完成，缺少 ${missing} 项资源，可在详情中查找补齐`
+      : needsReview ? '资源清单已更新，部分引用仍需核对，见资源包详情' : '检查完成，未发现缺失资源');
+  } catch (error) { messageError(error); }
+  finally {
+    pendingBundleCheck = null; state.busy = false; render(); modelWarmup.schedule();
+    if (showMissing && state.library.root === expectedRoot && state.selected.has(id)) {
+      const details = $('detailsContent').querySelector('.asset-health-details');
+      if (details) details.open = true;
+    }
+  }
+}
 function updateExportProgress(detail) {
   if (!activeExport || state.library.root !== activeExport.root || (detail?.root && detail.root !== activeExport.root)) return;
   const current = Number.isSafeInteger(detail?.current) && detail.current >= 0 ? detail.current : null;
@@ -657,6 +697,7 @@ async function exportLibraryItems(kind, value, expectedRoot = state.library.root
   try {
     const result = kind === 'folder' ? await api.exportFolder(folder.id, expectedRoot) : await api.exportAssets(ids, expectedRoot);
     if (!result || result.cancelled || state.library.root !== expectedRoot) return result;
+    if (result.snapshot?.root === expectedRoot) applyLibrary(result.snapshot);
     const count = Number.isSafeInteger(result.count) ? result.count : Number.isSafeInteger(result.exported) ? result.exported : 0;
     const folders = Number.isSafeInteger(result.folders) ? result.folders : Number.isSafeInteger(result.folderCount) ? result.folderCount : null;
     const title = kind === 'folder' ? `已按层级导出「${folder.name}」` : '素材导出完成';
@@ -2090,11 +2131,19 @@ function renderDetails() {
     if (typeof asset.codec === 'string' && asset.codec) metadata.splice(4, 0, ['视频编码', asset.codec.toUpperCase()]);
   }
   metadata.forEach(([key, value]) => { const row = el('div', 'metadata-row'); row.append(el('span', '', key), el('span', '', value)); box.append(row); });
+  if (one && (isModel(asset) || isProject(asset))) {
+    const bundleRoot = state.library.root;
+    const resourcePanel = bundleDetails.render(asset, {
+      pending: pendingBundleCheck?.id === asset.id && pendingBundleCheck.root === bundleRoot,
+      onRecheck: () => recheckAssetBundle(asset.id, bundleRoot)
+    });
+    if (resourcePanel) box.append(resourcePanel);
+  }
   const health = one ? assetHealth.summary(asset) : null;
   if (health) {
     const root = state.library.root;
     const repair = asset.trashedAt ? null : {
-      key: `${root}\0${asset.id}\0${asset.hash}`,
+      key: `${root}\0${asset.id}\0${asset.hash}\0${health.items.join('\0')}`,
       choose: () => api.planBundleRepair(asset.id, root),
       cancel: token => api.cancelBundleRepair(token),
       message: error => String(error?.message || error).replace(/^Error invoking remote method '[^']+': Error: /, ''),
@@ -2739,9 +2788,52 @@ function fontSessionCurrent(session) {
 }
 function renderFontSample() {
   if (!fontPreviewSession) return;
-  $('fontPreviewSample').textContent = $('fontPreviewText').value;
-  $('fontPreviewSample').style.fontSize = `${fontPreviewSize}px`;
+  const sample = $('fontPreviewSample');
+  sample.textContent = $('fontPreviewText').value;
+  fontPreviewLayout = window.ShituFontLayout.normalizeSettings({ ...fontPreviewLayout, fontSize: fontPreviewSize });
+  Object.assign(sample.style, { fontSize: `${fontPreviewSize}px`, textAlign: fontPreviewLayout.align,
+    letterSpacing: `${fontPreviewLayout.letterSpacing}px`, lineHeight: `${fontPreviewSize * fontPreviewLayout.lineHeight}px`,
+    width: `${fontPreviewLayout.width}px`, height: `${fontPreviewLayout.height}px` });
   $('fontPreviewSizeValue').textContent = `${fontPreviewSize} px`;
+  $('fontPreviewBackgroundColor').disabled = fontPreviewLayout.transparent;
+  updateFontExportButton();
+  if (fontPreviewSession.face?.status !== 'loaded' || !fontPreviewSession.prepared) return;
+  const layout = window.ShituFontLayout.renderCanvas($('fontPreviewCanvas'), sample.textContent, fontPreviewLayout, sample.style.fontFamily);
+  $('fontPreviewLayoutStatus').classList.toggle('is-warning', layout.overflow);
+  $('fontPreviewLayoutStatus').textContent = layout.overflow ? '文字超出画布，导出时会裁切。请调小字号、间距或增加画布尺寸。' : `${fontPreviewLayout.width} × ${fontPreviewLayout.height} px · ${fontPreviewLayout.transparent ? '透明背景' : '纯色背景'}`;
+  fitFontPreview();
+}
+function fitFontPreview() {
+  if (!fontPreviewSession) return;
+  const stage = $('fontPreviewStage'), style = getComputedStyle(stage);
+  const width = stage.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+  const height = stage.clientHeight - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom);
+  const scale = Math.max(0.001, Math.min(width / fontPreviewLayout.width, height / fontPreviewLayout.height));
+  $('fontPreviewPaper').style.width = `${fontPreviewLayout.width * scale}px`;
+  $('fontPreviewPaper').style.height = `${fontPreviewLayout.height * scale}px`;
+  $('fontPreviewSample').style.transform = `scale(${scale})`;
+}
+function syncFontLayoutControls() {
+  for (const [key, id] of Object.entries(fontLayoutFields)) {
+    if (key === 'transparent') $(id).checked = fontPreviewLayout[key];
+    else $(id).value = String(fontPreviewLayout[key]);
+  }
+}
+function updateFontExportButton() {
+  $('fontPreviewExport').disabled = fontPreviewExporting || $('previewFont').dataset.ready !== 'true' || !$('fontPreviewText').value.trim();
+  $('fontPreviewExport').textContent = fontPreviewExporting ? '正在导出…' : '导出 PNG';
+}
+async function exportFontPreview() {
+  const session = fontPreviewSession;
+  if (!session?.prepared || !fontSessionCurrent(session) || fontPreviewExporting || $('previewFont').dataset.ready !== 'true') return;
+  fontPreviewExporting = true; updateFontExportButton();
+  try {
+    const result = await api.exportFontImage(session.asset.id, session.root, {
+      text: $('fontPreviewText').value, faceIndex: session.prepared.faceIndex || 0, settings: { ...fontPreviewLayout }
+    });
+    if (!result.canceled) toast(`已导出文字 PNG · ${result.width} × ${result.height}${result.overflow ? '（超出画布部分已裁切）' : ''}`);
+  } catch (error) { messageError(error); }
+  finally { fontPreviewExporting = false; updateFontExportButton(); }
 }
 async function loadFontPreviewFace(faceIndex = 0) {
   const session = fontPreviewSession;
@@ -2750,7 +2842,9 @@ async function loadFontPreviewFace(faceIndex = 0) {
   $('fontPreviewStatus').textContent = '正在载入字体…';
   $('fontPreviewStatus').classList.remove('hidden');
   $('fontPreviewSample').classList.add('hidden');
+  $('fontPreviewPaper').classList.add('hidden');
   delete $('previewFont').dataset.ready;
+  updateFontExportButton();
   let loadedFace, timer;
   const current = () => fontSessionCurrent(session) && request === session.request;
   try {
@@ -2779,7 +2873,10 @@ async function loadFontPreviewFace(faceIndex = 0) {
     renderFontSample();
     $('fontPreviewStatus').classList.add('hidden');
     $('fontPreviewSample').classList.remove('hidden');
+    $('fontPreviewPaper').classList.remove('hidden');
     $('previewFont').dataset.ready = 'true';
+    updateFontExportButton();
+    fitFontPreview();
     $('previewFont').dataset.faceIndex = String(prepared.faceIndex ?? faceIndex);
     $('previewMeta').textContent = [session.asset.ext.toUpperCase(), prepared.fullName || prepared.family, prepared.style, faces.length > 1 ? `${faces.length} 款字体` : '', size(session.asset.size)].filter(Boolean).join('  ·  ');
   } catch (error) {
@@ -2793,7 +2890,8 @@ function displayFontPreview(asset) {
   $('preview').classList.add('is-font-preview');
   $('previewFont').classList.remove('hidden');
   $('fontPreviewFaceField').classList.add('hidden');
-  $('previewHelp').textContent = '输入文字试排 · 调整字号 · ← → 切换素材';
+  syncFontLayoutControls();
+  $('previewHelp').textContent = '输入文字试排 · 调整对齐和间距 · 导出 PNG';
   void loadFontPreviewFace();
 }
 function displayPreviewAsset(asset, index, total) {
@@ -2874,6 +2972,10 @@ function resetPreviewMedia() {
   delete $('previewFont').dataset.faceIndex;
   $('fontPreviewSample').style.removeProperty('font-family');
   $('fontPreviewSample').textContent = '';
+  $('fontPreviewPaper').classList.add('hidden');
+  $('fontPreviewCanvas').width = 1;
+  $('fontPreviewCanvas').height = 1;
+  updateFontExportButton();
   $('preview').classList.remove('is-font-preview');
   const session = videoPreviewSession;
   if (session) {
@@ -3339,8 +3441,35 @@ $('previewBack').addEventListener('click', () => cylinderPreview.exitSingle());
 $('previewPrev').addEventListener('click', () => movePreview(-1));
 $('previewNext').addEventListener('click', () => movePreview(1));
 $('previewOpen').addEventListener('click', () => run(() => api.openAsset(state.previewId)));
-$('fontPreviewText').addEventListener('input', () => { fontPreviewText = $('fontPreviewText').value.slice(0, 2000); renderFontSample(); });
-$('fontPreviewSize').addEventListener('input', () => { fontPreviewSize = Math.max(16, Math.min(160, Number($('fontPreviewSize').value) || 72)); renderFontSample(); });
+$('fontPreviewText').addEventListener('input', () => { fontPreviewText = $('fontPreviewText').value.slice(0, 2000); $('fontPreviewText').value = fontPreviewText; renderFontSample(); });
+$('fontPreviewSize').addEventListener('input', () => { fontPreviewSize = Math.max(8, Math.min(600, Number($('fontPreviewSize').value) || 72)); $('fontPreviewPreset').value = 'custom'; renderFontSample(); });
+function readFontLayoutControls() {
+  const settings = { fontSize: fontPreviewSize };
+  for (const [field, controlId] of Object.entries(fontLayoutFields)) settings[field] = field === 'transparent' ? $(controlId).checked : $(controlId).value;
+  const next = window.ShituFontLayout.normalizeSettings(settings);
+  if (JSON.stringify(next) !== JSON.stringify(fontPreviewLayout)) {
+    fontPreviewLayout = next;
+    $('fontPreviewPreset').value = 'custom';
+    renderFontSample();
+  }
+}
+for (const id of Object.values(fontLayoutFields)) {
+  $(id).addEventListener('input', readFontLayoutControls);
+  $(id).addEventListener('change', () => { readFontLayoutControls(); syncFontLayoutControls(); });
+}
+for (const preset of window.ShituFontLayout.PRESETS) {
+  const option = el('option', '', preset.name); option.value = preset.id;
+  $('fontPreviewPreset').append(option);
+}
+$('fontPreviewPreset').addEventListener('change', () => {
+  if ($('fontPreviewPreset').value === 'custom') return;
+  fontPreviewLayout = window.ShituFontLayout.applyPreset($('fontPreviewPreset').value, fontPreviewLayout);
+  fontPreviewSize = fontPreviewLayout.fontSize;
+  $('fontPreviewSize').value = String(fontPreviewSize);
+  syncFontLayoutControls(); renderFontSample();
+});
+$('fontPreviewExport').addEventListener('click', () => { void exportFontPreview(); });
+new ResizeObserver(fitFontPreview).observe($('fontPreviewStage'));
 $('fontPreviewFace').addEventListener('change', () => { void loadFontPreviewFace(Number($('fontPreviewFace').value)); });
 $('fontPreviewReset').addEventListener('click', () => {
   fontPreviewText = null;

@@ -55,7 +55,7 @@ function collector() {
       } else groups.push(texture);
     }
     groups.push(...loose.map(reference => ({ references: [reference], embedded: false })));
-    return groups.map(group => ({ embedded: group.embedded,
+    return groups.map(group => ({ embedded: group.embedded, name: typeof group.name === 'string' ? group.name.replace(/\0\x01/g, '::').replace(/[\x00-\x1f]/g, '') : '',
       references: [...new Set([...group.references].sort((a, b) => Number(b.relative) - Number(a.relative)).map(reference => reference.value))] }));
   }
   return { node, finish };
@@ -148,7 +148,8 @@ async function binaryProperties(handle, start, length, count) {
   if (position !== end) throw new Error('FBX 属性长度无效');
   return properties;
 }
-async function readFbxDependencies(filename) {
+async function readFbxDependencies(filename, { signal } = {}) {
+  signal?.throwIfAborted();
   const handle = await fs.open(filename, 'r');
   try {
     const header = Buffer.alloc(27), read = await handle.read(header, 0, header.length, 0);
@@ -163,6 +164,7 @@ async function readFbxDependencies(filename) {
     const collect = collector(), stack = [{ position: 27, end: length, owner: null, name: '' }];
     let remaining = MAX_NODES;
     while (stack.length) {
+      signal?.throwIfAborted();
       if (--remaining < 0) throw new Error('FBX 节点过多');
       const frame = stack.at(-1);
       if (frame.position + nodeLength > frame.end) { stack.pop(); continue; }

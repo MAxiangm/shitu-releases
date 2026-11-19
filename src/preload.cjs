@@ -86,8 +86,10 @@ contextBridge.exposeInMainWorld('shitu', Object.freeze({
     return () => ipcRenderer.removeListener('shitu:similar-image-progress', listener);
   },
   prepareFont: (id, expectedRoot, faceIndex = 0) => call('prepare-font', id, expectedRoot, faceIndex),
+  exportFontImage: (id, expectedRoot, options) => call('export-font-image', id, expectedRoot, options),
   prepareProjectPreview: (id, expectedRoot, compositionId) => call('prepare-project-preview', id, expectedRoot, compositionId),
   projectPreviewState: id => call('project-preview-state', id),
+  recheckBundles: (ids, expectedRoot) => call('recheck-bundles', ids, expectedRoot),
   planBundleRepair: (id, expectedRoot) => call('plan-bundle-repair', id, expectedRoot),
   applyBundleRepair: (id, token) => call('apply-bundle-repair', id, token),
   cancelBundleRepair: token => call('cancel-bundle-repair', token),

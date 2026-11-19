@@ -9,6 +9,7 @@ const FolderTree = require('./folder-tree.js');
 const { MODEL, PROJECT } = require('./media-formats.cjs');
 const { validateModelBundle, isSafeBundlePath, collectModelBundle } = require('./model-bundle.cjs');
 const { validateProjectBundle } = require('./project-bundle.cjs');
+const { DIAGNOSTIC_VERSION, PARSER_VERSION } = require('./bundle-diagnostics.cjs');
 
 const MAX_THUMBNAIL_BYTES = 32 * 1024 * 1024;
 const MAX_THUMBNAIL_PIXELS = 16 * 1024 * 1024;
@@ -158,21 +159,30 @@ async function preflightAsset(library, asset, options) {
     files.push({ source: filename, relative: file.path, size: file.size, hash: file.hash });
   }
   const supplied = options.thumbnailPaths instanceof Map ? options.thumbnailPaths.get(asset.id) : options.thumbnailPaths?.[asset.id];
-  let thumbnail;
-  try { thumbnail = await readThumbnail(supplied || library.getAssetPath(asset.id, 'thumbnail')); }
-  catch (error) { throw fail(`“${asset.name}”的缩略图尚未准备好，请先生成预览后重试`, error); }
+  const suppliedNote = options.previewNotes instanceof Map ? options.previewNotes.get(asset.id) : options.previewNotes?.[asset.id];
+  let thumbnail, previewNote = typeof suppliedNote === 'string' ? suppliedNote : '';
+  if (supplied !== null) {
+    try { thumbnail = await readThumbnail(supplied || library.getAssetPath(asset.id, 'thumbnail')); }
+    catch (error) {
+      abort(options.signal);
+      if (error?.name === 'AbortError' || error?.code === 'ABORT_ERR') throw error;
+      previewNote = `未附带缩略图：${String(error?.message || '没有可用预览').slice(0, 500)}；原始资源文件照常导出。`;
+    }
+  } else if (!previewNote) previewNote = '未附带缩略图；原始资源文件照常导出。';
   // Older FBX manifests treated any embedded image as proof that all textures
   // were embedded. Reinspect the stored bundle so those libraries also benefit
   // from per-texture checks without changing their originals or metadata.
-  const dependencies = path.extname(manifest.entry).toLowerCase() === '.fbx'
-    ? await collectModelBundle(path.join(source, manifest.entry), { allowedRoots: [source] }) : manifest;
+  const currentDiagnostics = manifest.diagnostics?.version === DIAGNOSTIC_VERSION &&
+    manifest.diagnostics.parserVersion === PARSER_VERSION && manifest.diagnostics.sourceHash === manifest.hash;
+  const dependencies = path.extname(manifest.entry).toLowerCase() === '.fbx' && !currentDiagnostics
+    ? await collectModelBundle(path.join(source, manifest.entry), { allowedRoots: [source], signal: options.signal }) : manifest;
   abort(options.signal);
   const missing = [...new Set(dependencies.missing || [])];
-  const notes = PROJECT.has(asset.ext) ? [...new Set([...(manifest.notes || []), ...(manifest.warnings.includes(LEGACY_AE_NOTE) ? [LEGACY_AE_NOTE] : [])])] : [];
+  const notes = [...new Set([...(PROJECT.has(asset.ext) ? [...(manifest.notes || []), ...(manifest.warnings.includes(LEGACY_AE_NOTE) ? [LEGACY_AE_NOTE] : [])] : []), ...(previewNote ? [previewNote] : [])])];
   const issues = [...new Set((dependencies.warnings || []).filter(message => !PROJECT.has(asset.ext) || message !== LEGACY_AE_NOTE))];
   const warnings = issues.map(message => `${asset.name}：${message}`);
   if (missing.length) warnings.push(`${asset.name}：有 ${missing.length} 个依赖未收集：${missing.slice(0, 5).join('、')}${missing.length > 5 ? '…' : ''}`);
-  return { asset, files, bundled: true, thumbnail, warnings, missing, notes, issues,
+  return { asset, files, bundled: true, thumbnail, warnings, missing, notes, issues, resources: manifest.resources,
     occupiedRootNames: new Set(manifest.files.map(file => key(file.path.split('/')[0]))) };
 }
 async function copyChecked(file, target, created, signal) {
@@ -252,9 +262,12 @@ async function exportOne(item, parent, reserved, created, options) {
   if (item.bundled) {
     const output = await createUniqueDirectory(parent, base, reserved, created, item.occupiedRootNames);
     for (const file of item.files) await copyChecked(file, path.join(output, file.relative), created, options.signal);
-    const thumbnail = path.join(output, `${path.basename(output)}.jpg`);
-    await writeExclusive(thumbnail, item.thumbnail, created);
-    return { assetId: item.asset.id, name: path.basename(output), path: output, thumbnail };
+    const result = { assetId: item.asset.id, name: path.basename(output), path: output };
+    if (item.thumbnail) {
+      result.thumbnail = path.join(output, `${path.basename(output)}.jpg`);
+      await writeExclusive(result.thumbnail, item.thumbnail, created);
+    }
+    return result;
   }
   for (;;) {
     const name = chooseName(base, reserved, { extension: `.${item.asset.ext}` }), output = path.join(parent, name);
@@ -279,7 +292,8 @@ async function exportReport(directory, prepared, items, created, options) {
         entry: item.asset.modelBundle?.entry || item.asset.projectBundle.entry,
         status: item.missing.length ? 'missing-dependencies' : item.issues.length ? 'needs-review' : 'collected',
         files: item.files.map(file => ({ path: file.relative, size: file.size, sha256: file.hash })),
-        missing: item.missing, warnings: item.issues, notes: item.notes };
+        missing: item.missing, warnings: item.issues, notes: item.notes,
+        ...(item.resources ? { resources: item.resources } : {}) };
     })
   };
   const bytes = Buffer.from(JSON.stringify(report, null, 2) + '\n');

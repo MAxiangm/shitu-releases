@@ -5,7 +5,7 @@ const sharp = require('sharp');
 const { MODEL, PROJECT } = require('./media-formats.cjs');
 const FolderTree = require('./folder-tree.js');
 
-function createAssetExportService({ getLibrary, chooseDirectory, prepareModel, prepareProject, tempDirectory, onProgress } = {}) {
+function createAssetExportService({ getLibrary, chooseDirectory, prepareModel, prepareProject, tempDirectory, onProgress, onChanged } = {}) {
   let active = null;
   const busy = () => Boolean(active);
   function owner(request) {
@@ -68,12 +68,13 @@ function createAssetExportService({ getLibrary, chooseDirectory, prepareModel, p
       if (typeof destination !== 'string' || !path.isAbsolute(destination)) throw new Error('请选择有效的导出文件夹');
       const selected = select(library, kind, value), fingerprint = signature(selected);
       const bundles = selected.assets.filter(asset => MODEL.has(asset.ext) || PROJECT.has(asset.ext));
-      const thumbnailPaths = new Map();
+      const thumbnailPaths = new Map(), previewNotes = new Map();
       for (const [index, asset] of bundles.entries()) {
         notify(request, { phase: 'preparing', current: index + 1, total: bundles.length, name: asset.name });
-        let thumbnail = library.getAssetPath(asset.id, 'thumbnail');
-        if (!await validThumbnail(thumbnail)) {
-          try {
+        let thumbnail;
+        try {
+          thumbnail = library.getAssetPath(asset.id, 'thumbnail');
+          if (!await validThumbnail(thumbnail)) {
             if (PROJECT.has(asset.ext)) {
               if (asset.trashedAt) throw new Error('请先从回收站恢复此工程，再生成缩略图');
               await prepareProject(library, asset.id, { expectedRoot, signal: request.controller.signal });
@@ -86,23 +87,34 @@ function createAssetExportService({ getLibrary, chooseDirectory, prepareModel, p
                 request.stagingIdentity = await fs.lstat(request.staging);
               }
               thumbnail = path.join(request.staging, `${index}.jpg`);
-              await prepareModel(library, asset, thumbnail, { signal: request.controller.signal });
-              request.stagedFiles.push({ path: thumbnail, identity: await fs.lstat(thumbnail) });
+              try { await prepareModel(library, asset, thumbnail, { signal: request.controller.signal }); }
+              finally {
+                const identity = await fs.lstat(thumbnail).catch(() => null);
+                if (identity?.isFile() && !identity.isSymbolicLink()) request.stagedFiles.push({ path: thumbnail, identity });
+              }
             }
-          } catch (error) {
-            owner(request);
-            throw new Error(`无法为「${asset.name}」准备导出缩略图：${error.message}`);
+            if (!await validThumbnail(thumbnail)) throw new Error('当前环境未能生成可用缩略图');
           }
-          if (!await validThumbnail(thumbnail)) throw new Error(`「${asset.name}」没有可用缩略图，请先在 Mosaic 中预览后重试`);
+        } catch (error) {
+          owner(request);
+          if (error?.name === 'AbortError' || error?.code === 'ABORT_ERR') throw error;
+          thumbnail = null;
+          previewNotes.set(asset.id, `未附带缩略图：${String(error?.message || '无法生成预览').slice(0, 500)}；原始资源文件照常导出。`);
         }
         owner(request); thumbnailPaths.set(asset.id, thumbnail);
       }
       owner(request);
       if (signature(select(library, kind, value)) !== fingerprint) throw new Error('要导出的素材或文件夹已变化，请重新导出');
-      const options = { signal: request.controller.signal, thumbnailPaths,
+      const options = { signal: request.controller.signal, thumbnailPaths, previewNotes,
         onProgress: progress => notify(request, { ...progress, phase: 'copying', current: progress.current ?? progress.completed }) };
       notify(request, { phase: 'copying', current: 0, total: selected.assets.length, name: '' });
-      const result = kind === 'folder' ? await library.exportFolder(value, destination, options) : await library.exportAssets(value, destination, options);
+      let result;
+      try { result = kind === 'folder' ? await library.exportFolder(value, destination, options) : await library.exportAssets(value, destination, options); }
+      finally {
+        // Dependency checks may persist useful results even if copying later
+        // fails. Let the current library view pick up those diagnostics too.
+        try { onChanged?.(library); } catch {}
+      }
       owner(request);
       return { ...result, cancelled: false, count: result.exported, path: result.path || destination };
     } finally {

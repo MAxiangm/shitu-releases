@@ -5,6 +5,7 @@ const { createReadStream, constants } = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { readFbxDependencies } = require('./fbx-dependencies.cjs');
+const { diagnostics, resourceSummary, fileResources, validateDiagnostics } = require('./bundle-diagnostics.cjs');
 
 const MODEL_EXTENSIONS = new Set(['glb', 'gltf', 'obj', 'fbx', 'stl', 'ply', 'c4d', 'blend', 'max']);
 const NATIVE_EXTENSIONS = new Set(['c4d', 'blend', 'max']);
@@ -23,9 +24,9 @@ function isSafeBundlePath(value) {
     !value.startsWith('/') && value.split('/').every(part => part && part !== '.' && part !== '..' && !/[. ]$/.test(part) &&
       !/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part));
 }
-async function hashFile(filename) {
+async function hashFile(filename, signal) {
   const hash = crypto.createHash('sha256');
-  for await (const chunk of createReadStream(filename)) hash.update(chunk);
+  for await (const chunk of createReadStream(filename)) { signal?.throwIfAborted(); hash.update(chunk); }
   return hash.digest('hex');
 }
 function modelBundleHash(files, entry) {
@@ -56,6 +57,7 @@ function validateModelBundle(value) {
   for (const key of ['missing', 'warnings']) if (!Array.isArray(value[key]) || value[key].length > MAX_FILES || value[key].some(item => typeof item !== 'string' || item.length > 4096)) throw new Error('模型包提示信息无效');
   if ('size' in value && value.size !== size) throw new Error('模型包大小无效');
   if ('hash' in value && value.hash !== modelBundleHash(value.files, value.entry)) throw new Error('模型包校验值无效');
+  validateDiagnostics(value, isSafeBundlePath);
   return value;
 }
 function words(value) {
@@ -77,7 +79,7 @@ async function readText(filename) {
   return fs.readFile(filename, 'utf8');
 }
 async function gltfReferences(filename, binary) {
-  let text;
+  let text, binaryBytes = 0;
   if (!binary) text = await readText(filename);
   else {
     const handle = await fs.open(filename, 'r');
@@ -89,16 +91,39 @@ async function gltfReferences(filename, binary) {
       const bytes = Buffer.alloc(length);
       if ((await handle.read(bytes, 0, length, 20)).bytesRead !== length) throw new Error('GLB JSON 数据不完整');
       text = bytes.toString('utf8').replace(/[\x00 ]+$/, '');
+      const size = (await handle.stat()).size;
+      for (let offset = 20 + length; offset + 8 <= size;) {
+        const chunk = Buffer.alloc(8);
+        if ((await handle.read(chunk, 0, 8, offset)).bytesRead !== 8 || offset + 8 + chunk.readUInt32LE(0) > size) throw new Error('GLB 二进制数据不完整');
+        if (chunk.readUInt32LE(4) === 0x004e4942) binaryBytes += chunk.readUInt32LE(0);
+        offset += 8 + chunk.readUInt32LE(0);
+      }
     } finally { await handle.close(); }
   }
   const data = JSON.parse(text);
   if (String(data.asset?.version || '').split('.')[0] !== '2') throw new Error('目前支持 glTF 2 模型');
-  return [
+  const references = [
     ...(Array.isArray(data.buffers) ? data.buffers.filter(value => typeof value.uri === 'string').map(value => ({ reference: value.uri, kind: 'buffer' })) : []),
-    ...(Array.isArray(data.images) ? data.images.filter(value => typeof value.uri === 'string').map(value => ({ reference: value.uri, kind: 'texture' })) : [])
   ];
+  let complete = true;
+  for (const [index, value] of (Array.isArray(data.images) ? data.images : []).entries()) {
+    if (typeof value.uri === 'string') {
+      const embedded = /^data:/i.test(value.uri);
+      if (embedded && !/^data:[^,]*,[\s\S]+/i.test(value.uri)) { complete = false; continue; }
+      references.push({ reference: value.uri, kind: 'texture', embedded, label: `image[${index}]` });
+    }
+    else if (Number.isInteger(value.bufferView) && data.bufferViews?.[value.bufferView]) {
+      const view = data.bufferViews[value.bufferView], buffer = data.buffers?.[view.buffer];
+      const end = (view.byteOffset || 0) + view.byteLength;
+      if (buffer && Number.isSafeInteger(end) && Number.isSafeInteger(view.byteLength) && view.byteLength > 0 && (view.byteOffset || 0) >= 0 && end <= buffer.byteLength &&
+          (typeof buffer.uri === 'string' || binary && end <= binaryBytes)) references.push({ reference: buffer.uri || '', kind: 'texture', embedded: !buffer.uri || /^data:/i.test(buffer.uri), referenceKind: 'buffer', label: `image[${index}] (bufferView ${value.bufferView})` });
+      else complete = false;
+    } else complete = false;
+  }
+  return { references, complete };
 }
-async function collectModelBundle(source, { allowedRoots, repair } = {}) {
+async function collectModelBundle(source, { allowedRoots, repair, signal } = {}) {
+  signal?.throwIfAborted();
   if (typeof source !== 'string' || !path.isAbsolute(source) || !MODEL_EXTENSIONS.has(ext(source))) throw new Error('请选择支持的 3D 模型文件');
   source = path.resolve(source);
   const roots = [...new Set((allowedRoots?.length ? allowedRoots : [path.dirname(source)]).map(root => path.resolve(root)))];
@@ -106,6 +131,8 @@ async function collectModelBundle(source, { allowedRoots, repair } = {}) {
   const realRoots = await Promise.all(roots.map(root => fs.realpath(root)));
   const files = new Map(), missing = new Set(), warnings = new Set(), parsed = new Set();
   const repairedFiles = new Map();
+  const resourceHints = [];
+  let resourceComplete = true;
   let previewSource;
   async function checked(filename) {
     filename = path.resolve(filename);
@@ -121,12 +148,13 @@ async function collectModelBundle(source, { allowedRoots, repair } = {}) {
     return filename;
   }
   async function add(filename) {
+    signal?.throwIfAborted();
     const actual = await checked(filename);
     const key = process.platform === 'win32' ? actual.toLowerCase() : actual;
     if (!files.has(key)) {
       if (files.size >= MAX_FILES) throw new Error('模型资源文件超过收集上限');
       const info = await fs.stat(actual);
-      files.set(key, { source: actual, size: info.size, hash: await hashFile(actual) });
+      files.set(key, { source: actual, size: info.size, hash: await hashFile(actual, signal) });
     }
     return actual;
   }
@@ -148,6 +176,13 @@ async function collectModelBundle(source, { allowedRoots, repair } = {}) {
     return actual;
   }
   async function reference(raw, from, kind = 'texture', fallback = false, optional = false) {
+    signal?.throwIfAborted();
+    const actual = await resolveReference(raw, from, kind, fallback, optional);
+    if (actual) resourceHints.push({ kind, storage: 'file', actual, reference: raw, container: from });
+    else if (!optional && missing.has(String(raw).trim())) resourceHints.push({ kind, storage: 'missing', reference: String(raw).trim(), container: from });
+    return actual;
+  }
+  async function resolveReference(raw, from, kind = 'texture', fallback = false, optional = false) {
     if (typeof raw !== 'string' || !raw.trim()) return null;
     raw = raw.trim();
     if (/^data:/i.test(raw)) return null;
@@ -176,7 +211,7 @@ async function collectModelBundle(source, { allowedRoots, repair } = {}) {
         const actual = await add(candidate);
         if (remote || !same(actual, options[0])) warnings.add(`已从模型附近收集贴图：${path.basename(actual)}`);
         return actual;
-      } catch (error) { lastError = error; }
+      } catch (error) { signal?.throwIfAborted(); lastError = error; }
     }
     const restored = await restoredReference(raw, options, from, fallback);
     if (restored) return restored;
@@ -185,7 +220,8 @@ async function collectModelBundle(source, { allowedRoots, repair } = {}) {
     return null;
   }
   async function resourceFolder(directory, depth = 0) {
-    if (depth > 8) { warnings.add('贴图目录层级过深，部分文件未收集'); return; }
+    signal?.throwIfAborted();
+    if (depth > 8) { resourceComplete = false; warnings.add('贴图目录层级过深，部分文件未收集'); return; }
     let children;
     try {
       const info = await fs.lstat(directory);
@@ -204,7 +240,16 @@ async function collectModelBundle(source, { allowedRoots, repair } = {}) {
     parsed.add(key);
     const type = ext(filename);
     if (type === 'glb' || type === 'gltf') {
-      for (const item of await gltfReferences(filename, type === 'glb')) await reference(item.reference, filename, item.kind);
+      const data = await gltfReferences(filename, type === 'glb');
+      resourceComplete &&= data.complete;
+      for (const item of data.references) {
+        if (item.embedded) {
+          resourceHints.push({ kind: item.kind, storage: 'embedded', container: filename, reference: item.label });
+        } else {
+          const actual = await reference(item.reference, filename, item.referenceKind || item.kind);
+          if (item.referenceKind) resourceHints.push({ kind: item.kind, storage: actual ? 'file' : 'missing', ...(actual ? { actual } : {}), container: filename, reference: item.label });
+        }
+      }
     } else if (type === 'obj') {
       for (const line of (await readText(filename)).split(/\r?\n/)) {
         const match = /^\s*mtllib\s+(.+?)\s*$/i.exec(line);
@@ -224,7 +269,8 @@ async function collectModelBundle(source, { allowedRoots, repair } = {}) {
     } else if (type === 'fbx' || NATIVE_EXTENSIONS.has(type)) {
       if (type === 'fbx') {
         try {
-          for (const media of await readFbxDependencies(filename)) {
+          for (const [index, media] of (await readFbxDependencies(filename, { signal })).entries()) {
+            if (media.embedded) resourceHints.push({ kind: 'texture', storage: 'embedded', container: filename, reference: `${media.references[0] || media.name || '贴图'} #${index + 1}` });
             let found = false;
             // Filename and RelativeFilename are aliases of one media item.
             // A payload in another Video cannot satisfy this item's lookup.
@@ -234,10 +280,12 @@ async function collectModelBundle(source, { allowedRoots, repair } = {}) {
             if (!media.embedded && !found && media.references.length) await reference(media.references[0], filename, 'texture', true);
           }
         } catch (error) {
+          signal?.throwIfAborted();
           if (repair) throw error;
+          resourceComplete = false;
           warnings.add(`FBX 贴图引用未能完整读取：${error.message}`);
         }
-      } else warnings.add('原工程的私有依赖无法完整静态解析，已收集附近常用贴图目录；其他外部资源请在原软件中检查。');
+      } else { resourceComplete = false; warnings.add('原工程的私有依赖无法完整静态解析，已收集附近常用贴图目录；其他外部资源请在原软件中检查。'); }
       const directory = path.dirname(filename), stem = path.basename(filename, path.extname(filename));
       for (const folder of ['tex', 'Tex', 'textures', 'Textures', 'maps', 'Maps', 'images', 'Images', 'materials', 'Materials', 'sourceimages', 'SourceImages', `${stem}.fbm`]) await resourceFolder(path.join(directory, folder));
       if (NATIVE_EXTENSIONS.has(type)) {
@@ -251,6 +299,7 @@ async function collectModelBundle(source, { allowedRoots, repair } = {}) {
           await add(sidecar);
           try { await parse(sidecar); previewSource ||= sidecar; break; }
           catch (error) {
+            signal?.throwIfAborted();
             if (repair) throw error;
             warnings.add(`同名预览文件无法读取：${path.basename(sidecar)}（${error.message}）`);
           }
@@ -272,7 +321,14 @@ async function collectModelBundle(source, { allowedRoots, repair } = {}) {
   const metadata = { version: 1, entry, files: planFiles.map(file => ({ path: file.relative, size: file.size, hash: file.hash })), missing: [...missing], warnings: [...warnings] };
   if (previewSource) metadata.previewEntry = slash(path.relative(baseRoot, previewSource));
   metadata.hash = modelBundleHash(metadata.files, entry); metadata.size = metadata.files.reduce((sum, file) => sum + file.size, 0);
-  return { baseRoot, entry, files: planFiles, missing: metadata.missing, warnings: metadata.warnings, hash: metadata.hash, size: metadata.size, ...(metadata.previewEntry ? { previewEntry: metadata.previewEntry } : {}) };
+  const hints = resourceHints.map(hint => ({ kind: hint.kind, storage: hint.storage,
+    ...(hint.actual ? { path: slash(path.relative(baseRoot, hint.actual)) } : {}),
+    ...(hint.container ? { container: slash(path.relative(baseRoot, hint.container)) } : {}),
+    ...(typeof hint.reference === 'string' ? { reference: hint.reference.replace(/[\x00-\x1f]/g, '').slice(0, 4096) } : {}) }));
+  metadata.resources = resourceSummary([...hints, ...fileResources(metadata.files)], resourceComplete);
+  metadata.diagnostics = diagnostics(metadata.hash);
+  return { baseRoot, entry, files: planFiles, missing: metadata.missing, warnings: metadata.warnings, hash: metadata.hash, size: metadata.size,
+    resources: metadata.resources, diagnostics: metadata.diagnostics, ...(metadata.previewEntry ? { previewEntry: metadata.previewEntry } : {}) };
 }
 
 async function copyModelBundle(plan, destination) {
@@ -296,6 +352,8 @@ async function copyModelBundle(plan, destination) {
     const metadata = { version: 1, entry: plan.entry, files, missing: [...plan.missing], warnings: [...plan.warnings],
       hash: modelBundleHash(files, plan.entry), size: files.reduce((sum, file) => sum + file.size, 0) };
     if (plan.previewEntry) metadata.previewEntry = plan.previewEntry;
+    if (plan.resources) metadata.resources = structuredClone(plan.resources);
+    if (plan.diagnostics) metadata.diagnostics = structuredClone(plan.diagnostics);
     return validateModelBundle(metadata);
   } catch (error) {
     // Only this freshly-created destination can be removed on a failed copy.

@@ -9,19 +9,45 @@
 .font-preview-size-heading { display:flex; align-items:center; justify-content:space-between; }
 .font-preview-controls input[type=range] { width:100%; accent-color:#ddd; }
 .font-preview-controls .text-button { align-self:flex-start; font-size:12px; }
-.font-preview-stage { overflow:auto; flex:1; min-height:0; padding:30px 34px; background:#eae8e2; color:#191919; }
-.font-preview-sample { white-space:pre-wrap; overflow-wrap:anywhere; font-synthesis:none; line-height:1.55; }
-.font-preview-status { color:#555; font-size:14px; line-height:1.8; }
+.font-preview-workspace { display:grid; grid-template-columns:minmax(0,1fr) 260px; flex:1; min-height:0; }
+.font-preview-stage { overflow:hidden; position:relative; display:flex; align-items:center; justify-content:center; min-width:0; min-height:0; padding:24px; background:#252525; color:#ddd; }
+.font-preview-paper { position:relative; flex:none; overflow:hidden; box-shadow:0 5px 24px #0005; background-color:#f1f1f1; background-image:linear-gradient(45deg,#ddd 25%,transparent 25%),linear-gradient(-45deg,#ddd 25%,transparent 25%),linear-gradient(45deg,transparent 75%,#ddd 75%),linear-gradient(-45deg,transparent 75%,#ddd 75%); background-size:16px 16px; background-position:0 0,0 8px,8px -8px,-8px 0; }
+.font-preview-paper canvas { display:block; width:100%; height:100%; }
+.font-preview-sample { position:absolute; top:0; left:0; transform-origin:top left; opacity:0; pointer-events:none; overflow:hidden; white-space:pre-wrap; overflow-wrap:anywhere; font-synthesis:none; line-height:1.55; }
+.font-preview-layout { overflow:auto; min-height:0; padding:16px; border-left:1px solid #ffffff18; display:flex; flex-direction:column; gap:14px; }
+.font-preview-field-row { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; }
+.font-preview-layout label { display:flex; flex-direction:column; gap:6px; color:#aaa; font-size:11px; min-width:0; }
+.font-preview-layout input:not([type=checkbox]),.font-preview-layout select { box-sizing:border-box; width:100%; min-width:0; height:31px; border:1px solid #ffffff25; border-radius:4px; background:#202020; color:#eee; padding:4px 7px; font:inherit; }
+.font-preview-layout input[type=color] { padding:3px; cursor:pointer; }
+.font-preview-layout input:disabled { opacity:.35; }
+.font-preview-margins { padding:0; margin:0; border:0; }
+.font-preview-margins legend { padding:0; margin:0 0 8px; font-size:11px; color:#aaa; }
+.font-preview-layout .font-preview-check { flex-direction:row; align-items:center; gap:6px; line-height:1.5; }
+.font-preview-check input { margin:0; accent-color:#ddd; }
+.font-preview-actions { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+.font-preview-actions .primary-button { padding:7px 12px; font-size:12px; }
+.font-preview-layout-status { margin:0; min-height:30px; color:#8e8e8e; font-size:11px; line-height:1.6; }
+.font-preview-layout-status.is-warning { color:#edbc73; }
+.font-preview-status { color:#bbb; font-size:14px; line-height:1.8; }
 .font-preview-note { flex:none; margin:0; padding:10px 24px; color:#888; font-size:11px; border-top:1px solid #ffffff18; }
 .is-font-preview .cylinder-viewport { visibility:hidden; }
 .is-font-preview #previewDensity,.is-font-preview #previewMotion,.is-font-preview #previewZoomReset,.is-font-preview #previewBack { display:none; }
 @media (max-width:900px) {
   .preview-font { inset:75px 52px 66px; }
   .font-preview-controls { grid-template-columns:minmax(0,1fr) 160px; padding:16px; gap:16px; }
-  .font-preview-stage { padding:22px; }
+  .font-preview-stage { padding:16px; }
+  .font-preview-workspace { grid-template-columns:minmax(0,1fr) 220px; }
+  .font-preview-layout { padding:12px; gap:10px; }
 }
 @media (max-width:650px),(max-height:620px) {
   .font-preview-controls { padding:12px 16px; gap:12px; }
   .font-preview-controls textarea { min-height:48px; max-height:80px; }
   .font-preview-note { padding:8px 16px; }
+}
+@media (max-width:700px) {
+  .preview-font { inset:70px 12px 55px; }
+  .font-preview-controls { grid-template-columns:minmax(0,1fr) 145px; gap:10px; }
+  .font-preview-workspace { grid-template-columns:minmax(0,1fr) 176px; }
+  .font-preview-layout { padding:9px; }
+  .font-preview-field-row { gap:6px; }
 }

@@ -32,6 +32,7 @@ const { createModelService } = require('./model-service.cjs');
 const { createSimilarImageService } = require('./similar-image-service.cjs');
 const { createTaskCenter } = require('./task-center.cjs');
 const { createFontService } = require('./font-service.cjs');
+const { createFontExportService } = require('./font-export-service.cjs');
 const { createAEProjectCollector } = require('./ae-projects.cjs');
 const { createBundleRepair } = require('./bundle-repair.cjs');
 const { createAEPreviewEngine } = require('./ae-preview.cjs');
@@ -79,6 +80,7 @@ let uiDiagnosticWrite = Promise.resolve();
 let modelService;
 let similarImages;
 let fontService;
+let fontExporter;
 let aeProjects;
 let aePreviewService;
 let bundleRepair;
@@ -219,7 +221,7 @@ function forwardVideoProgress(event, owner) {
     state: event.state, progress: Number.isFinite(event.progress) ? Math.max(0, Math.min(100, event.progress)) : undefined });
 }
 async function switchLibrary(mode) {
-  if(switchingLibrary || importing || draggingAssets || movingAssets || historyBusy || metadataSaves.size || assetExporter?.busy() || videoTranscodeService?.busy() || imagePlugins?.busy() || collector?.activeCount() || bundleRepairBusy)throw new Error('请等待当前素材操作完成后再切换素材库');
+  if(switchingLibrary || importing || draggingAssets || movingAssets || historyBusy || metadataSaves.size || assetExporter?.busy() || fontExporter?.busy() || videoTranscodeService?.busy() || imagePlugins?.busy() || collector?.activeCount() || bundleRepairBusy)throw new Error('请等待当前素材操作完成后再切换素材库');
   if(mode==='migrate')requireLibrary();
   switchingLibrary=true;
   try {
@@ -348,7 +350,7 @@ async function installDownloadedUpdate({ filePath }) {
       child.once('error', reject);
       child.once('spawn', () => { child.unref(); resolve(); });
     });
-    await Promise.allSettled([imagePlugins?.shutdown(), collector?.close(), videoEngine?.shutdown(), audioEngine?.shutdown(), modelService?.shutdown(), fontService?.shutdown(), aeProjects?.shutdown(), aePreviewService?.shutdown()]);
+    await Promise.allSettled([imagePlugins?.shutdown(), collector?.close(), videoEngine?.shutdown(), audioEngine?.shutdown(), modelService?.shutdown(), fontExporter?.shutdown(), fontService?.shutdown(), aeProjects?.shutdown(), aePreviewService?.shutdown()]);
     setTimeout(() => { mayClose = true; app.quit(); }, 150);
   } catch (error) {
     installingUpdate = false;
@@ -542,11 +544,28 @@ function bindHandlers() {
   checkedHandler('find-similar-images', (id, expectedRoot, token) => similarImages.search(requireLibrary(), id, expectedRoot, token));
   checkedHandler('cancel-similar-images', (expectedRoot, token) => similarImages.cancel(expectedRoot, token));
   checkedHandler('prepare-font', (id, expectedRoot, faceIndex = 0) => fontService.prepare(requireLibrary(), id, expectedRoot, faceIndex));
+  checkedHandler('export-font-image', (id, expectedRoot, options) => {
+    if (closing || switchingLibrary) throw new Error('请等待当前素材操作完成后再导出');
+    return fontExporter.exportImage(id, expectedRoot, options);
+  });
   checkedHandler('prepare-project-preview', (id, expectedRoot, compositionId) => aePreviewService.prepare(requireLibrary(), id, { expectedRoot, compositionId }));
   checkedHandler('project-preview-state', id => aePreviewService.state(requireLibrary(), id));
+  checkedHandler('recheck-bundles', async (ids, expectedRoot) => {
+    const owner = requireLibrary();
+    if (typeof expectedRoot !== 'string' || owner.root !== expectedRoot) throw new Error('素材库已切换，请重新检查');
+    if (!Array.isArray(ids) || !ids.length || ids.length > 256 || ids.some(id => typeof id !== 'string' || !id)) throw new Error('请选择有效的资源包');
+    if (bundleRepairBusy || closing || assetExporter?.busy()) throw new Error('请等待当前资源操作完成');
+    bundleRepairBusy = true;
+    try {
+      const result = await owner.recheckBundles(ids, { expectedRoot });
+      if (library !== owner || switchingLibrary) throw new Error('素材库已切换，检查结果已保存在原素材库');
+      return result;
+    } finally { bundleRepairBusy = false; }
+  });
   checkedHandler('plan-bundle-repair', async (id, expectedRoot) => {
     const owner = requireLibrary();
     if (owner.root !== expectedRoot) throw new Error('素材库已切换，请重新查找');
+    if (bundleRepairBusy || closing || assetExporter?.busy()) throw new Error('请等待当前资源操作完成');
     const choice = await dialog.showOpenDialog(mainWindow, { title: '选择缺失资源所在的文件夹', properties: ['openDirectory'] });
     if (choice.canceled || !choice.filePaths[0]) return null;
     return bundleRepair.plan(owner, id, choice.filePaths[0]);
@@ -760,7 +779,7 @@ async function createWindow() {
   mainWindow.on('close', event => {
     if (mayClose) { mayClose=false; closing=false; return; }
     event.preventDefault();
-    if (switchingLibrary || importing || draggingAssets || historyBusy || metadataSaves.size || assetExporter?.busy() || imagePlugins?.busy() || collector?.activeCount() || bundleRepairBusy) {
+    if (switchingLibrary || importing || draggingAssets || historyBusy || metadataSaves.size || assetExporter?.busy() || fontExporter?.busy() || imagePlugins?.busy() || collector?.activeCount() || bundleRepairBusy) {
       dialog.showMessageBox(mainWindow, { type: 'info', title: '素材操作进行中', message: '请等待素材操作完成后再关闭 Mosaic。图片处理任务可在插件中心取消。', buttons: ['知道了'] });
       return;
     }
@@ -768,7 +787,7 @@ async function createWindow() {
     closing = true;
     audioPreviewService?.invalidate();
     similarImages?.invalidate();
-    Promise.resolve(videoTranscodeService?.shutdown()).then(() => Promise.all([transcodeSettings?.flush(), transcodePresets?.flush()])).then(() => library?.flush()).then(() => Promise.allSettled([transcodeDevices?.shutdown?.(), videoTranscoder?.shutdown(), audioEngine?.shutdown(), modelService?.shutdown(), fontService?.shutdown(), aeProjects?.shutdown(), aePreviewService?.shutdown()])).then(() => { mayClose = true; mainWindow.close(); }).catch(error => {
+    Promise.resolve(videoTranscodeService?.shutdown()).then(() => Promise.all([transcodeSettings?.flush(), transcodePresets?.flush()])).then(() => library?.flush()).then(() => Promise.allSettled([transcodeDevices?.shutdown?.(), videoTranscoder?.shutdown(), audioEngine?.shutdown(), modelService?.shutdown(), fontExporter?.shutdown(), fontService?.shutdown(), aeProjects?.shutdown(), aePreviewService?.shutdown()])).then(() => { mayClose = true; mainWindow.close(); }).catch(error => {
       closing = false;
       dialog.showErrorBox('保存未完成', error.message);
     });
@@ -807,6 +826,8 @@ else {
     similarImages = createSimilarImageService({ getLibrary: () => library,
       onProgress: detail => sendActionEvent('similar-image-progress', detail) });
     fontService = createFontService({ BrowserWindow, cacheDir: path.join(app.getPath('userData'), 'font-previews'), getLibrary: () => library });
+    fontExporter = createFontExportService({ BrowserWindow, dialog, getLibrary: () => library,
+      getParentWindow: () => mainWindow, prepareFont: (owner, id, expectedRoot, faceIndex) => fontService.prepare(owner, id, expectedRoot, faceIndex) });
     aeProjects = createAEProjectCollector({ cacheDir: path.join(app.getPath('userData'), 'ae-projects') });
     bundleRepair = createBundleRepair({
       cacheDir: path.join(app.getPath('userData'), 'bundle-repair'),
@@ -844,7 +865,8 @@ else {
       prepareModel: (owner, asset, destination, options) => modelService.thumbnail(owner.getAssetPath(asset.id, 'original'), destination,
         { ...options, modelBundle: asset.modelBundle, modelDirectory: owner.getModelBundleDirectory(asset.id) }),
       prepareProject: (owner, id, options) => aePreviewService.prepare(owner, id, options),
-      onProgress: detail => sendActionEvent('export-progress', detail)
+      onProgress: detail => sendActionEvent('export-progress', detail),
+      onChanged: owner => { if (owner === library) sendActionEvent('library-changed'); }
     });
     imagePlugins=createImagePlugins({
       rootDir:path.join(process.env.SHITU_PLUGIN_ROOT || app.getPath('userData'),'plugins'),
@@ -933,6 +955,6 @@ else {
     audioPreviewService?.invalidate();
     videoTranscodeService?.shutdown().catch(()=>{}); videoTranscoder?.shutdown().catch(()=>{});
     Promise.resolve(transcodeDevices?.shutdown?.()).catch(()=>{});
-    imagePlugins?.shutdown().catch(()=>{}); collector?.close().catch(()=>{}); videoEngine?.shutdown().catch(()=>{}); Promise.resolve(audioEngine?.shutdown()).catch(()=>{}); modelService?.shutdown().catch(()=>{}); fontService?.shutdown().catch(()=>{}); aeProjects?.shutdown().catch(()=>{}); aePreviewService?.shutdown().catch(()=>{});
+    imagePlugins?.shutdown().catch(()=>{}); collector?.close().catch(()=>{}); videoEngine?.shutdown().catch(()=>{}); Promise.resolve(audioEngine?.shutdown()).catch(()=>{}); modelService?.shutdown().catch(()=>{}); fontExporter?.shutdown().catch(()=>{}); fontService?.shutdown().catch(()=>{}); aeProjects?.shutdown().catch(()=>{}); aePreviewService?.shutdown().catch(()=>{});
   });
 }

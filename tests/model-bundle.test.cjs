@@ -64,6 +64,9 @@ test('OBJ material and spaced texture references form an independent package wit
   const plan = await collectModelBundle(obj);
   assert.deepEqual(plan.files.map(file => file.relative).sort(), ['model.obj', 'surface materials.mtl', 'textures/my color.png'].sort());
   assert.deepEqual(plan.missing, []);
+  assert.equal(plan.resources.models, 1);
+  assert.equal(plan.resources.externalTextures, 1);
+  assert.equal(plan.resources.embeddedTextures, 0);
   const destination = path.join(root, 'managed');
   const metadata = await copyModelBundle(plan, destination);
   assert.equal(validateModelBundle(metadata), metadata);
@@ -154,6 +157,9 @@ Connections: { C: "OO", 9007199254740995, 9007199254740993 }
 `);
   let plan = await collectModelBundle(source);
   assert.deepEqual(plan.missing, []); assert.deepEqual(plan.warnings, []); assert.equal(plan.files.length, 1);
+  assert.equal(plan.resources.embeddedTextures, 1); assert.equal(plan.resources.externalTextures, 0);
+  assert.equal(plan.diagnostics.sourceHash, plan.hash);
+  assert.equal(JSON.stringify(plan.resources).includes('YWJj'), false);
   await fs.appendFile(source, `
 Objects: {
   Video: 3, "Video::Normal", "Clip" { RelativeFilename: "other/normal.png" }
@@ -164,6 +170,7 @@ Connections: { C: "OO", 3, 4 }
   plan = await collectModelBundle(source);
   assert.deepEqual(plan.missing, ['other/normal.png']);
   assert.deepEqual(plan.warnings, []);
+  assert.equal(plan.resources.missingTextures, 1);
 });
 test('ASCII FBX empty Content and unassociated same-name paths are still missing', async t => {
   const root = await fixture(t), source = await write(root, 'asset.fbx', `
@@ -232,4 +239,37 @@ test('model bundle metadata rejects traversal, case collisions and inconsistent 
   assert.throws(() => validateModelBundle({ ...metadata, files: [...metadata.files, { ...metadata.files[0], path: 'OBJECT.STL' }] }));
   assert.throws(() => validateModelBundle({ ...metadata, hash: '0'.repeat(64) }));
   assert.throws(() => validateModelBundle({ ...metadata, size: metadata.size + 1 }));
+  assert.throws(() => validateModelBundle({ ...metadata, diagnostics: { ...metadata.diagnostics, sourceHash: '0'.repeat(64) } }), /检查记录/);
+  assert.throws(() => validateModelBundle({ ...metadata, resources: { ...metadata.resources, models: 100 } }), /资源数量/);
+  assert.throws(() => validateModelBundle({ ...metadata, resources: { ...metadata.resources,
+    entries: [{ kind: 'texture', storage: 'file', path: '../outside.png' }] } }), /资源条目/);
+});
+
+test('glTF and GLB inventory distinguishes embedded images from external images without retaining payloads', async t => {
+  const root = await fixture(t), data = 'data:image/png;base64,YWJj';
+  const json = { asset: { version: '2.0' }, buffers: [{ byteLength: 4 }], bufferViews: [{ buffer: 0, byteOffset: 0, byteLength: 4 }],
+    images: [{ uri: data }, { bufferView: 0, mimeType: 'image/png' }, { uri: 'color.png' }] };
+  const jsonOnly = glb(json), binaryHeader = Buffer.alloc(8); binaryHeader.writeUInt32LE(4); binaryHeader.writeUInt32LE(0x004e4942, 4);
+  const binary = Buffer.concat([jsonOnly, binaryHeader, Buffer.from([1, 2, 3, 4])]); binary.writeUInt32LE(binary.length, 8);
+  const source = await write(root, 'model.glb', binary); await write(root, 'color.png', 'external');
+  const plan = await collectModelBundle(source);
+  assert.equal(plan.resources.models, 1); assert.equal(plan.resources.embeddedTextures, 2);
+  assert.equal(plan.resources.externalTextures, 1); assert.equal(plan.resources.complete, true);
+  assert.equal(JSON.stringify(plan.resources).includes(data), false);
+  const standalone = await write(root, 'model.gltf', JSON.stringify({ asset: { version: '2.0' }, images: [{ uri: data }, { uri: 'color.png' }] }));
+  const gltfPlan = await collectModelBundle(standalone);
+  assert.equal(gltfPlan.resources.embeddedTextures, 1); assert.equal(gltfPlan.resources.externalTextures, 1);
+  await fs.writeFile(source, jsonOnly);
+  assert.equal((await collectModelBundle(source)).resources.complete, false);
+});
+
+test('two glTF images in distinct views of one external buffer remain two external textures', async t => {
+  const root = await fixture(t), source = await write(root, 'model.gltf', JSON.stringify({ asset: { version: '2.0' },
+    buffers: [{ uri: 'images.bin', byteLength: 8 }], bufferViews: [{ buffer: 0, byteOffset: 0, byteLength: 4 }, { buffer: 0, byteOffset: 4, byteLength: 4 }],
+    images: [{ bufferView: 0, mimeType: 'image/png' }, { bufferView: 1, mimeType: 'image/png' }] }));
+  await write(root, 'images.bin', Buffer.alloc(8));
+  const plan = await collectModelBundle(source);
+  assert.equal(plan.resources.externalTextures, 2); assert.equal(plan.resources.embeddedTextures, 0);
+  assert.deepEqual(plan.resources.entries.filter(entry => entry.kind === 'texture').map(entry => entry.reference), ['image[0] (bufferView 0)', 'image[1] (bufferView 1)']);
+  assert.equal((await copyModelBundle(plan, path.join(root, 'copy'))).resources.externalTextures, 2);
 });

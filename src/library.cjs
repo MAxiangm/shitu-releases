@@ -13,6 +13,7 @@ const FolderIconFiles = require('./folder-icons.cjs');
 const AssetExport = require('./asset-export.cjs');
 const { MetadataHistory, sameField } = require('./metadata-history.cjs');
 const SmartFolders = require('./smart-folders.js');
+const { recheckStoredBundle } = require('./bundle-diagnostics.cjs');
 const mediaType = (ext, stored) => PROJECT.has(ext) ? 'project' : MODEL.has(ext) ? 'model'
   : (AUDIO.has(ext) && (!VIDEO.has(ext) || stored === 'audio')) ? 'audio'
     : VIDEO.has(ext) ? 'video' : FONT.has(ext) ? 'font' : 'image';
@@ -1151,6 +1152,7 @@ class Library {
       const newBundle = project ? projectPlan?.manifest : modelPlan && {
         version: 1, entry: modelPlan.entry, files: modelPlan.files.map(({ relative, size, hash }) => ({ path: relative, size, hash })),
         size: modelPlan.size, hash: modelPlan.hash, missing: modelPlan.missing, warnings: modelPlan.warnings,
+        ...(modelPlan.resources ? { resources: modelPlan.resources } : {}), ...(modelPlan.diagnostics ? { diagnostics: modelPlan.diagnostics } : {}),
         ...(modelPlan.previewEntry ? { previewEntry: modelPlan.previewEntry } : {})
       };
       const validate = bundleRepairValidator(asset.ext);
@@ -1309,17 +1311,57 @@ class Library {
     });
   }
 
+  async _recheckBundles(ids, { expectedRoot, signal, onProgress } = {}) {
+    signal?.throwIfAborted();
+    if (expectedRoot !== undefined && expectedRoot !== this.root) throw new Error('素材库已切换，请重新检查资源');
+    if (!Array.isArray(ids) || ids.some(id => typeof id !== 'string' || !id)) throw new Error('请选择需要检查的资源包');
+    const selected = [...new Set(ids)].map(id => this.data.assets.find(asset => asset.id === id));
+    if (selected.some(asset => !asset || !isBundle(asset.ext))) throw new Error('部分资源包已不存在或不支持依赖检查');
+    const draft = clone(this.data), results = [], errors = [];
+    for (const [index, asset] of selected.entries()) {
+      signal?.throwIfAborted();
+      try { onProgress?.({ phase: 'checking', current: index + 1, total: selected.length, id: asset.id, name: asset.name }); } catch {}
+      try {
+        const manifest = assetBundle(asset), directory = path.join(this.root, bundleRelative(asset.id, asset.ext));
+        await this._checkManagedParent(bundleRelative(asset.id, asset.ext));
+        await checkBundleTree(directory, manifest.files.map(file => file.path));
+        const result = await recheckStoredBundle(directory, manifest, { project: PROJECT.has(asset.ext), signal });
+        signal?.throwIfAborted();
+        const updated = { ...manifest, ...result };
+        bundleRepairValidator(asset.ext)(updated);
+        draft.assets.find(item => item.id === asset.id)[PROJECT.has(asset.ext) ? 'projectBundle' : 'modelBundle'] = updated;
+        results.push({ id: asset.id, ...result });
+      } catch (error) {
+        signal?.throwIfAborted();
+        errors.push({ id: asset.id, name: asset.name, message: error.message });
+      }
+    }
+    signal?.throwIfAborted();
+    if (results.length) await this._persist(draft);
+    return { snapshot: this.snapshot(), checked: results.length, results, errors };
+  }
+
+  recheckBundles(ids, options = {}) {
+    return this._mutate(() => this._recheckBundles(ids, options));
+  }
+
   exportAssets(ids, destDir, options = {}) {
     return this._mutate(async () => {
       const selected = this._ids(ids);
-      return AssetExport.exportAssets(this, this.data.assets.filter(asset => selected.has(asset.id)), destDir, options);
+      const checked = await this._recheckBundles(this.data.assets.filter(asset => selected.has(asset.id) && isBundle(asset.ext)).map(asset => asset.id), options);
+      if (checked.errors.length) throw new Error(checked.errors[0].message);
+      return { ...await AssetExport.exportAssets(this, this.data.assets.filter(asset => selected.has(asset.id)), destDir, options), snapshot: this.snapshot() };
     });
   }
 
   exportFolder(folderId, destDir, options = {}) {
     return this._mutate(async () => {
       this._folder(folderId);
-      return AssetExport.exportFolder(this, folderId, destDir, options);
+      const included = folderId === null ? null : FolderTree.descendantIds(this.data.folders, folderId);
+      const ids = this.data.assets.filter(asset => !asset.trashedAt && isBundle(asset.ext) && (included === null || included.has(asset.folderId))).map(asset => asset.id);
+      const checked = await this._recheckBundles(ids, options);
+      if (checked.errors.length) throw new Error(checked.errors[0].message);
+      return { ...await AssetExport.exportFolder(this, folderId, destDir, options), snapshot: this.snapshot() };
     });
   }
 

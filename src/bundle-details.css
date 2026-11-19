@@ -1,0 +1,22 @@
+.bundle-details { margin-top:14px; padding:14px; border:1px solid var(--border); border-radius:10px; color:var(--text); background:var(--surface); text-align:left; min-width:0; }
+.bundle-details-heading { display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; }
+.bundle-details-title { margin:0; font-size:13px; font-weight:600; }
+.bundle-details-recheck,.bundle-details-more { min-height:32px; padding:6px 10px; border:1px solid var(--border-strong,var(--border)); border-radius:6px; color:var(--text); background:transparent; font:inherit; cursor:pointer; }
+.bundle-details-recheck:hover:not(:disabled),.bundle-details-more:hover:not(:disabled) { background:var(--bg); }
+.bundle-details-recheck:disabled { opacity:.55; cursor:default; }
+.bundle-details button:focus-visible,.bundle-details summary:focus-visible { outline:2px solid var(--accent); outline-offset:3px; }
+.bundle-details-summary { margin:12px 0 6px; line-height:1.7; font-size:13px; overflow-wrap:anywhere; }
+.bundle-details-status,.bundle-details-scope,.bundle-details-checked,.bundle-details-empty { margin:5px 0 0; color:var(--muted); font-size:12px; line-height:1.65; overflow-wrap:anywhere; }
+.bundle-details-missing { margin:6px 0 0; color:var(--text); font-size:12px; font-weight:600; }
+.bundle-details-inventory { margin-top:12px; border-top:1px solid var(--border); padding-top:10px; }
+.bundle-details-inventory > summary { cursor:pointer; font-size:12px; line-height:1.8; color:var(--text); }
+.bundle-details-list { list-style:none; margin:8px 0 0; padding:0; max-height:320px; overflow:auto; scrollbar-gutter:stable; }
+.bundle-details-entry { display:flex; flex-direction:column; gap:4px; padding:9px 0; border-bottom:1px solid var(--border); min-width:0; overflow-wrap:anywhere; }
+.bundle-details-entry-labels { display:flex; align-items:center; gap:8px; font-size:11px; line-height:1.5; }
+.bundle-details-kind { color:var(--text); font-weight:600; }
+.bundle-details-storage { color:var(--muted); }
+.bundle-details-storage.is-missing { color:var(--text); text-decoration:underline dotted; text-underline-offset:3px; }
+.bundle-details-path { font-size:12px; line-height:1.6; overflow-wrap:anywhere; white-space:pre-wrap; }
+.bundle-details-container { color:var(--muted); font-size:11px; line-height:1.5; overflow-wrap:anywhere; white-space:pre-wrap; }
+.bundle-details-pagination { display:flex; align-items:center; justify-content:space-between; gap:10px; margin-top:10px; flex-wrap:wrap; font-size:11px; color:var(--muted); }
+.bundle-details-more[hidden] { display:none; }

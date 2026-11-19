@@ -58,6 +58,7 @@ test('valid existing thumbnails are reused and ordinary assets need no preview w
   const service = createAssetExportService({ ...f.config, prepareModel: async () => { throw new Error('should reuse'); } });
   const result = await service.exportAssets(['model', 'image'], f.library.root);
   assert.equal(result.count, 2); assert.equal(f.calls[0].options.thumbnailPaths.get('model'), thumbnail);
+  assert.equal(f.calls[0].options.previewNotes.size, 0);
   await fs.access(thumbnail);
 });
 
@@ -70,13 +71,59 @@ test('AE preview publication completes before the serialized library export begi
   await service.exportFolder('parent', f.library.root); assert.equal(published, true); assert.equal(f.calls.length, 1);
 });
 
-test('preview failure or changed asset identity cannot silently export incomplete content', async t => {
+test('a failed preview is attempted once and export continues with a note and no thumbnail', async t => {
   const f = await fixture(t);
-  const failure = createAssetExportService({ ...f.config, prepareModel: async () => { throw new Error('没有渲染器'); } });
-  await assert.rejects(failure.exportAssets(['model'], f.library.root), /无法为「模型新名称」.*没有渲染器/);
-  assert.equal(f.calls.length, 0);
+  let attempts = 0, partial;
+  const failure = createAssetExportService({ ...f.config, prepareModel: async (_library, _asset, file) => {
+    attempts++; partial = file; await fs.writeFile(file, 'partial preview'); throw new Error('没有渲染器');
+  } });
+  const result = await failure.exportAssets(['model'], f.library.root);
+  assert.equal(result.count, 1); assert.equal(attempts, 1); assert.equal(f.calls.length, 1);
+  assert.equal(f.calls[0].options.thumbnailPaths.get('model'), null);
+  assert.match(f.calls[0].options.previewNotes.get('model'), /未附带缩略图.*没有渲染器/);
+  await assert.rejects(fs.access(partial), { code: 'ENOENT' });
+  assert.equal(failure.busy(), false);
+});
+
+test('invalid generated previews and unavailable AE engines do not prevent original exports', async t => {
+  const f = await fixture(t); let attempts = 0;
+  const invalid = createAssetExportService({ ...f.config, prepareModel: async (_library, _asset, file) => { attempts++; await fs.writeFile(file, 'not an image'); } });
+  assert.equal((await invalid.exportAssets(['model'], f.library.root)).count, 1);
+  assert.equal(attempts, 1); assert.equal(f.calls[0].options.thumbnailPaths.get('model'), null);
+  assert.match(f.calls[0].options.previewNotes.get('model'), /未能生成可用缩略图/);
+  f.data.assets[0].ext = 'aep';
+  const noAe = createAssetExportService({ ...f.config, prepareProject: async () => { throw new Error('未安装 After Effects'); } });
+  assert.equal((await noAe.exportAssets(['model'], f.library.root)).count, 1);
+  assert.equal(f.calls[1].options.thumbnailPaths.get('model'), null);
+  assert.match(f.calls[1].options.previewNotes.get('model'), /未安装 After Effects/);
+});
+
+test('changed asset identity still prevents export after preview preparation', async t => {
+  const f = await fixture(t);
   const changed = createAssetExportService({ ...f.config, prepareModel: async (_library, _asset, file) => { await f.image(file); f.data.assets[0].name = '后来改名'; } });
   await assert.rejects(changed.exportAssets(['model'], f.library.root), /已变化/); assert.equal(f.calls.length, 0);
+});
+
+test('failed copying still publishes dependency checks already saved by the library', async t => {
+  const f = await fixture(t), changes = [];
+  f.library.exportAssets = async () => { throw new Error('导出目录不可写'); };
+  const service = createAssetExportService({ ...f.config, onChanged: library => changes.push(library) });
+  await assert.rejects(service.exportAssets(['image'], f.library.root), /导出目录不可写/);
+  assert.deepEqual(changes, [f.library]); assert.equal(service.busy(), false);
+});
+
+test('cancellation, library switches and explicit preview aborts are never downgraded to preview notes', async t => {
+  for (const scenario of ['cancel', 'switch', 'abort']) {
+    const f = await fixture(t); let service;
+    service = createAssetExportService({ ...f.config, prepareModel: async () => {
+      if (scenario === 'cancel') service.cancel();
+      else if (scenario === 'switch') f.switchLibrary();
+      else throw Object.assign(new Error('preview aborted'), { name: 'AbortError', code: 'ABORT_ERR' });
+      throw new Error('preview failed after ownership changed');
+    } });
+    await assert.rejects(service.exportAssets(['model'], f.library.root), scenario === 'cancel' ? /导出已取消/ : scenario === 'switch' ? /素材库已切换/ : /preview aborted/);
+    assert.equal(f.calls.length, 0); assert.equal(service.busy(), false);
+  }
 });
 
 test('only one export may own the native dialog and a rejected duplicate does not unlock it', async t => {

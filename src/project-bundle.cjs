@@ -4,6 +4,7 @@ const { createReadStream, constants } = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { isSafeBundlePath } = require('./model-bundle.cjs');
+const { validateDiagnostics } = require('./bundle-diagnostics.cjs');
 
 const PROJECT_EXTENSIONS = new Set(['aep', 'aepx']);
 const MAX_FILES = 100000;
@@ -46,6 +47,7 @@ function validateProjectBundle(value) {
   if (value.sourceIdentity !== undefined && !/^[a-f0-9]{64}$/.test(value.sourceIdentity)) throw new Error('AE 工程源校验值无效');
   if (value.collectedWithVersion !== undefined && (typeof value.collectedWithVersion !== 'string' || value.collectedWithVersion.length > 80)) throw new Error('AE 收集版本信息无效');
   if (value.compositions !== undefined) validateCompositions(value.compositions);
+  validateDiagnostics(value, isSafeBundlePath);
   return value;
 }
 async function hashFile(filename) {

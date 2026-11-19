@@ -99,7 +99,7 @@
     const heading = document.createElement('summary');
     heading.textContent = `${health.label}（${health.count.toLocaleString()} 个）`;
     const note = document.createElement('p');
-    note.textContent = '以下引用在导入打包时未收集到。';
+    note.textContent = '以下引用在最近一次资源检查中未收集到。';
     const list = document.createElement('ul');
     const more = document.createElement('button');
     more.type = 'button';
@@ -135,7 +135,7 @@
     button.classList.toggle('hidden', !enabled && count === 0);
     button.setAttribute('aria-pressed', String(enabled));
     button.textContent = `缺失资源 ${count.toLocaleString()}`;
-    button.title = enabled ? '取消缺失资源筛选' : '只显示打包时记录了缺失引用的素材';
+    button.title = enabled ? '取消缺失资源筛选' : '只显示最近检查记录了缺失引用的素材';
   }
 
   return Object.freeze({ summary, cardBadge, details, renderFilter });

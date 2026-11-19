@@ -2,10 +2,11 @@
 module.exports = function configureFontSmoke({ root, base }) {
   const fs = require('node:fs/promises'), path = require('node:path'), crypto = require('node:crypto');
   const assert = require('node:assert/strict');
+  const sharp = require('sharp');
   const { app, dialog, session, shell } = require('electron');
   const fixture = require(path.join(base, 'font-smoke-fixture.json'));
   const failures = [], network = [];
-  let finished = false, activeWindow, nextPicker;
+  let finished = false, activeWindow, nextPicker, nextSavePath;
   app.commandLine.appendSwitch('disable-backgrounding-occluded-windows');
   app.commandLine.appendSwitch('disable-renderer-backgrounding');
   require(path.join(root, 'src', 'collector.cjs')).createCollector = () => ({ start: async () => ({}), info: () => ({ enabled: false }), activeCount: () => 0, close: async () => {} });
@@ -14,6 +15,11 @@ module.exports = function configureFontSmoke({ root, base }) {
     if (!nextPicker) throw new Error('Font smoke must not open a native picker');
     const directory = nextPicker; nextPicker = null;
     return { canceled: false, filePaths: [directory] };
+  };
+  dialog.showSaveDialog = async () => {
+    if (nextSavePath === undefined) throw new Error('Font smoke must not open an unplanned save picker');
+    const filePath = nextSavePath; nextSavePath = undefined;
+    return filePath === null ? { canceled: true } : { canceled: false, filePath };
   };
   shell.openPath = shell.openExternal = async () => { throw new Error('Font smoke must not launch external applications'); };
   app.whenReady().then(() => session.defaultSession.webRequest.onBeforeRequest({ urls: ['http://*/*', 'https://*/*'] }, (details, callback) => { network.push(details.url); callback({ cancel: true }); }));
@@ -59,6 +65,21 @@ module.exports = function configureFontSmoke({ root, base }) {
       };
       const ready = id => wait(() => js(`state.previewId===${JSON.stringify(id)}&&document.getElementById('previewFont').dataset.ready==='true'`), `Font did not load: ${id}`);
       const fingerprint = () => js(`(()=>{const c=document.createElement('canvas');c.width=900;c.height=120;const x=c.getContext('2d');x.fillStyle='white';x.fillRect(0,0,c.width,c.height);x.fillStyle='black';x.font='64px '+getComputedStyle(document.getElementById('fontPreviewSample')).fontFamily;x.fillText('Hamburgefontsiv 0123456789',8,88);let hash=0;for(const value of x.getImageData(0,0,c.width,c.height).data)hash=((hash<<5)-hash+value)|0;return hash;})()`);
+      const pngBounds = async filename => {
+        const { data: pixels, info } = await sharp(filename).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+        let left = info.width, right = -1, top = info.height, bottom = -1, count = 0;
+        for (let y = 0; y < info.height; y++) for (let x = 0; x < info.width; x++) {
+          if (pixels[(y * info.width + x) * 4 + 3] <= 16) continue;
+          left = Math.min(left, x); right = Math.max(right, x); top = Math.min(top, y); bottom = Math.max(bottom, y); count++;
+        }
+        return { width: info.width, height: info.height, left, right, top, bottom, inkWidth: right - left + 1, inkHeight: bottom - top + 1, count, cornerAlpha: pixels[3] };
+      };
+      const pngColumnInk = async (filename, divider) => {
+        const { data: pixels, info } = await sharp(filename).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+        const totals = [0, 0];
+        for (let y = 0; y < info.height; y++) for (let x = 0; x < info.width; x++) totals[x < divider ? 0 : 1] += pixels[(y * info.width + x) * 4 + 3];
+        return totals;
+      };
       try {
         assert.equal(app.getPath('userData'), path.join(base, 'profile'));
         const data = await js(`(async()=>{
@@ -100,9 +121,10 @@ module.exports = function configureFontSmoke({ root, base }) {
             await capture('font-collection-preview.png');
             window.setContentSize(1080, 700); await sleep(140);
             const narrow = await js(`(()=>{const rect=id=>{const b=document.querySelector(id).getBoundingClientRect();return{left:b.left,right:b.right,top:b.top,bottom:b.bottom,width:b.width,height:b.height};};return{width:innerWidth,height:innerHeight,scrollWidth:document.documentElement.scrollWidth,panel:rect('#previewFont'),text:rect('#fontPreviewText'),sample:rect('#fontPreviewSample'),face:rect('#fontPreviewFace'),reset:rect('#fontPreviewReset')};})()`);
-            assert.equal(narrow.width, 1080); assert.equal(narrow.height, 700); assert.ok(narrow.scrollWidth <= 1081);
+            // Frameless window border rounding can add two CSS pixels on Windows.
+            assert.ok(Math.abs(narrow.width - 1080) <= 2); assert.ok(Math.abs(narrow.height - 700) <= 2); assert.ok(narrow.scrollWidth <= narrow.width + 1);
             for (const item of [narrow.panel, narrow.text, narrow.sample, narrow.face, narrow.reset]) {
-              assert.ok(item.width > 0 && item.height > 0); assert.ok(item.left >= -1 && item.right <= 1081); assert.ok(item.top >= -1 && item.bottom <= 701);
+              assert.ok(item.width > 0 && item.height > 0); assert.ok(item.left >= -1 && item.right <= narrow.width + 1); assert.ok(item.top >= -1 && item.bottom <= narrow.height + 1);
             }
             await capture('font-collection-1080x700.png');
             window.setContentSize(1400, 900); await sleep(100);
@@ -116,8 +138,83 @@ module.exports = function configureFontSmoke({ root, base }) {
           await key('Escape'); await wait(() => js('state.previewId===null'), 'Escape failed to close font preview');
           assert.deepEqual(await js('[...document.fonts].map(face=>face.family)'), data.baselineFonts, 'Closed preview retained a loaded FontFace');
         }
+        const layoutAsset = data.assets.find(asset => asset.ext === 'ttf'); assert.ok(layoutAsset);
+        await click(`.asset-card[data-asset-id="${layoutAsset.id}"]`, 2); await ready(layoutAsset.id);
+        const widthEdit = await js(`(()=>{
+          for(const id of ['fontPreviewPaddingLeft','fontPreviewPaddingRight']){const input=document.getElementById(id);input.value='64';input.dispatchEvent(new Event('input',{bubbles:true}));input.dispatchEvent(new Event('change',{bubbles:true}));}
+          const width=document.getElementById('fontPreviewWidth');width.value='2';width.dispatchEvent(new Event('input',{bubbles:true}));width.value='2048';width.dispatchEvent(new Event('input',{bubbles:true}));width.dispatchEvent(new Event('change',{bubbles:true}));
+          return{width:fontPreviewLayout.width,left:fontPreviewLayout.paddingLeft,right:fontPreviewLayout.paddingRight};
+        })()`);
+        assert.deepEqual(widthEdit, { width: 2048, left: 64, right: 64 }, 'Typing an intermediate canvas width changed the margins');
+        const presetState = await js(`(()=>{
+          const presets=window.ShituFontLayout.PRESETS,preset=presets.find(item=>item.settings.writingMode==='vertical-rl');if(!preset)throw new Error('No vertical preset');
+          const before={...fontPreviewLayout},expected=window.ShituFontLayout.applyPreset(preset.id,before),select=document.getElementById('fontPreviewPreset');
+          select.value=preset.id;select.dispatchEvent(new Event('change',{bubbles:true}));
+          return{expected,actual:{...fontPreviewLayout},id:select.value,expectedId:preset.id,mode:document.getElementById('fontPreviewWritingMode').value,count:presets.length};
+        })()`);
+        assert.deepEqual(presetState.actual, presetState.expected, 'The preset did not apply its shared settings');
+        assert.equal(presetState.id, presetState.expectedId); assert.equal(presetState.mode, 'vertical-rl'); assert.ok(presetState.count >= 5);
+        await capture('font-vertical-preset-preview.png');
+        await js(`(()=>{
+          const values={fontPreviewText:'Mosaic\\nPreview 123',fontPreviewSize:80,fontPreviewWidth:1920,fontPreviewHeight:1080,
+            fontPreviewAlign:'center',fontPreviewVerticalAlign:'center',fontPreviewWritingMode:'horizontal-tb',fontPreviewLetterSpacing:8,fontPreviewLineHeight:1.8,
+            fontPreviewPaddingTop:70,fontPreviewPaddingRight:100,fontPreviewPaddingBottom:90,fontPreviewPaddingLeft:120,
+            fontPreviewTextColor:'#e6385f',fontPreviewBackgroundColor:'#ffffff'};
+          for(const [id,value] of Object.entries(values)){const node=document.getElementById(id);if(!node)throw new Error('Missing layout control '+id);node.value=String(value);node.dispatchEvent(new Event('input',{bubbles:true}));node.dispatchEvent(new Event('change',{bubbles:true}));}
+          const transparent=document.getElementById('fontPreviewTransparent');transparent.checked=true;transparent.dispatchEvent(new Event('change',{bubbles:true}));
+        })()`);
+        assert.equal(await js(`document.getElementById('fontPreviewPreset').value`), 'custom', 'Manual layout edits did not mark the preset as custom');
+        const layoutStyle = await js(`(()=>{const node=document.getElementById('fontPreviewSample'),style=getComputedStyle(node),box=node.getBoundingClientRect();return{text:node.textContent,align:style.textAlign,letterSpacing:style.letterSpacing,lineHeight:style.lineHeight,width:box.width,height:box.height};})()`);
+        assert.equal(layoutStyle.text, 'Mosaic\nPreview 123'); assert.equal(layoutStyle.align, 'center'); assert.equal(layoutStyle.letterSpacing, '8px'); assert.equal(layoutStyle.lineHeight, '144px');
+        assert.ok(layoutStyle.width > 0 && layoutStyle.height > 0);
+        await capture('font-layout-preview.png');
+        const layoutPng = path.join(base, 'font-layout-1920x1080.png'); nextSavePath = layoutPng;
+        await click('#fontPreviewExport');
+        await wait(async () => (await fs.stat(layoutPng).catch(() => null))?.size > 1000, 'Layout PNG was not exported');
+        await wait(() => js(`!document.getElementById('fontPreviewExport').disabled`), 'Export button remained disabled');
+        const uiPng = await pngBounds(layoutPng);
+        assert.equal(uiPng.width, 1920); assert.equal(uiPng.height, 1080); assert.equal(uiPng.cornerAlpha, 0); assert.ok(uiPng.count > 1000);
+        const pngSettings = { width: 640, height: 360, fontSize: 64, letterSpacing: 0, lineHeight: 1.4, align: 'left', verticalAlign: 'top',
+          paddingTop: 20, paddingRight: 20, paddingBottom: 20, paddingLeft: 20, textColor: '#112233', backgroundColor: '#ffffff', transparent: true };
+        const renderPng = async (name, changes = {}, text = 'Mosaic') => {
+          const filename = path.join(base, `font-layout-${name}.png`); nextSavePath = filename;
+          await js(`api.exportFontImage(${JSON.stringify(layoutAsset.id)},${JSON.stringify(data.root)},${JSON.stringify({ text, faceIndex: 0, settings: { ...pngSettings, ...changes } })})`);
+          return pngBounds(filename);
+        };
+        const leftPng = await renderPng('left'), centerPng = await renderPng('center', { align: 'center' }), rightPng = await renderPng('right', { align: 'right' });
+        assert.ok(leftPng.count > 500); assert.equal(leftPng.width, 640); assert.equal(leftPng.height, 360);
+        assert.ok(centerPng.left > leftPng.left + 100, 'Center alignment did not move exported glyphs');
+        assert.ok(rightPng.left > centerPng.left + 100, 'Right alignment did not move exported glyphs');
+        assert.ok(Math.abs((centerPng.left + centerPng.right) / 2 - 320) < 8, 'Center alignment is not centered on the canvas');
+        const bottomPng = await renderPng('bottom', { verticalAlign: 'bottom' }), middlePng = await renderPng('middle', { verticalAlign: 'center' });
+        assert.ok(middlePng.top > leftPng.top + 80 && bottomPng.top > middlePng.top + 80, 'Vertical alignment did not move exported glyphs');
+        const paddedPng = await renderPng('padding', { paddingTop: 50, paddingLeft: 60 });
+        assert.ok(Math.abs(paddedPng.left - leftPng.left - 40) <= 1 && Math.abs(paddedPng.top - leftPng.top - 30) <= 1, 'Exported margins did not match requested pixels');
+        const spacedPng = await renderPng('spacing', { letterSpacing: 12 });
+        assert.ok(spacedPng.inkWidth > leftPng.inkWidth + 40, 'Letter spacing did not widen exported text');
+        const closeLines = await renderPng('lines-close', { lineHeight: 1.2 }, 'Mosaic\nMosaic');
+        const looseLines = await renderPng('lines-loose', { lineHeight: 2 }, 'Mosaic\nMosaic');
+        assert.ok(looseLines.inkHeight > closeLines.inkHeight + 45, 'Line spacing did not increase exported line separation');
+        const verticalSettings = { writingMode: 'vertical-rl', fontSize: 48, letterSpacing: 6, lineHeight: 1.6 };
+        const verticalPng = await renderPng('vertical-single', verticalSettings, 'ABCD');
+        assert.ok(verticalPng.inkHeight > verticalPng.inkWidth * 3 && verticalPng.count > 300, 'Vertical writing did not draw upright glyphs in a column');
+        await renderPng('vertical-rl', verticalSettings, 'ABCD\nEFGH');
+        await renderPng('vertical-lr', { ...verticalSettings, writingMode: 'vertical-lr' }, 'ABCD\nEFGH');
+        const columnDivider = pngSettings.paddingLeft + (verticalSettings.fontSize + verticalSettings.fontSize * verticalSettings.lineHeight) / 2;
+        const rlInk = await pngColumnInk(path.join(base, 'font-layout-vertical-rl.png'), columnDivider);
+        const lrInk = await pngColumnInk(path.join(base, 'font-layout-vertical-lr.png'), columnDivider);
+        const relativeDifference = (a, b) => Math.abs(a - b) / Math.max(a, b, 1);
+        assert.ok(rlInk.every(value => value > 10000) && lrInk.every(value => value > 10000), 'Vertical paragraphs did not produce two visible columns');
+        assert.ok(relativeDifference(rlInk[0], lrInk[1]) < 0.02 && relativeDifference(rlInk[1], lrInk[0]) < 0.02, 'Vertical left-to-right and right-to-left did not swap paragraph columns');
+        assert.ok(relativeDifference(rlInk[0], lrInk[0]) > 0.005, 'Vertical direction produced identical column glyphs');
+        const opaquePng = await renderPng('opaque', { transparent: false }); assert.equal(opaquePng.cornerAlpha, 255);
+        nextSavePath = null;
+        const cancelledPng = await js(`api.exportFontImage(${JSON.stringify(layoutAsset.id)},${JSON.stringify(data.root)},${JSON.stringify({ text: 'Cancel', faceIndex: 0, settings: pngSettings })})`);
+        assert.equal(cancelledPng.canceled, true); assert.equal(nextSavePath, undefined);
+        await key('Escape'); await wait(() => js('state.previewId===null'), 'Layout preview did not close');
+        assert.deepEqual(await js('[...document.fonts].map(face=>face.family)'), data.baselineFonts, 'Layout export retained a FontFace in the main renderer');
         const exported = path.join(base, 'exported'); await fs.mkdir(exported); nextPicker = exported;
-        const exportResult = await js(`api.exportAssets(${JSON.stringify(data.assets.map(asset => asset.id))})`);
+        const exportResult = await js(`api.exportAssets(${JSON.stringify(data.assets.map(asset => asset.id))},${JSON.stringify(data.root)})`);
         assert.equal(exportResult.count, fixture.samples.length);
         const exportedHashes = await Promise.all((await fs.readdir(exported)).map(async name => crypto.createHash('sha256').update(await fs.readFile(path.join(exported, name))).digest('hex')));
         assert.deepEqual(exportedHashes.sort(), fixture.samples.map(sample => sample.hash).sort());
@@ -131,8 +228,10 @@ module.exports = function configureFontSmoke({ root, base }) {
         const report = { ok: true, electron: process.versions.electron, formats: previews, actualFontFaceLoaded: true, actualThumbnails: true, customTextAndSize: true,
           escapedText: true, textEditingKeepsAsset: true, nativeSpaceTypingAndResetButton: true, collectionStyleGlyphsDiffer: true, rapidFaceSwitchNotStale: true, closeRemovesFontFace: true,
           fontFilter: true, exportedOriginalHashesMatch: true, staleLibraryAndURLRejected: true, networkRequests: 0,
-          narrowPreviewControlsVisible: true,
-          screenshots: ['font-gallery.png', 'font-custom-preview.png', 'font-collection-preview.png', 'font-collection-1080x700.png'] };
+          narrowPreviewControlsVisible: true, layoutControls: true, layoutPng1920x1080: true, transparentAndOpaquePng: true,
+          exportedHorizontalAndVerticalAlignment: true, exportedMargins: true, exportedLetterAndLineSpacing: true, cancelPngExport: true,
+          verticalUprightGlyphs: true, verticalColumnDirection: true, layoutPresetAndCustom: true, intermediateWidthPreservesMargins: true,
+          screenshots: ['font-gallery.png', 'font-custom-preview.png', 'font-collection-preview.png', 'font-collection-1080x700.png', 'font-layout-preview.png', 'font-vertical-preset-preview.png'] };
         await fs.writeFile(path.join(base, 'result.json'), JSON.stringify(report, null, 2)); finished = true; window.destroy(); app.quit();
       } catch (error) { await fail(error); }
     });

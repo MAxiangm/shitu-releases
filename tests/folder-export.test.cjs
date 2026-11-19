@@ -118,15 +118,65 @@ test('Windows file names, case-insensitive collisions and duplicate extensions r
   assert.equal(safeName('A'.repeat(159) + '. end'), 'A'.repeat(159));
 });
 
-test('missing or corrupt bundle preview fails before creating any output and does not change library metadata', async t => {
-  const f = await fixture(t), parent = await f.folder('项目'), id = await f.model('模型', parent), before = f.library.snapshot();
-  await fs.unlink(f.library.getAssetPath(id, 'thumbnail'));
+test('missing and corrupt bundle previews omit only the JPG while exporting every original file', async t => {
+  const f = await fixture(t), parent = await f.folder('项目'), id = await f.model('模型', parent), project = await f.project('工程', parent);
+  const before = f.library.snapshot(), ids = [id, project];
+  for (const assetId of ids) await fs.unlink(f.library.getAssetPath(assetId, 'thumbnail'));
   const output = path.join(f.base, 'exports');
-  await assert.rejects(f.library.exportFolder(parent, output), /缩略图/);
-  await assert.rejects(fs.stat(output), { code: 'ENOENT' });
-  assert.deepEqual(f.library.snapshot(), before);
-  await fs.writeFile(f.library.getAssetPath(id, 'thumbnail'), 'not a thumbnail');
-  await assert.rejects(f.library.exportAssets([id], output), /缩略图/);
+  const verify = async result => {
+    assert.equal(result.exported, 2); assert.deepEqual(result.warnings, []); assert.equal(result.missingDependencies, 0);
+    const report = JSON.parse(await fs.readFile(result.reportPath, 'utf8'));
+    for (const item of result.items) {
+      const asset = before.assets.find(value => value.id === item.assetId), bundle = asset.modelBundle || asset.projectBundle;
+      assert.equal(item.thumbnail, undefined);
+      const actual = [];
+      async function walk(directory, prefix = '') {
+        for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
+          const relative = prefix + entry.name;
+          if (entry.isDirectory()) await walk(path.join(directory, entry.name), relative + '/'); else actual.push(relative);
+        }
+      }
+      await walk(item.path);
+      assert.deepEqual(actual.sort(), bundle.files.map(file => file.path).sort());
+      const packageReport = report.packages.find(value => value.name === asset.name);
+      assert.equal(packageReport.status, 'collected');
+      assert.ok(packageReport.notes.some(note => note.includes('未附带缩略图')));
+      for (const file of bundle.files) assert.equal(digest(await fs.readFile(path.join(item.path, file.path))), file.hash);
+    }
+    const after = f.library.snapshot();
+    for (const previous of before.assets) {
+      const current = after.assets.find(value => value.id === previous.id);
+      const oldBundle = previous.modelBundle || previous.projectBundle, newBundle = current.modelBundle || current.projectBundle;
+      assert.equal(current.hash, previous.hash); assert.equal(current.filename, previous.filename);
+      assert.deepEqual(newBundle.files, oldBundle.files); assert.deepEqual(newBundle.missing, oldBundle.missing);
+      assert.equal(newBundle.diagnostics.sourceHash, oldBundle.hash);
+    }
+  };
+  await verify(await f.library.exportFolder(parent, output));
+  for (const assetId of ids) await fs.writeFile(f.library.getAssetPath(assetId, 'thumbnail'), 'not a thumbnail');
+  await verify(await f.library.exportAssets(ids, output));
+});
+
+test('a failed preview supplied by the service is not retried and its original resource files are intact', async t => {
+  const f = await fixture(t), id = await f.model('模型');
+  const note = '未附带缩略图：未安装预览引擎；原始资源文件照常导出。';
+  const result = await f.library.exportAssets([id], path.join(f.base, 'exports'), {
+    thumbnailPaths: new Map([[id, null]]), previewNotes: new Map([[id, note]])
+  });
+  assert.equal(result.items[0].thumbnail, undefined);
+  assert.deepEqual((await fs.readdir(result.items[0].path)).sort(), ['Original.mtl', 'Original.obj']);
+  const report = JSON.parse(await fs.readFile(result.reportPath, 'utf8'));
+  assert.deepEqual(report.packages[0].notes, [note]);
+  assert.deepEqual(result.warnings, []); assert.equal(result.missingDependencies, 0);
+});
+
+test('a missing original is still fatal when the bundle preview is also missing', async t => {
+  const f = await fixture(t), id = await f.model('模型');
+  await fs.unlink(f.library.getAssetPath(id, 'thumbnail'));
+  await fs.unlink(f.library.getAssetPath(id));
+  const output = path.join(f.base, 'exports');
+  await assert.rejects(f.library.exportAssets([id], output), /ENOENT|缺失/);
+  await assert.rejects(fs.access(output), { code: 'ENOENT' });
 });
 
 test('a late source hash failure rolls back new exports while preserving pre-existing destination contents', async t => {
@@ -219,8 +269,9 @@ test('legacy AE format caveats are report notes while actual warnings and missin
   const firstReport = JSON.parse(await fs.readFile(first.reportPath, 'utf8'));
   assert.deepEqual(firstReport.packages[0].notes, [note]);
   assert.equal(firstReport.packages[0].status, 'collected');
-  asset.projectBundle.warnings.push('源工程来自较新 AE 版本');
-  asset.projectBundle.missing.push('missing.mov');
+  const refreshed = f.library.data.assets.find(item => item.id === id);
+  refreshed.projectBundle.warnings.push('源工程来自较新 AE 版本');
+  refreshed.projectBundle.missing.push('missing.mov');
   const second = await f.library.exportAssets([id], destination);
   assert.equal(second.warnings.length, 2); assert.equal(second.missingDependencies, 1);
   const secondReport = JSON.parse(await fs.readFile(second.reportPath, 'utf8'));
@@ -248,7 +299,12 @@ test('export refreshes stale FBX manifests so embedded textures stay quiet and u
   assert.doesNotMatch(result.warnings[0], /内嵌资源|paint.png/);
   const report = JSON.parse(await fs.readFile(result.reportPath, 'utf8'));
   assert.deepEqual(report.packages[0].missing, ['other/normal.png']);
-  assert.deepEqual(f.library.snapshot(), before);
+  const checked = f.library.snapshot().assets.find(item => item.id === asset.id);
+  assert.deepEqual(checked.modelBundle.missing, ['other/normal.png']);
+  assert.deepEqual(checked.modelBundle.warnings, []);
+  assert.equal(checked.hash, before.assets[0].hash);
+  assert.deepEqual(checked.modelBundle.files, before.assets[0].modelBundle.files);
+  assert.equal(result.snapshot.assets[0].modelBundle.diagnostics.sourceHash, checked.hash);
 });
 
 test('FBX export refresh allows parent-relative textures inside a bundle with a nested entry', async t => {
