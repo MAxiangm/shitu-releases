@@ -1,5 +1,5 @@
 require('./process-stdio.cjs').installProcessStdioGuards();
-const { app, BrowserWindow, protocol, ipcMain, dialog, shell, nativeImage, nativeTheme, Menu, clipboard, ClipboardItem, net } = require('electron');
+const { app, BrowserWindow, protocol, ipcMain, dialog, shell, nativeImage, nativeTheme, Menu, clipboard, ClipboardItem, net, safeStorage } = require('electron');
 const path = require('node:path');
 const os = require('node:os');
 const { mkdirSync } = require('node:fs');
@@ -10,6 +10,7 @@ const { createCollector } = require('./collector.cjs');
 const { downloadYouTube, downloadSiteVideo } = require('./youtube-download.cjs');
 const { createVideoSiteAuth } = require('./video-site-auth.cjs');
 const { createAuthenticatedVideoDownload } = require('./authenticated-video-download.cjs');
+const { createSketchfabAccount } = require('./sketchfab-account.cjs');
 const { mediaResponse } = require('./media-response.cjs');
 const FolderIconFiles = require('./folder-icons.cjs');
 const { createAssetExportService } = require('./asset-export-service.cjs');
@@ -66,6 +67,7 @@ let mayClose = false;
 let collector;
 let collectorError;
 let videoSiteAuth;
+let sketchfabAccount;
 let libraryManager;
 let switchingLibrary=false;
 let draggingAssets=false;
@@ -673,6 +675,9 @@ function bindHandlers() {
   checkedHandler('youtube-auth-state', browserYouTubeAuth);
   checkedHandler('youtube-auth-connect', browserYouTubeAuth);
   checkedHandler('youtube-auth-disconnect', browserYouTubeAuth);
+  checkedHandler('sketchfab-account-state', () => sketchfabAccount.state());
+  checkedHandler('sketchfab-account-connect', token => sketchfabAccount.setToken(token));
+  checkedHandler('sketchfab-account-disconnect', () => sketchfabAccount.disconnect());
   checkedHandler('open-extension-folder', async () => {
     const error=await shell.openPath(extensionPath); if(error)throw new Error(error);
   });
@@ -827,7 +832,7 @@ async function createWindow() {
     fontThumbnailRecovery?.controller.abort();
     audioPreviewService?.invalidate();
     similarImages?.invalidate();
-    Promise.resolve(videoTranscodeService?.shutdown()).then(() => Promise.all([transcodeSettings?.flush(), transcodePresets?.flush()])).then(() => library?.flush()).then(() => Promise.allSettled([videoSiteAuth?.shutdown(), transcodeDevices?.shutdown?.(), videoTranscoder?.shutdown(), audioEngine?.shutdown(), modelService?.shutdown(), fontExporter?.shutdown(), fontService?.shutdown(), aeProjects?.shutdown(), aePreviewService?.shutdown()])).then(() => { mayClose = true; mainWindow.close(); }).catch(error => {
+    Promise.resolve(videoTranscodeService?.shutdown()).then(() => Promise.all([transcodeSettings?.flush(), transcodePresets?.flush()])).then(() => library?.flush()).then(() => Promise.allSettled([videoSiteAuth?.shutdown(), sketchfabAccount?.shutdown(), transcodeDevices?.shutdown?.(), videoTranscoder?.shutdown(), audioEngine?.shutdown(), modelService?.shutdown(), fontExporter?.shutdown(), fontService?.shutdown(), aeProjects?.shutdown(), aePreviewService?.shutdown()])).then(() => { mayClose = true; mainWindow.close(); }).catch(error => {
       closing = false;
       dialog.showErrorBox('保存未完成', error.message);
     });
@@ -918,6 +923,7 @@ else {
     });
     videoSiteAuth = createVideoSiteAuth({ directory: path.join(app.getPath('userData'), 'video-site-auth'),
       onState: value => sendActionEvent('video-auth', value) });
+    sketchfabAccount = createSketchfabAccount({ filePath: path.join(app.getPath('userData'), 'sketchfab-account.bin'), safeStorage });
     const authenticatedVideo = createAuthenticatedVideoDownload({ auth: videoSiteAuth,
       downloadYouTube: options => downloadYouTube({ ...options, ffmpegPath: path.join(__dirname, '..', 'video-runtime', 'ffmpeg.exe') }),
       downloadSiteVideo: options => downloadSiteVideo({ ...options, ffmpegPath: path.join(__dirname, '..', 'video-runtime', 'ffmpeg.exe') }) });
@@ -930,6 +936,7 @@ else {
     youtubeBrowserSession:true,
     bilibiliBrowserSession:true,
     downloadSiteVideo:authenticatedVideo.downloadSiteVideo,
+    resolveSketchfabModel:options=>sketchfabAccount.resolveModel(options),
     probeVideo:(filename,options)=>videoEngine.probe(filename,options),
     listFolders:()=>requireLibrary().listFolders(),hasAsset:id=>requireLibrary().hasAsset(id),
     onLocate:result=>{

@@ -10,6 +10,7 @@
   const DESKTOP_RECEIPT_TIMEOUT = 320000;
   const YOUTUBE_RECEIPT_TIMEOUT = 32 * 60000;
   const SITE_FALLBACK_RECEIPT_TIMEOUT = DESKTOP_RECEIPT_TIMEOUT + YOUTUBE_RECEIPT_TIMEOUT;
+  const MODEL_RECEIPT_TIMEOUT = 18 * 60000 + 40000;
   let toastHost;
   let toastTimer;
   let toastReceipt;
@@ -333,6 +334,8 @@
   }
   function mediaAt(event) {
     const path = event.composedPath().filter(node => node instanceof Element);
+    const model = globalThis.MosaicSketchfab?.selectModel({ document, page: location.href, path, x: event.clientX, y: event.clientY });
+    if (model) return { ...model.source, sketchfabSelection: model };
     const video = videoAt(path, event);
     if (video) return video;
     const site = socialTarget(null, path);
@@ -438,8 +441,13 @@
   }
 
   async function resolveMedia(media, { browserVideo = false, onRead = () => {} } = {}) {
-    const { social, restrictedSource, ...plainMedia } = media;
+    const { social, restrictedSource, sketchfabSelection, ...plainMedia } = media;
     media = plainMedia;
+    if (media.kind === 'model') {
+      if (sketchfabSelection && !globalThis.MosaicSketchfab?.selectionCurrent(sketchfabSelection, location.href)) throw new Error('模型或页面已变化，请在当前模型上重新采集。');
+      if (!globalThis.MosaicSketchfab?.checkedSource) throw new Error('请更新采集助手后采集 Sketchfab 模型。');
+      return globalThis.MosaicSketchfab.checkedSource(media, location.href);
+    }
     if (restrictedSource) throw new Error('当前视频受访问保护，无法下载。');
     if (social) {
       if (location.href !== social.page.href || !social.video.isConnected) throw new Error('页面已切换，请在当前视频上重新采集。');
@@ -568,14 +576,15 @@
     const captureId = `${Date.now()}-${++captureSerial}`;
     activeCaptureId = captureId;
     let submitted = false;
-    showCapture(captureId, media.kind === 'video' ? '正在识别视频来源…' : '浏览器正在读取素材…');
+    showCapture(captureId, media.kind === 'model' ? '正在识别模型来源…' : media.kind === 'video' ? '正在识别视频来源…' : '浏览器正在读取素材…');
     try {
       const prepared = await deadline(() => resolveMedia(media, { onRead: browserProgress(captureId) }),
         BROWSER_READ_TIMEOUT + 2000, '浏览器准备素材超时，请刷新网页后重试。');
       showCapture(captureId, '正在连接桌面 Mosaic…');
       submitted = true;
       const response = await deadline(() => chrome.runtime.sendMessage({ type: 'shitu:capture', media: prepared, clientCaptureId: captureId }),
-        prepared.sourceType === 'youtube' && prepared.youtubeSelectionId ? YOUTUBE_RECEIPT_TIMEOUT * 2 :
+        prepared.sourceType === 'sketchfab' ? MODEL_RECEIPT_TIMEOUT :
+          prepared.sourceType === 'youtube' && prepared.youtubeSelectionId ? YOUTUBE_RECEIPT_TIMEOUT * 2 :
           ['youtube', 'site-video'].includes(prepared.sourceType) ? YOUTUBE_RECEIPT_TIMEOUT :
           prepared.pageFallback ? SITE_FALLBACK_RECEIPT_TIMEOUT : DESKTOP_RECEIPT_TIMEOUT,
         '未收到保存确认，请在采集助手或 Mosaic 的「最近导入」核对结果。');
@@ -634,7 +643,7 @@
     dismissVideoMenu();
     if (event.button !== 2 || !event.altKey) return;
     const media = mediaAt(event);
-    const handled = media?.kind === 'video' && siteVideoMenuPage();
+    const handled = media?.kind === 'model' || media?.kind === 'video' && siteVideoMenuPage();
     recentGesture = { at: performance.now(), media, handled, x: event.clientX, y: event.clientY };
     if (handled) {
       // Own the shortcut before the site can open its menu from the mouse event.
@@ -666,7 +675,7 @@
       return;
     }
     const pressedMedia = recent ? recentGesture.media : null;
-    const media = pressedMedia?.kind === 'video' ? pressedMedia : mediaAt(event) || pressedMedia;
+    const media = ['video', 'model'].includes(pressedMedia?.kind) ? pressedMedia : mediaAt(event) || pressedMedia;
     recentGesture = null;
     if (!media) return;
     takeGesture(event);

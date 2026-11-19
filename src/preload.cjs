@@ -140,6 +140,9 @@ contextBridge.exposeInMainWorld('shitu', Object.freeze({
   getYouTubeAuthState: () => call('youtube-auth-state'),
   connectYouTube: () => call('youtube-auth-connect'),
   disconnectYouTube: () => call('youtube-auth-disconnect'),
+  getSketchfabAccountState: () => call('sketchfab-account-state'),
+  connectSketchfabAccount: token => call('sketchfab-account-connect', token),
+  disconnectSketchfabAccount: () => call('sketchfab-account-disconnect'),
   onWebCapture: callback => {
     const listener = (_event, result) => callback(result);
     ipcRenderer.on('shitu:web-capture', listener);

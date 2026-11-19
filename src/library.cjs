@@ -394,18 +394,39 @@ class Library {
     };
   }
 
-  importPaths(paths, { folderId = null, onProgress, metadata = {} } = {}) {
+  importPaths(paths, options = {}) {
+    return this._importPaths(paths, options);
+  }
+
+  importModelPackage({ root, entryPath, files, metadata = {}, folderId = null, onProgress } = {}) {
+    if (typeof root !== 'string' || !path.isAbsolute(root) || typeof entryPath !== 'string' || !path.isAbsolute(entryPath) ||
+        !Array.isArray(files) || !files.length || files.length > 4096) throw new Error('模型下载包参数无效');
+    root = path.resolve(root); entryPath = path.resolve(entryPath);
+    const relative = path.relative(root, entryPath).split(path.sep).join('/');
+    const names = new Set();
+    for (const file of files) {
+      if (!isSafeBundlePath(file) || names.has(file.toLowerCase())) throw new Error('模型下载包文件路径无效');
+      names.add(file.toLowerCase());
+    }
+    if (!isSafeBundlePath(relative) || !names.has(relative.toLowerCase()) || !MODEL.has(path.extname(entryPath).slice(1).toLowerCase())) {
+      throw new Error('模型入口不在下载包清单内');
+    }
+    return this._importPaths([entryPath], { folderId, onProgress, metadata }, { root, files: [...files] });
+  }
+
+  _importPaths(paths, { folderId = null, onProgress, metadata = {} } = {}, modelPackage) {
     return this._mutate(async () => {
       if (!Array.isArray(paths)) throw new Error('导入路径必须是数组');
       const sourceMetadata = importMetadata(metadata);
       this._folder(folderId);
       const report = { imported: 0, duplicates: 0, unsupported: [], errors: [], assetIds: [], warnings: [] };
+      if (modelPackage) report.existingAssets = [];
       const projectPreparations = [];
       try {
       let candidates = [];
       const seen = new Set();
       const explicitFiles = new Set(paths.map(entry => importPathKey(String(entry))));
-      const allowedRoots = [];
+      const allowedRoots = modelPackage ? [modelPackage.root] : [];
       const walk = async (entry, explicit = false) => {
         const absolute = path.resolve(String(entry));
         if (seen.has(absolute)) return;
@@ -449,7 +470,9 @@ class Library {
         if (projectDependencies.has(importPathKey(candidate.absolute)) && !explicitFiles.has(importPathKey(candidate.absolute))) continue;
         if (!MODEL.has(path.extname(candidate.absolute).slice(1).toLowerCase())) continue;
         try {
-          const plan = await collectModelBundle(candidate.absolute, { allowedRoots });
+          const plan = await collectModelBundle(candidate.absolute, { allowedRoots,
+            ...(modelPackage ? { packageRoot: modelPackage.root, packageFiles: modelPackage.files } : {}) });
+          if (modelPackage && plan.missing.length) throw new Error('模型下载包缺少入口引用的资源文件');
           for (const file of plan.files) {
             if (isWithin(this.root, file.source)) throw new Error('不能导入素材库自身的模型依赖');
             if (importPathKey(file.source) !== importPathKey(candidate.absolute)) dependencies.add(importPathKey(file.source));
@@ -517,6 +540,8 @@ class Library {
             modelPlan = plans.get(absolute);
             if (hashes.has(modelPlan.hash)) {
               report.duplicates++;
+              if (modelPackage) report.existingAssets.push(...draft.assets.filter(asset => asset.hash === modelPlan.hash)
+                .map(asset => ({ id: asset.id, name: asset.name, trashedAt: asset.trashedAt || null, folderId: asset.folderId || null })));
             } else {
               const id = crypto.randomUUID();
               const relativeDirectory = bundleRelative(id);
@@ -529,6 +554,8 @@ class Library {
                 await removeBundleFiles(copied, modelPlan.files.map(file => file.relative));
                 copied = null;
                 report.duplicates++;
+                if (modelPackage) report.existingAssets.push(...draft.assets.filter(asset => asset.hash === modelBundle.hash)
+                  .map(asset => ({ id: asset.id, name: asset.name, trashedAt: asset.trashedAt || null, folderId: asset.folderId || null })));
               } else {
                 const filename = `${relativeDirectory}/${modelBundle.entry}`;
                 let dimensions = {}, thumbnail = null;

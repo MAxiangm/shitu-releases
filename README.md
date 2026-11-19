@@ -2,6 +2,12 @@
 
 Mosaic（原拾图）是 Windows 上的本地数字资产库。支持图片、音乐、视频、字体、3D 模型与 AE 工程的导入、整理和预览，以及备份、Chrome 网页采集和本地图片处理。
 
+## Sketchfab 模型采集
+
+从 Mosaic **0.29.25**、采集助手 **0.11.28** 开始，可在 Sketchfab 模型画布、嵌入查看器或模型卡片上按 **Alt＋右键**，将官方可下载模型导入当前素材库。先在「浏览器采集」设置中，用 [Sketchfab 账户设置](https://sketchfab.com/settings/password)中的个人 API Token 连接一次；该凭据仅在本机用系统加密保存，可随时断开。
+
+下载使用官方 API 返回的临时 glTF ZIP，模型、贴图、二进制、许可证和作者署名保留为一个完整资源包，支持预览、导出和重复定位。压缩包上限 512 MB，展开上限 1 GB；未开放官方下载或当前账号无权访问时会明确提示原因。临时下载链接不会写入素材信息。
+
 ## 音乐资产
 
 音乐可通过「导入素材」、导入文件夹或拖放文件加入素材库。支持 MP3、MP2、WAV/WAVE、FLAC、M4A/M4B、AAC、OGG/OGA、Opus、AIFF/AIF/AIFC、APE、WMA、ALAC、AMR、AC3/EAC3、DTS、MKA、AU/SND、WV、TTA、DSF/DFF、CAF 和 W64。

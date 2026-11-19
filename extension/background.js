@@ -1,12 +1,12 @@
 'use strict';
 
-if (typeof importScripts === 'function') importScripts('video-page-source.js', 'youtube-browser-source.js');
+if (typeof importScripts === 'function') importScripts('video-page-source.js', 'youtube-browser-source.js', 'sketchfab-source.js');
 
 const CONFIG_KEY = 'shituConnection';
 const LAST_KEY = 'shituLastCapture';
 const DESTINATIONS_KEY = 'shituCaptureDestinations';
 // A running worker can read an updated manifest without having loaded new code.
-const WORKER_VERSION = '0.11.27';
+const WORKER_VERSION = '0.11.28';
 const BROWSER_SESSION_SITES = {
   youtube: { label: 'YouTube', domain: 'youtube.com', capability: 'youtubeBrowserSession', field: 'youtubeSession' },
   bilibili: { label: 'Bilibili', domain: 'bilibili.com', capability: 'bilibiliBrowserSession', field: 'bilibiliSession' }
@@ -16,6 +16,7 @@ const MAX_SESSION_BYTES = 512 * 1024;
 const CAPTURE_TIMEOUT = 280000;
 const YOUTUBE_CAPTURE_TIMEOUT = 920000;
 const PAGE_VIDEO_CAPTURE_TIMEOUT = 31 * 60000;
+const MODEL_CAPTURE_TIMEOUT = 18 * 60000;
 const PAGE_READ_TIMEOUT = 22000;
 const PROGRESS_INTERVAL = 1000;
 const MAX_DATA_LENGTH = 28 * 1024 * 1024;
@@ -138,6 +139,7 @@ function appStatus(result) {
     ...(result.youtubeDownload === true ? { youtubeDownload: true } : {}),
     ...(result.youtubeBrowserSession === true ? { youtubeBrowserSession: true } : {}),
     ...(result.bilibiliBrowserSession === true ? { bilibiliBrowserSession: true } : {}),
+    ...(result.sketchfabDownload === true ? { sketchfabDownload: true } : {}),
     ...(result.youtubeBrowserRead === true ? { youtubeBrowserRead: true } : {}),
     ...(result.siteVideoDownload === true ? { siteVideoDownload: true } : {}),
     ...(result.vimeoBrowserRead === true ? { vimeoBrowserRead: true } : {}) };
@@ -343,6 +345,10 @@ function checkedSitePage(input, senderUrl) {
 }
 
 function checkedMedia(input, senderUrl) {
+  if (input?.kind === 'model' || input?.sourceType === 'sketchfab') {
+    if (!globalThis.MosaicSketchfab?.checkedSource) throw issue('请更新采集助手后采集 Sketchfab 模型。', 'INCOMPATIBLE_APP');
+    return globalThis.MosaicSketchfab.checkedSource(input, senderUrl);
+  }
   if (!input || typeof input !== 'object' || !['image', 'video'].includes(input.kind)) throw new Error('不是可采集的图片或视频。');
   if (['youtubeSession', 'bilibiliSession'].some(key => Object.hasOwn(input, key))) throw issue('网页不能提供视频网站登录数据。', 'VIDEO_BROWSER_SESSION_INVALID');
   if (typeof input.url !== 'string' || input.url.length > 8192) throw new Error('素材地址过长或无效。');
@@ -558,7 +564,7 @@ function startVimeoBrowserRead(requestId, config, sender, sourceType, streams) {
 }
 
 function captureProgress(value) {
-  if (!['connecting', 'reading', 'receiving', 'downloading', 'muxing', 'verifying', 'importing', 'complete'].includes(value?.phase)) return null;
+  if (!['connecting', 'reading', 'receiving', 'downloading', 'extracting', 'muxing', 'verifying', 'importing', 'complete'].includes(value?.phase)) return null;
   const receivedBytes = Number.isSafeInteger(value.receivedBytes) && value.receivedBytes >= 0 ? value.receivedBytes : 0;
   const knownTotal = Number.isSafeInteger(value.totalBytes) && value.totalBytes > 0 && value.totalBytes >= receivedBytes;
   return { phase: value.phase, receivedBytes, ...(knownTotal ? { totalBytes: value.totalBytes } : {}) };
@@ -570,10 +576,16 @@ function displayBytes(bytes) {
   return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
 }
 
-function progressMessage(progress) {
+function progressMessage(progress, kind) {
+  if (kind === 'model') {
+    if (progress.phase === 'connecting') return '正在连接模型下载服务…';
+    if (progress.phase === 'reading') return '正在解析模型下载信息…';
+    if (progress.phase === 'verifying') return '正在核对模型和贴图依赖…';
+  }
   if (progress.phase === 'connecting') return '正在连接下载服务；如弹出登录窗口，请完成登录或验证…';
   if (progress.phase === 'reading') return '正在解析视频下载地址…';
   if (progress.phase === 'receiving') return '桌面正在接收素材…';
+  if (progress.phase === 'extracting') return '正在安全解压模型文件…';
   if (progress.phase === 'muxing') return '正在合并音视频（不重新编码）…';
   if (progress.phase === 'verifying') return '正在检查视频画面、声音和时长…';
   if (progress.phase === 'importing') return '正在写入素材库，等待保存确认…';
@@ -586,7 +598,7 @@ function progressMessage(progress) {
   return progress.receivedBytes ? `正在下载素材 · 已接收 ${received}` : '正在下载素材…';
 }
 
-function watchProgress(requestId, config, publish) {
+function watchProgress(requestId, config, publish, kind) {
   let stopped = false, timer, previous;
   async function poll() {
     try {
@@ -596,7 +608,7 @@ function watchProgress(requestId, config, publish) {
       const key = progress && JSON.stringify(progress);
       if (key && key !== previous) {
         previous = key;
-        await publish(progress.phase, progressMessage(progress), progress);
+        await publish(progress.phase, progressMessage(progress, kind), progress);
       }
     } catch (error) {
       if (['SERVER_ERROR', 'UNAUTHORIZED'].includes(error.code)) stopped = true;
@@ -628,7 +640,7 @@ async function capture(input, sender, clientCaptureId) {
   try {
     body = checkedMedia(input, sender?.url);
     if (body.sourceType === 'youtube-browser') throw new Error('请在所选 YouTube 视频上重新采集。');
-    if (!body.playback && !body.pageFallback && !['youtube', 'site-video'].includes(body.sourceType)) {
+    if (!body.playback && !body.pageFallback && !['youtube', 'site-video', 'sketchfab'].includes(body.sourceType)) {
       if (/^https?:/i.test(sender?.url || '')) body.pageUrl = (body.kind === 'video' && acceptedSocialPage(input.socialPageUrl, sender.url)) || sender.url;
       else if (!/^https?:/i.test(body.pageUrl || '') && /^https?:/i.test(sender?.tab?.url || '')) body.pageUrl = sender.tab.url;
     }
@@ -663,6 +675,7 @@ async function capture(input, sender, clientCaptureId) {
     async function submit(media) {
       const { youtubeSelectionId, ...transfer } = media;
       async function attempt() {
+        if (media.sourceType === 'sketchfab' && !connection.status.sketchfabDownload) throw issue('请更新桌面 Mosaic 后采集 Sketchfab 模型。', 'INCOMPATIBLE_APP');
         if (media.sourceType === 'youtube-browser' && !connection.status.youtubeBrowserRead) throw issue('请更新桌面 Mosaic 以读取 YouTube 浏览器播放文件。', 'INCOMPATIBLE_APP');
         if (media.playback && !connection.status.vimeoPlayback) throw issue('请将桌面 Mosaic 更新到支持 Vimeo 播放采集的版本。', 'INCOMPATIBLE_APP');
         if (media.sourceType === 'youtube' && !connection.status.youtubeDownload) throw issue('请将桌面 Mosaic 更新到支持 YouTube 下载的版本。', 'INCOMPATIBLE_APP');
@@ -677,12 +690,13 @@ async function capture(input, sender, clientCaptureId) {
         }
         await publish(media.dataBase64 ? 'receiving' : 'downloading',
           media.dataBase64 ? '正在把素材交给桌面…' : '正在下载素材…');
-        const stop = connection.status.captureProgress ? watchProgress(requestId, connection.config, publish) : null;
+        const stop = connection.status.captureProgress ? watchProgress(requestId, connection.config, publish, media.kind) : null;
         const browserRead = media.browserRead || media.sourceType === 'youtube-browser'
           ? startVimeoBrowserRead(requestId, connection.config, sender, media.sourceType, media.streams) : null;
         try {
           const response = localRequest('/v1/capture', payload, connection.config,
-            ['youtube', 'site-video'].includes(media.sourceType) ? PAGE_VIDEO_CAPTURE_TIMEOUT :
+            media.sourceType === 'sketchfab' ? MODEL_CAPTURE_TIMEOUT :
+              ['youtube', 'site-video'].includes(media.sourceType) ? PAGE_VIDEO_CAPTURE_TIMEOUT :
               media.sourceType === 'youtube-browser' ? YOUTUBE_CAPTURE_TIMEOUT : CAPTURE_TIMEOUT);
           return await (browserRead ? Promise.race([response, browserRead.failure]) : response);
         } finally { delete payload.youtubeSession; delete payload.bilibiliSession; browserRead?.stop(); stop?.(); }

@@ -49,7 +49,7 @@ async function worker({ fetchImpl, initial = {}, port = 38475, storageWriteFailu
 
 async function content({ fetchImpl, mediaUrl = sourceUrl, pageUrl = 'https://frame.example/item', kind = 'image',
   posterOverlay = false, pointerlessVideo = false, unrelatedBackground = false, protectedVideo = false, siteResolvers = {},
-  hangFileReader = false, deepVideoOverlay = false, dialogOverlay = false, dialogOutsideVideo = false, fullscreen = false,
+  hangFileReader = false, deepVideoOverlay = false, dialogOverlay = false, dialogOutsideVideo = false, fullscreen = false, linkHref,
   reply = { ok: true, imported: 1, duplicates: 0, assetIds: ['new-asset'] } } = {}) {
   const nodes = [], events = new Map(), messages = [], fetches = [], timers = new Map();
   let nextTimer = 0;
@@ -81,10 +81,11 @@ async function content({ fetchImpl, mediaUrl = sourceUrl, pageUrl = 'https://fra
   }
   const documentElement = new Element('html'); documentElement.isConnected = true;
   const body = new Element('body');
-  const wrapper = new Element('div');
+  const wrapper = new Element(linkHref ? 'a' : 'div');
+  if (linkHref) wrapper.setAttribute('href', linkHref);
   documentElement.append(body);
   body.append(wrapper);
-  const media = new Element(kind === 'video' ? 'video' : 'img');
+  const media = new Element(kind === 'model' ? 'canvas' : kind === 'video' ? 'video' : 'img');
   media.currentSrc = mediaUrl;
   media.setAttribute(kind === 'video' ? 'title' : 'alt', 'Selected fixture');
   if (protectedVideo) media.mediaKeys = {};
@@ -155,6 +156,7 @@ async function content({ fetchImpl, mediaUrl = sourceUrl, pageUrl = 'https://fra
   }
   const contextMenu = options => gesture('contextmenu', options);
   return { nodes, messages, fetches, timers, contextMenu, pointerDown: options => gesture('pointerdown', options),
+    navigate(value) { context.location.href = value; },
     click: options => gesture('click', { button: 0, ...options }),
     fullscreenRoot: wrapper, documentElement,
     exitFullscreen() { document.fullscreenElement = null; gesture('fullscreenchange'); },
@@ -189,6 +191,56 @@ async function until(read, message, timeout = 1300) {
   }
   throw new Error(message);
 }
+
+test('Sketchfab canvas and embed Alt+right own one gesture and send a model identity without image bytes', async t => {
+  const id = '0123456789abcdef0123456789abcdef';
+  const canonical = `https://sketchfab.com/3d-models/${id}`;
+  for (const pageUrl of [canonical, `https://sketchfab.com/models/${id}/embed`]) await t.test(pageUrl, async () => {
+    const instance = await content({ kind: 'model', pageUrl, siteResolvers: { MosaicSketchfab: require('../extension/sketchfab-source.js') } });
+    assert.deepEqual(instance.pointerDown({ isTrusted: false }), { prevented: false, stopped: false });
+    assert.equal(instance.readToast(), null);
+    assert.deepEqual(instance.pointerDown(), { prevented: true, stopped: true });
+    assert.deepEqual(instance.contextMenu({ altKey: false }), { prevented: true, stopped: true });
+    await until(() => instance.readToast()?.status === 'success', 'Model gesture did not finish');
+    const captures = instance.messages.filter(value => value.type === 'shitu:capture');
+    assert.equal(captures.length, 1);
+    assert.equal(captures[0].media.kind, 'model');
+    assert.equal(captures[0].media.modelId, id);
+    assert.equal(captures[0].media.url, canonical);
+    assert.equal(captures[0].media.pageUrl, canonical);
+    assert.equal(Object.hasOwn(captures[0].media, 'dataBase64'), false);
+    assert.equal(Object.hasOwn(captures[0].media, 'sketchfabSelection'), false);
+    assert.deepEqual(instance.fetches, []);
+  });
+});
+
+test('a Sketchfab model card beats its thumbnail while an unrelated image keeps normal capture', async () => {
+  const pageUrl = 'https://sketchfab.com/search?type=models';
+  const id = '0123456789abcdef0123456789abcdef';
+  const adapter = { MosaicSketchfab: require('../extension/sketchfab-source.js') };
+  const card = await content({ pageUrl, linkHref: `https://sketchfab.com/3d-models/card-${id}`, siteResolvers: adapter });
+  assert.equal((await card.capture()).status, 'success');
+  assert.equal(card.messages.find(value => value.type === 'shitu:capture').media.kind, 'model');
+  assert.deepEqual(card.fetches, []);
+  const image = await content({ pageUrl: `https://sketchfab.com/3d-models/${id}`, siteResolvers: adapter });
+  assert.equal((await image.capture()).status, 'success');
+  assert.equal(image.messages.find(value => value.type === 'shitu:capture').media.kind, 'image');
+});
+
+test('Sketchfab selection rejects a page change before preparation and has a model-sized receipt deadline', async () => {
+  const pageUrl = 'https://sketchfab.com/3d-models/0123456789abcdef0123456789abcdef';
+  const adapter = { MosaicSketchfab: require('../extension/sketchfab-source.js') };
+  const changed = await content({ kind: 'model', pageUrl, siteResolvers: adapter });
+  changed.pointerDown(); changed.navigate('https://sketchfab.com/search');
+  await until(() => changed.readToast()?.status === 'error', 'Changed selection was not rejected');
+  assert.equal(changed.messages.some(value => value.type === 'shitu:capture'), false);
+  const waiting = await content({ kind: 'model', pageUrl, siteResolvers: adapter, reply: () => new Promise(() => {}) });
+  const saving = waiting.capture();
+  const deadline = await until(() => [...waiting.timers.values()].find(value => value.delay === 18 * 60000 + 40000), 'Model receipt timeout missing');
+  deadline.callback();
+  assert.match((await saving).message, /未收到保存确认/);
+  assert.deepEqual(waiting.fetches, []);
+});
 
 test('hanging browser FileReader times out and replaces the reading banner', async () => {
   const instance = await content({ mediaUrl: 'blob:https://frame.example/local', hangFileReader: true });

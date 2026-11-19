@@ -17,6 +17,7 @@ const { videoPageSource } = require('./video-page-source.cjs');
 const { videoExpectations, checkCapturedVideo } = require('./captured-video-check.cjs');
 const { youtubeMediaUrl, youtubeBrowserSource, stageYouTubeBrowser } = require('./youtube-browser-source.cjs');
 const { youtubeRecordingUrl, youtubeRecordingSource, stageYouTubeRecording } = require('./youtube-recording-source.cjs');
+const { stageSketchfabModel, checkedSketchfabPage } = require('./sketchfab-download.cjs');
 
 const DEFAULT_ORIGIN = 'chrome-extension://mdleapcbplpefdgchdklofdnpjgokdhh';
 const INLINE_LIMIT = 20 * 1024 * 1024;
@@ -82,7 +83,8 @@ function createCollector({ library, configPath, onImported = () => {}, onLocate,
   getLibraryRoot = () => library.root, listFolders = () => library.listFolders(), hasAsset = id => library.hasAsset(id),
   isReady=()=>true, allowedOrigin = DEFAULT_ORIGIN, port = 38475, allowPrivate = false, maxDownloadBytes = 512 * 1024 * 1024, timeout = 90000,
   appVersion = require('../package.json').version, muxVimeoPlayback, playbackTimeout = 240000,
-  downloadYouTube, downloadSiteVideo, youtubeBrowserSession = false, bilibiliBrowserSession = false, youtubeTimeout = 1800000, probeVideo, youtubeFfmpegPath } = {}) {
+  downloadYouTube, downloadSiteVideo, youtubeBrowserSession = false, bilibiliBrowserSession = false, youtubeTimeout = 1800000, probeVideo, youtubeFfmpegPath,
+  resolveSketchfabModel, sketchfabTimeout = 18 * 60 * 1000 } = {}) {
   let server, token, listeningPort, active = 0, disabledError, lastCapture;
   const sockets = new Set();
   const captures = new Map();
@@ -114,6 +116,7 @@ function createCollector({ library, configPath, onImported = () => {}, onLocate,
       ...(typeof downloadYouTube === 'function' ? { youtubeDownload: true } : {}),
       ...(typeof downloadYouTube === 'function' && youtubeBrowserSession ? { youtubeBrowserSession: true } : {}),
       ...(typeof downloadSiteVideo === 'function' && bilibiliBrowserSession ? { bilibiliBrowserSession: true } : {}),
+      ...(typeof resolveSketchfabModel === 'function' && typeof library.importModelPackage === 'function' ? { sketchfabDownload: true } : {}),
       ...(typeof downloadSiteVideo === 'function' ? { siteVideoDownload: true } : {}), ...(id ? { libraryId: id } : {}) };
   }
   function currentDestination(destination, id) {
@@ -127,12 +130,13 @@ function createCollector({ library, configPath, onImported = () => {}, onLocate,
     }
     return folderId;
   }
-  async function openMedia(url, { pageUrl, signal, vimeo = false, range } = {}, redirects = 0) {
+  async function openMedia(url, { pageUrl, signal, vimeo = false, range, validateUrl } = {}, redirects = 0) {
     if (redirects > 5) throw new Error('下载重定向次数过多');
     if (vimeo) url = vimeoPlaybackUrl(url.href);
+    if (validateUrl) url = new URL(validateUrl(url.href));
     const hostname = url.hostname.replace(/^\[|\]$/g, '');
     const addresses = net.isIP(hostname) ? [{address:hostname,family:net.isIP(hostname)}] : await dns.lookup(hostname, {all:true});
-    if (!addresses.length || ((vimeo || !allowPrivate) && addresses.some(a => !publicAddress(a.address)))) throw new Error('不支持从本机或内网地址采集');
+    if (!addresses.length || ((vimeo || validateUrl || !allowPrivate) && addresses.some(a => !publicAddress(a.address)))) throw new Error('不支持从本机或内网地址采集');
     signal.throwIfAborted();
     const response = await new Promise((resolve,reject) => {
       const request = (url.protocol === 'https:' ? https : http).get(url, {
@@ -147,7 +151,7 @@ function createCollector({ library, configPath, onImported = () => {}, onLocate,
     if ([301,302,303,307,308].includes(response.statusCode)) {
       response.resume();
       if (!response.headers.location) throw new Error('下载重定向地址缺失');
-      return openMedia(webUrl(new URL(response.headers.location,url).href), { pageUrl, signal, vimeo, range }, redirects+1);
+      return openMedia(webUrl(new URL(response.headers.location,url).href), { pageUrl, signal, vimeo, range, validateUrl }, redirects+1);
     }
     return { response, url };
   }
@@ -221,10 +225,101 @@ function createCollector({ library, configPath, onImported = () => {}, onLocate,
     if (!bytes || (range && bytes !== range.end - range.start + 1)) throw new Error('Vimeo 播放分段不完整，未保存视频');
     return destination ? undefined : { body: Buffer.concat(chunks, bytes), url };
   }
+  async function captureSketchfab(body, job, cancellationSignal) {
+    const permitted = new Set(['kind', 'sourceType', 'modelId', 'url', 'pageUrl', 'name', 'title', 'requestId', 'destination']);
+    if (body.kind !== 'model' || body.sourceType !== 'sketchfab' || Object.keys(body).some(key => !permitted.has(key))) {
+      throw captureError('SKETCHFAB_SOURCE_INVALID', 'Sketchfab 模型采集请求无效。');
+    }
+    if (typeof resolveSketchfabModel !== 'function' || typeof library.importModelPackage !== 'function') {
+      throw captureError('SKETCHFAB_UNAVAILABLE', '请更新桌面 Mosaic 后采集 Sketchfab 模型。');
+    }
+    const pageUrl = checkedSketchfabPage(body.modelId, body.url);
+    if (body.url !== pageUrl || body.pageUrl !== pageUrl) {
+      throw captureError('SKETCHFAB_SOURCE_INVALID', 'Sketchfab 模型与所选页面不一致。');
+    }
+    const currentId = libraryId(getLibraryRoot());
+    const folderId = currentDestination(body.destination, currentId);
+    const deadline = AbortSignal.timeout(sketchfabTimeout);
+    const signal = cancellationSignal ? AbortSignal.any([deadline, cancellationSignal]) : deadline;
+    let temporary;
+    try {
+      progress(job, 'reading');
+      const resolved = await resolveSketchfabModel({ modelId: body.modelId, signal });
+      signal.throwIfAborted();
+      temporary = await fs.mkdtemp(path.join(os.tmpdir(), 'mosaic-sketchfab-'));
+      const staged = await stageSketchfabModel({
+        modelId: body.modelId, pageUrl, archiveUrl: resolved?.archiveUrl, attribution: resolved?.attribution,
+        directory: temporary, signal, limits: { compressedBytes: maxDownloadBytes },
+        onProgress: event => {
+          const phase = ['downloading', 'extracting', 'verifying'].includes(event?.phase) ? event.phase : 'downloading';
+          const extra = {};
+          if (Number.isSafeInteger(event?.receivedBytes) && event.receivedBytes >= 0) extra.receivedBytes = event.receivedBytes;
+          if (Number.isSafeInteger(event?.totalBytes) && event.totalBytes > 0) extra.totalBytes = event.totalBytes;
+          progress(job, phase, extra);
+        },
+        downloadArchive: async ({ url, destination, signal: downloadSignal, maxBytes, onProgress, validateUrl }) => {
+          const { response } = await openMedia(new URL(url), { pageUrl, signal: downloadSignal, validateUrl });
+          if (response.statusCode !== 200) {
+            response.resume();
+            throw captureError('SKETCHFAB_DOWNLOAD_FAILED', `Sketchfab 下载返回 HTTP ${response.statusCode}，请重新采集。`);
+          }
+          const type = String(response.headers['content-type'] || '');
+          if (/text\/html|application\/json/i.test(type)) {
+            response.resume();
+            throw captureError('SKETCHFAB_DOWNLOAD_FAILED', 'Sketchfab 未返回模型压缩包，请检查连接后重试。');
+          }
+          const declared = Number(response.headers['content-length']);
+          if (declared > maxBytes) {
+            response.destroy();
+            throw captureError('SKETCHFAB_DOWNLOAD_FAILED', '模型压缩包超过 512 MB 下载上限。');
+          }
+          const totalBytes = Number.isSafeInteger(declared) && declared > 0 ? declared : undefined;
+          let receivedBytes = 0;
+          const limiter = new Transform({ transform(chunk, _encoding, callback) {
+            receivedBytes += chunk.length;
+            if (receivedBytes > maxBytes) return callback(captureError('SKETCHFAB_DOWNLOAD_FAILED', '模型压缩包超过下载上限。'));
+            onProgress({ phase: 'downloading', receivedBytes, ...(totalBytes ? { totalBytes } : {}) });
+            callback(null, chunk);
+          } });
+          await pipeline(response, limiter, createWriteStream(destination, { flags: 'wx' }), { signal: downloadSignal });
+          if (!receivedBytes || totalBytes !== undefined && receivedBytes !== totalBytes) {
+            throw captureError('SKETCHFAB_DOWNLOAD_FAILED', '模型压缩包下载不完整，请重试。');
+          }
+          return { bytes: receivedBytes };
+        }
+      });
+      if (resolved && typeof resolved === 'object') delete resolved.archiveUrl;
+      if (body.destination !== undefined) currentDestination(body.destination, libraryId(getLibraryRoot()));
+      signal.throwIfAborted();
+      const title = staged.attribution?.title || resolved?.attribution?.title || body.name || body.title || 'Sketchfab 模型';
+      const name = String(title).replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').trim().slice(0, 200) || 'Sketchfab 模型';
+      progress(job, 'importing', { name, receivedBytes: 0 });
+      const report = await library.importModelPackage({ root: staged.root, entryPath: staged.entryPath, files: staged.files,
+        folderId, metadata: { name, sourceUrl: pageUrl, pageUrl } });
+      if (report?.errors?.length) throw new Error(report.errors[0].message || '模型写入素材库失败。');
+      if (!Number.isSafeInteger(report?.imported) || report.imported < 0 || !Number.isSafeInteger(report?.duplicates) || report.duplicates < 0 ||
+          !report.imported && !report.duplicates) throw new Error('素材库未保存这份模型，请重试。');
+      let snapshot;
+      try { snapshot = typeof library.snapshot === 'function' ? await library.snapshot() : null; } catch {}
+      const existingAssets = Array.isArray(report.existingAssets) ? report.existingAssets.map(asset => ({
+        id: asset.id, name: asset.name, trashedAt: asset.trashedAt || null, folderId: asset.folderId || null
+      })) : [];
+      const folderName = folderId ? snapshot?.folders?.find(folder => folder.id === folderId)?.name : undefined;
+      const result = { ok: true, imported: report.imported, duplicates: report.duplicates, assetIds: report.assetIds || [], existingAssets,
+        libraryRoot: typeof snapshot?.root === 'string' ? snapshot.root : getLibraryRoot() || null,
+        ...(currentId ? { libraryId: currentId, ...(report.imported ? { folderId, ...(folderName ? { folderName } : {}) } : {}) } : {}) };
+      progress(job, 'complete', result);
+      try { await onImported(result); } catch {}
+      return result;
+    } finally {
+      if (temporary) await fs.rm(temporary, { recursive: true, force: true }).catch(() => {});
+    }
+  }
   async function capture(body, job, cancellationSignal) {
     lastCapture = job;
     let temporary, browserSession, operationSignal;
     try {
+      if (body?.kind === 'model' || body?.sourceType === 'sketchfab') return await captureSketchfab(body, job, cancellationSignal);
       if (!body || !['image','video'].includes(body.kind)) throw new Error('只支持图片和视频素材');
       const expectedVideo = videoExpectations(body);
       if (body.kind !== 'video' && Object.keys(expectedVideo).length) throw new Error('图片不能包含视频校验信息');
@@ -424,6 +519,7 @@ function createCollector({ library, configPath, onImported = () => {}, onLocate,
       const failure = new Error(job.error);
       if (['CAPTURE_LIBRARY_CHANGED', 'CAPTURE_FOLDER_MISSING', 'CAPTURE_CANCELLED', 'VIDEO_AUTH_CANCELLED', 'VIDEO_AUTH_CLOSED', 'VIDEO_AUTH_UNAVAILABLE',
         'VIDEO_BROWSER_PERMISSION_REQUIRED', 'VIDEO_BROWSER_SESSION_INVALID', 'VIDEO_BROWSER_SESSION_EXPIRED', 'VIDEO_BROWSER_LOGIN_REQUIRED'].includes(error.code) ||
+          typeof error.code === 'string' && error.code.startsWith('SKETCHFAB_') ||
           (body?.kind === 'video' && ['VIDEO_BROWSER_READ', 'VIMEO_BROWSER_READ'].includes(error.code))) failure.code = error.code;
       else if (body?.kind === 'video' && ['reading', 'downloading', 'verifying', 'muxing'].includes(failedPhase)) {
         failure.code = error.code === 'VIDEO_INCOMPLETE' || failedPhase === 'verifying' ? 'VIDEO_INCOMPLETE' : 'VIDEO_SOURCE_FAILED';
@@ -516,9 +612,9 @@ function createCollector({ library, configPath, onImported = () => {}, onLocate,
         return json(429,{ok:false,error:lastCapture.error});
       }
       const job = { status:'receiving', at:Date.now(), receivedBytes:0, name:typeof body?.name === 'string' ? body.name.slice(0,240) : '',
-        kind:['image','video'].includes(body?.kind) ? body.kind : undefined };
+        kind:['image','video','model'].includes(body?.kind) ? body.kind : undefined };
       const record = { job, browserRead: body?.browserRead === true || ['youtube-browser', 'youtube-recording'].includes(body?.sourceType),
-        ...(body?.browserRead === true || ['youtube', 'site-video', 'youtube-browser', 'youtube-recording'].includes(body?.sourceType) ? { cancelController: new AbortController() } : {}) };
+        ...(body?.browserRead === true || ['youtube', 'site-video', 'youtube-browser', 'youtube-recording', 'sketchfab'].includes(body?.sourceType) ? { cancelController: new AbortController() } : {}) };
       if (id !== undefined) {
         captures.delete(id);
         captures.set(id, record);

@@ -699,6 +699,11 @@ body.dragging-folder-tree .toast-stack,body.dragging-folder-tree .toast-stack * 
 .collector-connection h3 { margin:0 0 8px; font-size:13px; font-weight:500; }
 .collector-connection p { margin:0 0 10px; font-size:11px; }
 .collector-connection .collector-actions { padding-top:12px; }
+.collector-token-entry { display:grid; gap:7px; margin:12px 0; }
+.collector-token-entry label { color:#aaa; font-size:11px; }
+.collector-token-entry input { min-width:0; width:100%; box-sizing:border-box; padding:9px 11px; border:1px solid #454545; border-radius:5px; background:#202020; color:#ddd; font-family:inherit; font-size:12px; }
+.collector-token-entry input:focus { outline:1px solid #888; outline-offset:1px; }
+.collector-account-actions { display:flex; gap:10px; margin:12px 0; }
 .collector-actions { display:flex; justify-content:space-between; align-items:center; gap:12px; padding-top:19px; border-top:1px solid #333; }
 .library-manager { width:500px; }
 .manager-current { padding:14px 0 18px; margin-bottom:16px; border-top:1px solid #333; border-bottom:1px solid #333; }

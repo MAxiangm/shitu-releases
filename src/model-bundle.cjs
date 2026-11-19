@@ -122,11 +122,24 @@ async function gltfReferences(filename, binary) {
   }
   return { references, complete };
 }
-async function collectModelBundle(source, { allowedRoots, repair, signal } = {}) {
+async function collectModelBundle(source, { allowedRoots, repair, signal, packageRoot, packageFiles } = {}) {
   signal?.throwIfAborted();
   if (typeof source !== 'string' || !path.isAbsolute(source) || !MODEL_EXTENSIONS.has(ext(source))) throw new Error('请选择支持的 3D 模型文件');
   source = path.resolve(source);
-  const roots = [...new Set((allowedRoots?.length ? allowedRoots : [path.dirname(source)]).map(root => path.resolve(root)))];
+  let preserved;
+  if (packageRoot !== undefined || packageFiles !== undefined) {
+    if (typeof packageRoot !== 'string' || !path.isAbsolute(packageRoot) || !Array.isArray(packageFiles) ||
+        !packageFiles.length || packageFiles.length > MAX_FILES) throw new Error('模型下载包清单无效');
+    packageRoot = path.resolve(packageRoot);
+    preserved = new Set();
+    for (const relative of packageFiles) {
+      if (!isSafeBundlePath(relative) || preserved.has(relative.toLowerCase())) throw new Error('模型下载包文件路径无效');
+      preserved.add(relative.toLowerCase());
+    }
+    const relative = slash(path.relative(packageRoot, source));
+    if (!isSafeBundlePath(relative) || !preserved.has(relative.toLowerCase())) throw new Error('模型入口不在下载包清单内');
+  }
+  const roots = [...new Set((packageRoot ? [packageRoot] : allowedRoots?.length ? allowedRoots : [path.dirname(source)]).map(root => path.resolve(root)))];
   for (const root of roots) if (!(await fs.lstat(root)).isDirectory() || (await fs.lstat(root)).isSymbolicLink()) throw new Error('模型资源根目录无效');
   const realRoots = await Promise.all(roots.map(root => fs.realpath(root)));
   const files = new Map(), missing = new Set(), warnings = new Set(), parsed = new Set();
@@ -136,6 +149,10 @@ async function collectModelBundle(source, { allowedRoots, repair, signal } = {})
   let previewSource;
   async function checked(filename) {
     filename = path.resolve(filename);
+    if (preserved) {
+      const relative = slash(path.relative(packageRoot, filename));
+      if (!isSafeBundlePath(relative) || !preserved.has(relative.toLowerCase())) throw new Error('模型引用不在下载包清单内');
+    }
     const rootIndex = roots.findIndex(root => within(root, filename));
     if (rootIndex === -1) throw new Error('引用超出导入目录');
     const relative = path.relative(roots[rootIndex], filename);
@@ -308,7 +325,8 @@ async function collectModelBundle(source, { allowedRoots, repair, signal } = {})
     }
   }
   await add(source); await parse(source);
-  let baseRoot = path.dirname(source);
+  if (preserved) for (const relative of packageFiles) await add(path.join(packageRoot, ...relative.split('/')));
+  let baseRoot = packageRoot || path.dirname(source);
   for (const file of files.values()) while (!within(baseRoot, file.source)) {
     const parent = path.dirname(baseRoot);
     if (parent === baseRoot) throw new Error('模型依赖不在同一文件系统');
