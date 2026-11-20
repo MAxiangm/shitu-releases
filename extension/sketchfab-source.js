@@ -4,6 +4,7 @@
   const SOURCE_FIELDS = new Set(['kind', 'sourceType', 'modelId', 'url', 'pageUrl', 'name', 'title']);
   const fail = message => Object.assign(new Error(message), { code: 'SKETCHFAB_SOURCE_INVALID' });
   const DOWNLOAD_TIMEOUT = 3 * 60000;
+  const VIEWER_CAPTURE_TIMEOUT = 60000;
   const DOWNLOAD_ERRORS = {
     SKETCHFAB_LOGIN_REQUIRED: '请先在当前 Chrome 登录 Sketchfab 后重试。',
     SKETCHFAB_NOT_DOWNLOADABLE: '当前账号无权下载此模型，或模型未开放免费下载。',
@@ -12,6 +13,7 @@
     SKETCHFAB_DOWNLOAD_TIMEOUT: '模型下载地址准备超时，请稍后重试。',
     SKETCHFAB_DOWNLOAD_FAILED: '无法读取 Sketchfab 官方下载地址，请稍后重试。',
     SKETCHFAB_VIEWER_UNAVAILABLE: '请刷新模型页，等待模型显示后再 Alt＋右键采集。',
+    SKETCHFAB_VIEWER_TIMEOUT: '模型导出耗时过长，已停止等待。请等待模型和贴图加载完成后重试。',
     SKETCHFAB_VIEWER_UNSUPPORTED: '此模型的动画结构或绘制方式暂不支持，未保存不完整模型。',
     SKETCHFAB_VIEWER_TOO_LARGE: '网页模型超过当前采集大小上限，未保存。',
     SKETCHFAB_VIEWER_INVALID: '网页模型数据无效，请刷新模型页后重新采集。',
@@ -188,6 +190,6 @@
     return parseModelUrl(value.element?.getAttribute?.('href') || value.element?.href, String(page))?.modelId === value.source.modelId;
   }
   scope.MosaicSketchfab = { sketchfabPage, parseModelUrl, checkedSource, selectModel, selectionCurrent,
-    checkedArchiveUrl, resolveDownload, downloadError, DOWNLOAD_TIMEOUT };
+    checkedArchiveUrl, resolveDownload, downloadError, DOWNLOAD_TIMEOUT, VIEWER_CAPTURE_TIMEOUT };
   if (typeof module === 'object' && module.exports) module.exports = scope.MosaicSketchfab;
 })(typeof globalThis === 'object' ? globalThis : this);

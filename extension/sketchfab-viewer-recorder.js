@@ -2,7 +2,7 @@
   'use strict';
   const api = factory();
   if (typeof module === 'object' && module.exports) module.exports = api;
-  else if (api.modelIdFromUrl(root.location?.href)) api.installSketchfabViewerRecorder(root);
+  else if (api.isSketchfabPage(root.location?.href)) api.installSketchfabViewerRecorder(root);
 })(typeof globalThis === 'object' ? globalThis : this, function () {
   'use strict';
   const DEFAULTS = Object.freeze({ maxVertices: 1000000, maxMeshes: 512, maxImages: 128,
@@ -11,7 +11,7 @@
   const C = { ARRAY: 34962, ELEMENT: 34963, TEXTURE_2D: 3553, TEXTURE0: 33984, FLOAT: 5126,
     BYTE: 5120, UBYTE: 5121, SHORT: 5122, USHORT: 5123, INT: 5124, UINT: 5125, HALF: 5131,
     TRIANGLES: 4, STRIP: 5, FAN: 6, RGBA: 6408, RGB: 6407, SAMPLER_2D: 35678 };
-  function failure(code) { return Object.assign(new Error(code), { code }); }
+  function failure(code, detail) { return Object.assign(new Error(code), { code, ...(detail ? { detail } : {}) }); }
   function modelIdFromUrl(value) {
     try {
       const url = new URL(value);
@@ -20,12 +20,17 @@
         /(?:^|-)([a-f0-9]{32})$/.exec(/^\/3d-models\/([^/]+)\/?$/.exec(url.pathname)?.[1] || '')?.[1] || null;
     } catch { return null; }
   }
+  function isSketchfabPage(value) {
+    try { const url = new URL(value); return url.protocol === 'https:' && ['sketchfab.com', 'www.sketchfab.com'].includes(url.hostname) && !url.port && !url.username && !url.password; }
+    catch { return false; }
+  }
   function cleanName(value) { return String(value || '').toLowerCase().replace(/[^a-z0-9]/g, ''); }
   function semantic(name) {
     name = cleanName(name);
     if (/(?:vertex|position|positions)0?$/.test(name) && !/morph|instance|previous/.test(name)) return 'position';
     if (/normal0?$/.test(name) && !/tangent|binormal/.test(name)) return 'normal';
     if (/(?:texcoord0|texcoord|uv0|uv)$/.test(name)) return 'uv';
+    if (/^(?:color0?|vertexcolor0?)$/.test(name)) return 'color';
     if (/^(?:bones?|joints?)(?:0)?$/.test(name)) return 'joints';
     if (/^weights?(?:0)?$/.test(name)) return 'weights';
     return null;
@@ -116,13 +121,13 @@
     return { ...sample, factors: factors.filter(value => value !== '@'), complement, invertUniform, mixWhite };
   }
   function installSketchfabViewerRecorder(scope, options = {}) {
-    if (!scope || !modelIdFromUrl(scope.location?.href)) return null;
+    if (!scope || !isSketchfabPage(scope.location?.href)) return null;
     const limits = { ...DEFAULTS, ...options };
     const sceneRecorder = options.sceneRecorder || scope.MosaicSketchfabSceneRecorder?.installSketchfabSceneRecorder?.(scope);
     const meshVertices = new WeakMap();
     let currentId = modelIdFromUrl(scope.location.href), contexts = new Set(), states = new WeakMap();
     let shadowBytes = 0, nextId = 1, pending = null, disposed = false, lastRequest = -Infinity, unsupportedAt = -Infinity, tooLargeAt = -Infinity, capacityExceeded = false;
-    let animationFrame = null, outsideFrame = 0, outsideBurst = false;
+    let animationFrame = null, outsideFrame = 0, outsideBurst = false, internalReadback = false;
     const warnings = new Set(), restorers = [], seenRequests = new Set();
     const now = typeof options.now === 'function' ? options.now : Date.now;
     const timeout = scope.setTimeout?.bind(scope) || setTimeout;
@@ -153,6 +158,7 @@
       if (original.__mosaicViewerHook) return;
       function wrapped(...args) {
         const result = original.apply(this, args);
+        if (internalReadback) return result;
         try { after(this, args, result); } catch { warn('部分绘图数据无法记录，导出可能不完整。'); }
         return result;
       }
@@ -230,6 +236,11 @@
         facts.baseSrgb = /\bsRGBToLinear\s*\(\s*texture/.test(albedo);
       }
       const opacity = /float\s+getMaterialOpacity\s*\([^)]*\)\s*\{([\s\S]{0,4000}?)return\s+alpha\s*;/.exec(fragment)?.[1];
+      const vertexColor = functionBody(fragment, 'getVertexColor')?.replace(/\s+/g, '');
+      if (/albedo(?:\.rgb)?\s*\*=\s*getVertexColor\s*\(/.test(fragment) && /^return(?:sRGBToLinear\(vColor\.rgb\)|vColor\.rgb);$/.test(vertexColor || '') &&
+          /vColor\s*=\s*uArrayColorEnabled\s*==\s*1(?:\.0)?\s*\?\s*Color\s*:\s*vec4\(1(?:\.0)?\)/.test(vertex)) {
+        facts.vertexColor = true; facts.vertexColorSrgb = vertexColor.includes('sRGBToLinear');
+      }
       if (opacity) {
         const texture = /alpha\s*=\s*\(?\s*texture(?:2D)?\(\s*(\w+)\s*,\s*vTexCoord0\s*\)\.([rgba])\s*\)?\s*;/.exec(opacity);
         if (texture) { facts.opacitySampler = texture[1]; facts.opacityChannel = 'rgba'.indexOf(texture[2]); }
@@ -314,7 +325,7 @@
       const width = imageForm ? source?.videoWidth || source?.naturalWidth || source?.width : args[sub ? 4 : 3];
       const height = imageForm ? source?.videoHeight || source?.naturalHeight || source?.height : args[sub ? 5 : 4];
       if (!sub && Number.isInteger(width) && Number.isInteger(height) && width > 0 && height > 0) {
-        t.width = width; t.height = height; t.source = source || null;
+        t.width = width; t.height = height; t.source = source || null; t.internalFormat = args[2]; t.compressed = compressed;
       } else if (sub) t.source = null;
       if (width * height > limits.maxTexturePixels) t.tooLarge = true;
       if (compressed) t.compressed = true;
@@ -427,11 +438,12 @@
       const opacityTexture = samplerTexture(s, p, p.facts?.opacitySampler);
       const descriptor = { s, attributes, element, elementVersion: element?.version, mode, count, type, offset, first, matrix, color: colorFor(p), texture: textureInfo, textureVersion: textureInfo?.version, requiresTexture: expectsBaseTexture(p),
         sceneBinding,
+        vertexColorEnabled: p.facts?.vertexColor && uniformFor(s, p, 'uArrayColorEnabled')?.[0] === 1,
         pbr: pbrFor(s, p),
         opacityTexture, opacityVersion: opacityTexture?.version, opacityFactor: p.facts?.opacityFactor ? uniformFor(s, p, p.facts.opacityFactor)?.[0] : 1,
         opacityInvert: p.facts?.opacityInvert && uniformFor(s, p, 'uOpacityInvert')?.[0] === 1,
-        quv0: p.uniforms.get('uQUV0'),
-        qvs: [...p.uniforms].find(([name]) => cleanName(name) === 'uqvs')?.[1], qvt: [...p.uniforms].find(([name]) => cleanName(name) === 'uqvt')?.[1],
+        quv0: uniformFor(s, p, 'uQUV0'),
+        qvs: uniformFor(s, p, 'uQVS'), qvt: uniformFor(s, p, 'uQVT'),
         facts: p.facts || {}, scalarFactor: p.facts?.colorFactor ? uniformFor(s, p, p.facts.colorFactor)?.[0] : undefined,
         doubleSided: !s.cullEnabled, at: now() };
       descriptor.score = (matrix ? 4 : 0) + (attributes.normal ? 2 : 0) + (textureInfo ? 4 : 0) + (descriptor.facts.surface ? 4 : 0);
@@ -490,7 +502,7 @@
       hook(proto, 'texSubImage2D', (gl, a) => textureUpload(gl, a, true, false));
       hook(proto, 'compressedTexImage2D', (gl, a) => textureUpload(gl, a, false, true));
       hook(proto, 'compressedTexSubImage2D', (gl, a) => textureUpload(gl, a, true, true));
-      hook(proto, 'texStorage2D', (gl, a) => { const s = state(gl), t = s && texture(s, s.units.get(s.activeUnit)?.get(a[0])); if (t) { t.width = a[3]; t.height = a[4]; t.version++; } });
+      hook(proto, 'texStorage2D', (gl, a) => { const s = state(gl), t = s && texture(s, s.units.get(s.activeUnit)?.get(a[0])); if (t) { t.width = a[3]; t.height = a[4]; t.internalFormat = a[2]; t.version++; } });
       hook(proto, 'deleteTexture', (gl, a) => { const s = state(gl), t = s?.textures.get(a[0]); if (t) { t.deleted = true; t.source = null; s.textures.delete(a[0]); } });
       hook(proto, 'drawArrays', (gl, a) => draw(gl, a[0], a[2], null, 0, a[1]));
       hook(proto, 'drawElements', (gl, a) => draw(gl, a[0], a[1], a[2], a[3], 0));
@@ -514,7 +526,7 @@
 
     function decodeAttribute(descriptor, info, vertices, dimensions) {
       const data = buffer(descriptor.s, info?.buffer);
-      if (!info || !data?.bytes || data.incomplete || data.version !== info.version || !elementSize(info.type) || info.size < dimensions) throw failure('SKETCHFAB_VIEWER_INCOMPLETE');
+      if (!info || !data?.bytes || data.incomplete || data.version !== info.version || !elementSize(info.type) || info.size < dimensions) throw failure('SKETCHFAB_VIEWER_INCOMPLETE', 'attribute-buffer');
       const component = elementSize(info.type), stride = info.stride || info.size * component;
       if (!Number.isInteger(stride) || stride < info.size * component || !Number.isInteger(info.offset) || info.offset < 0) throw failure('SKETCHFAB_VIEWER_INVALID');
       const view = new DataView(data.bytes.buffer, data.bytes.byteOffset, data.bytes.byteLength), out = [];
@@ -567,13 +579,13 @@
       const rawPositions = decodeAttribute(d, d.attributes.position, vertices, positionDimensions), positions = [];
       for (let i = 0; i < vertices.length; i++) for (let component = 0; component < 3; component++) positions.push(rawPositions[i * positionDimensions + component] + (d.facts.addW && !d.facts.addWAfter ? rawPositions[i * 4 + 3] : 0));
       if (d.facts.quantizedScale) {
-        if (d.qvs?.length !== 3 || d.qvt?.length !== 3) throw failure('SKETCHFAB_VIEWER_INCOMPLETE');
+        if (d.qvs?.length !== 3 || d.qvt?.length !== 3) throw failure('SKETCHFAB_VIEWER_INCOMPLETE', 'quantization-uniforms');
         for (let i = 0; i < positions.length; i++) positions[i] = positions[i] * d.qvs[i % 3] * d.facts.quantizedScale[i % 3] + d.qvt[i % 3];
       } else if (![C.FLOAT, C.HALF, 36193].includes(d.attributes.position.type)) throw failure('SKETCHFAB_VIEWER_UNSUPPORTED');
       if (d.facts.addWAfter) for (let i = 0; i < positions.length; i++) positions[i] += rawPositions[Math.floor(i / 3) * 4 + 3];
       if (!positions.every(Number.isFinite)) throw failure('SKETCHFAB_VIEWER_INVALID');
       const mesh = { positions, indices };
-      if (d.requiresTexture && !d.texture) throw failure('SKETCHFAB_VIEWER_INCOMPLETE');
+      if (d.requiresTexture && !d.texture) throw failure('SKETCHFAB_VIEWER_INCOMPLETE', 'base-color-binding');
       if (d.attributes.normal) {
         if (d.attributes.normal.size === 2) {
           if (!d.facts.normalLambert) throw failure('SKETCHFAB_VIEWER_UNSUPPORTED');
@@ -592,6 +604,12 @@
         for (let i = 0; i < mesh.texcoords.length; i++) mesh.texcoords[i] = mesh.texcoords[i] * d.quv0[2 + i % 2] + d.quv0[i % 2];
       }
       if (d.facts.opacityUnsupported) throw failure('SKETCHFAB_VIEWER_UNSUPPORTED');
+      if (d.vertexColorEnabled) {
+        if (!d.attributes.color) throw failure('SKETCHFAB_VIEWER_INCOMPLETE', 'vertex-colors');
+        const colors = decodeAttribute(d, d.attributes.color, vertices, 3); mesh.colors = [];
+        const linear = value => d.facts.vertexColorSrgb ? value <= 0.04045 ? value / 12.92 : Math.pow((value + 0.055) / 1.055, 2.4) : value;
+        for (let i = 0; i < colors.length; i += 3) mesh.colors.push(linear(colors[i]), linear(colors[i + 1]), linear(colors[i + 2]), 1);
+      }
       if (d.facts.opacitySampler && (!d.opacityTexture || !mesh.texcoords)) throw failure('SKETCHFAB_VIEWER_INCOMPLETE');
       if (d.matrix) mesh.matrix = d.matrix;
       else warn('部分网格未记录世界变换，保存的是局部坐标。');
@@ -607,7 +625,8 @@
       return mesh;
     }
     async function pixelsFromTexture(t) {
-      if (!t || t.deleted || !t.width || !t.height || t.width * t.height > limits.maxTexturePixels || t.target !== C.TEXTURE_2D) throw failure('SKETCHFAB_VIEWER_INCOMPLETE');
+      if (!t || t.deleted || !t.width || !t.height || t.target !== C.TEXTURE_2D) throw failure('SKETCHFAB_VIEWER_INCOMPLETE', 'texture-unavailable');
+      if (t.width * t.height > limits.maxTexturePixels) throw failure('SKETCHFAB_VIEWER_TOO_LARGE', 'texture-dimensions');
       const gl = t.gl, framebuffer = gl.createFramebuffer(), pixels = new Uint8Array(t.width * t.height * 4);
       const get = key => key === undefined ? undefined : gl.getParameter(key);
       const framebufferBinding = get(gl.FRAMEBUFFER_BINDING || 36006), pack = get(gl.PACK_ALIGNMENT || 3333);
@@ -632,11 +651,20 @@
         gl.deleteFramebuffer(framebuffer);
       }
       if (okay) return pixels;
+      const copy = options.textureReadback || scope.MosaicSketchfabTextureReadback?.readTextureRGBA;
+      if (copy) {
+        const srgb = [35904, 35905, 35906, 35907, 0x8c4c, 0x8c4d, 0x8c4e, 0x8c4f, 0x9275, 0x9277, 0x9279, 0x8e8d].includes(t.internalFormat) ||
+          t.internalFormat >= 0x93d0 && t.internalFormat <= 0x93dd;
+        internalReadback = true;
+        try { return copy(gl, t.object, t.width, t.height, { encodeSrgb: srgb }); }
+        catch { /* Older contexts may still expose an original DOM image. */ }
+        finally { internalReadback = false; }
+      }
       const canvas = scope.OffscreenCanvas ? new scope.OffscreenCanvas(t.width, t.height) : scope.document?.createElement('canvas');
       if (!canvas) throw failure('SKETCHFAB_VIEWER_INCOMPLETE'); canvas.width = t.width; canvas.height = t.height;
       const ctx = canvas.getContext('2d'); if (!ctx) throw failure('SKETCHFAB_VIEWER_INCOMPLETE');
       if (t.source) { if (t.flipY) { ctx.translate(0, t.height); ctx.scale(1, -1); } ctx.drawImage(t.source, 0, 0); }
-      else throw failure('SKETCHFAB_VIEWER_INCOMPLETE');
+      else throw failure('SKETCHFAB_VIEWER_INCOMPLETE', 'texture-readback');
       return ctx.getImageData(0, 0, t.width, t.height).data;
     }
     async function pngFromPixels(width, height, pixels, name) {
@@ -762,12 +790,19 @@
         if (strength > 1) mesh.material.emissiveStrength = strength;
       }
     }
-    async function snapshot(modelId, { waitMs = limits.waitMs } = {}) {
+    async function snapshot(modelId, { waitMs = limits.waitMs, compact = false, waitForGeometryMs = 0 } = {}) {
       if (disposed || !syncModel() || modelId !== currentId) throw failure('SKETCHFAB_VIEWER_INVALID');
       if (pending) throw failure('SKETCHFAB_VIEWER_UNAVAILABLE');
-      const job = { modelId, draws: new Map(), changed: false, unsupported: false, tooLarge: false }; pending = job;
+      const job = { modelId, draws: new Map(), changed: false, unsupported: false, tooLarge: false, stage: 'waiting' }; pending = job;
       try {
         if (waitMs > 0) await new Promise(resolve => timeout(resolve, Math.min(1000, waitMs)));
+        // The page can display its canvas before the first model draw. Give the
+        // in-flight loader time to provide geometry without asking for a reload.
+        const geometryDeadline = Date.now() + Math.min(15000, Math.max(0, waitForGeometryMs));
+        while (![...contexts].some(s => s.draws.size || s.drawError) && Date.now() < geometryDeadline) {
+          if (syncModel() !== modelId || job.changed || disposed) throw failure('SKETCHFAB_VIEWER_INVALID');
+          await new Promise(resolve => timeout(resolve, Math.min(100, geometryDeadline - Date.now())));
+        }
         if (syncModel() !== modelId || job.changed) throw failure('SKETCHFAB_VIEWER_INVALID');
         if (job.unsupported || now() - unsupportedAt <= 1000) throw failure('SKETCHFAB_VIEWER_UNSUPPORTED');
         if (capacityExceeded || job.tooLarge || now() - tooLargeAt <= 1000) throw failure('SKETCHFAB_VIEWER_TOO_LARGE');
@@ -789,10 +824,12 @@
         };
         for (const d of job.draws.values()) {
           if (syncModel() !== modelId || job.changed) throw failure('SKETCHFAB_VIEWER_INVALID');
+          job.stage = 'geometry';
           const mesh = meshFor(d); if (!mesh) continue;
           totalVertices += mesh.positions.length / 3; if (totalVertices > limits.maxVertices) throw failure('SKETCHFAB_VIEWER_TOO_LARGE');
           totalIndices += mesh.indices.length; if (totalIndices > limits.maxIndices) throw failure('SKETCHFAB_VIEWER_TOO_LARGE');
           if (d.texture) {
+            job.stage = 'base-color';
             if (d.texture.version !== d.textureVersion) throw failure('SKETCHFAB_VIEWER_INCOMPLETE');
             if (d.facts.constantUV) {
               const pixels = await pixelsFromTexture(d.texture), uv = d.facts.constantUV;
@@ -812,6 +849,7 @@
             }
           }
           if (d.opacityTexture) {
+            job.stage = 'opacity';
             const key = ['opacity', d.texture?.id, d.opacityTexture.id, d.opacityFactor, d.opacityInvert].join(':');
             if (!images.has(key)) {
               if (result.images.length >= limits.maxImages) throw failure('SKETCHFAB_VIEWER_TOO_LARGE');
@@ -821,7 +859,7 @@
             }
             mesh.material.baseColorTexture = images.get(key);
           }
-          await applyPbr(d, mesh, addImage);
+          job.stage = 'material'; await applyPbr(d, mesh, addImage);
           if (d.facts.baseRgbOnly && !d.opacityTexture) mesh.material.alphaMode = (mesh.material.baseColorFactor?.[3] ?? 1) < 1 ? 'BLEND' : 'OPAQUE';
           sceneEntries.push({ binding: d.sceneBinding, meshIndex: result.meshes.length, vertexIndices: meshVertices.get(mesh), worldMatrix: d.matrix });
           mesh.name = 'mesh-' + (result.meshes.length + 1); result.meshes.push(mesh);
@@ -829,6 +867,7 @@
         if (syncModel() !== modelId || job.changed) throw failure('SKETCHFAB_VIEWER_INVALID');
         if (!result.meshes.length) throw failure('SKETCHFAB_VIEWER_UNAVAILABLE');
         if (sceneEntries.some(entry => entry.binding?.isRig) || sceneRecorder?.requiresScene?.()) {
+          job.stage = 'animation';
           if (sceneEntries.some(entry => !entry.binding)) throw failure('SKETCHFAB_VIEWER_UNSUPPORTED');
           const captured = sceneRecorder.buildScene(sceneEntries);
           const rigCount = sceneEntries.filter(entry => entry.binding.isRig).length;
@@ -845,9 +884,14 @@
           for (const message of captured.warnings || []) if (typeof message === 'string') warn(message);
         }
         if (warnings.size) result.warnings = [...warnings];
-        const text = JSON.stringify(result), bytes = typeof TextEncoder === 'function' ? new TextEncoder().encode(text).length : text.length * 2;
+        job.stage = 'transfer';
+        const outgoing = compact && scope.MosaicSketchfabGeometryTransfer ? scope.MosaicSketchfabGeometryTransfer.compactGeometry(result) : result;
+        const text = JSON.stringify(outgoing), bytes = typeof TextEncoder === 'function' ? new TextEncoder().encode(text).length : text.length * 2;
         if (bytes > limits.maxJsonBytes) throw failure('SKETCHFAB_VIEWER_TOO_LARGE');
-        return result;
+        return outgoing;
+      } catch (error) {
+        scope.console?.warn?.('Mosaic Sketchfab capture', { code: error?.code, stage: job.stage, detail: error?.detail, draws: job.draws.size });
+        throw error;
       } finally { if (pending === job) pending = null; }
     }
     async function onMessage(event) {
@@ -859,7 +903,7 @@
         if (message.modelId !== syncModel()) throw failure('SKETCHFAB_VIEWER_INVALID');
         if (seenRequests.has(message.requestId) || now() - lastRequest < limits.minRequestInterval) throw failure('SKETCHFAB_VIEWER_UNAVAILABLE');
         seenRequests.add(message.requestId); if (seenRequests.size > 64) seenRequests.delete(seenRequests.values().next().value); lastRequest = now();
-        const data = await snapshot(message.modelId); scope.postMessage({ ...reply, ok: true, snapshot: data }, scope.location.origin);
+        const data = await snapshot(message.modelId, { compact: true, waitForGeometryMs: 15000 }); scope.postMessage({ ...reply, ok: true, snapshot: data }, scope.location.origin);
       } catch (error) {
         const code = /^SKETCHFAB_VIEWER_(?:UNAVAILABLE|UNSUPPORTED|TOO_LARGE|INVALID|INCOMPLETE)$/.test(error?.code) ? error.code : 'SKETCHFAB_VIEWER_INCOMPLETE';
         scope.postMessage({ ...reply, ok: false, code }, scope.location.origin);
@@ -869,5 +913,5 @@
     return Object.freeze({ snapshot, dispose() { disposed = true; if (pending) pending.changed = true; scope.removeEventListener?.('message', onMessage); for (const restore of restorers.reverse()) restore(); sceneRecorder?.dispose?.(); contexts.clear(); shadowBytes = 0; },
       limits: Object.freeze({ ...limits }) });
   }
-  return { installSketchfabViewerRecorder, modelIdFromUrl, DEFAULT_LIMITS: DEFAULTS };
+  return { installSketchfabViewerRecorder, modelIdFromUrl, isSketchfabPage, DEFAULT_LIMITS: DEFAULTS };
 });

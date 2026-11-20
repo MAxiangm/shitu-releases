@@ -6,7 +6,7 @@ const CONFIG_KEY = 'shituConnection';
 const LAST_KEY = 'shituLastCapture';
 const DESTINATIONS_KEY = 'shituCaptureDestinations';
 // A running worker can read an updated manifest without having loaded new code.
-const WORKER_VERSION = '0.11.31';
+const WORKER_VERSION = '0.11.32';
 const BROWSER_SESSION_SITES = {
   youtube: { label: 'YouTube', domain: 'youtube.com', capability: 'youtubeBrowserSession', field: 'youtubeSession' },
   bilibili: { label: 'Bilibili', domain: 'bilibili.com', capability: 'bilibiliBrowserSession', field: 'bilibiliSession' }
@@ -462,7 +462,7 @@ async function readSketchfabFromPage(media, sender, clientCaptureId, requestId, 
   let reply;
   try {
     reply = await readFromPage(sender, { type: 'shitu:resolve-sketchfab', modelId: media.modelId, clientCaptureId, requestId,
-      ...(allowViewer ? { allowViewer: true } : {}) }, helper.DOWNLOAD_TIMEOUT + 25000);
+      ...(allowViewer ? { allowViewer: true } : {}) }, helper.DOWNLOAD_TIMEOUT + (allowViewer ? helper.VIEWER_CAPTURE_TIMEOUT : 0) + 25000);
   } catch (error) {
     throw helper.downloadError(error?.code === 'PAGE_READ_TIMEOUT' ? 'SKETCHFAB_DOWNLOAD_TIMEOUT' : 'SKETCHFAB_SOURCE_CHANGED');
   }

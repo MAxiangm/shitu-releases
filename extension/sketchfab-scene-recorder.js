@@ -139,7 +139,8 @@
   }
   function glBuffer(attribute) { return (attribute?.getBufferArray?.() || attribute)?._buffer; }
   function installSketchfabSceneRecorder(scope) {
-    if (!modelId(scope?.location?.href)) return null;
+    try { const url = new URL(scope?.location?.href); if (url.protocol !== 'https:' || !['sketchfab.com', 'www.sketchfab.com'].includes(url.hostname) || url.port || url.username || url.password) return null; }
+    catch { return null; }
     let currentId = modelId(scope.location.href), epoch = 0, blueprint, broken = false, disposed = false, inputRestore, parseRestore, installed = false;
     const runtimes = new Map(), animations = new Map(); let channelTypes, generation = 0, matchesByPosition = new WeakMap();
     function sync() { const id = modelId(scope.location?.href); if (id !== currentId) { currentId = id; epoch++; blueprint = null; broken = false; runtimes.clear(); animations.clear(); matchesByPosition = new WeakMap(); generation++; inputRestore?.(); inputRestore = null; installed = false; } return id && !disposed; }

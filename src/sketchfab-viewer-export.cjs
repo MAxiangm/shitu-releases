@@ -12,6 +12,7 @@ const DEFAULT_LIMITS = Object.freeze({
   imageDimension: 8192,
   totalImagePixels: 32 * 1024 * 1024,
   outputBytes: 128 * 1024 * 1024,
+  geometryBytes: 128 * 1024 * 1024,
   nodes: 4096,
   skins: 128,
   joints: 256,
@@ -82,6 +83,29 @@ function array(value, minimum, maximum, budget) {
     if (!Object.hasOwn(descriptor, 'value') || !descriptor.enumerable) reject();
   }
   return value;
+}
+const PACKED_NUMBER_BUDGET = Object.freeze({ number() {} });
+function numericArray(input, minimum, maximum, componentType, budget, decoded) {
+  if (Array.isArray(input)) {
+    const values = array(input, minimum, maximum, budget);
+    decoded.bytes += values.length * 4; bound(decoded.bytes, decoded.limit);
+    return { values, budget };
+  }
+  const packed = record(input, ['componentType', 'count', 'data'], ['componentType', 'count', 'data']);
+  budget.object(packed);
+  if (packed.componentType !== componentType || !Number.isSafeInteger(packed.count) || packed.count < minimum) reject();
+  budget.string(packed.componentType); budget.number(packed.count); bound(packed.count, maximum);
+  const byteLength = packed.count * 4, base64Length = Math.ceil(byteLength / 3) * 4;
+  decoded.bytes += byteLength; bound(decoded.bytes, decoded.limit);
+  if (typeof packed.data !== 'string' || packed.data.length !== base64Length || !/^[A-Za-z0-9+/]*={0,2}$/.test(packed.data)) reject();
+  // Budget the on-wire object only. Decoded numbers are validated below but are
+  // not JSON tokens and must not be charged a second time.
+  budget.add(packed.data.length + 2);
+  const bytes = Buffer.from(packed.data, 'base64');
+  if (bytes.length !== byteLength || bytes.toString('base64') !== packed.data) reject();
+  const values = componentType === 'float32' ? new Float32Array(packed.count) : new Uint32Array(packed.count);
+  for (let i = 0; i < values.length; i++) values[i] = componentType === 'float32' ? bytes.readFloatLE(i * 4) : bytes.readUInt32LE(i * 4);
+  return { values, budget: PACKED_NUMBER_BUDGET };
 }
 function number(value, budget, asFloat = true) {
   if (typeof value !== 'number' || !Number.isFinite(value) || (asFloat && Math.abs(value) > FLOAT_MAX)) reject();
@@ -187,6 +211,7 @@ function matrix(input, budget) {
 }
 function build(snapshot, options) {
   const limits = makeLimits(options), budget = new JsonBudget(limits.jsonBytes);
+  const decodedGeometry = { bytes: 0, limit: limits.geometryBytes };
   const input = record(snapshot, ['version', 'modelId', 'meshes', 'images', 'warnings', 'coordinateSystem', 'scene'], ['version', 'modelId', 'meshes', 'images']);
   budget.object(input);
   if (input.version !== 1 || typeof input.modelId !== 'string' || !MODEL_ID.test(input.modelId)) reject();
@@ -225,22 +250,22 @@ function build(snapshot, options) {
     doc.textures = images.map((_, source) => ({ source }));
   }
   for (const source of array(input.meshes, 1, limits.meshes, budget)) {
-    const mesh = record(source, ['name', 'positions', 'normals', 'texcoords', 'indices', 'matrix', 'material', 'joints', 'weights'], ['positions']); budget.object(mesh);
+    const mesh = record(source, ['name', 'positions', 'normals', 'texcoords', 'colors', 'indices', 'matrix', 'material', 'joints', 'weights'], ['positions']); budget.object(mesh);
     const name = Object.hasOwn(mesh, 'name') ? text(mesh.name, budget) : undefined;
-    const positions = array(mesh.positions, 9, limits.vertices * 3, budget);
+    const positionData = numericArray(mesh.positions, 9, limits.vertices * 3, 'float32', budget, decodedGeometry), positions = positionData.values;
     if (positions.length % 3) reject();
     const count = positions.length / 3; vertexCount += count; bound(vertexCount, limits.vertices);
     const min = [Infinity, Infinity, Infinity], max = [-Infinity, -Infinity, -Infinity], positionBytes = Buffer.alloc(positions.length * 4);
     for (let i = 0; i < positions.length; i++) {
-      const value = number(positions[i], budget); positionBytes.writeFloatLE(value, i * 4);
+      const value = number(positions[i], positionData.budget); positionBytes.writeFloatLE(value, i * 4);
       min[i % 3] = Math.min(min[i % 3], value); max[i % 3] = Math.max(max[i % 3], value);
     }
     const attributes = { POSITION: accessor(positionBytes, count, 'VEC3', 5126, 34962, { min, max }) };
     if (Object.hasOwn(mesh, 'normals')) {
-      const normals = array(mesh.normals, positions.length, positions.length, budget), bytes = Buffer.alloc(normals.length * 4);
+      const normalData = numericArray(mesh.normals, positions.length, positions.length, 'float32', budget, decodedGeometry), normals = normalData.values, bytes = Buffer.alloc(normals.length * 4);
       let normalized = false;
       for (let i = 0; i < normals.length; i += 3) {
-        const xyz = [number(normals[i], budget), number(normals[i + 1], budget), number(normals[i + 2], budget)], length = Math.hypot(...xyz);
+        const xyz = [number(normals[i], normalData.budget), number(normals[i + 1], normalData.budget), number(normals[i + 2], normalData.budget)], length = Math.hypot(...xyz);
         if (!length) reject();
         if (Math.abs(length - 1) > 1e-5) normalized = true;
         for (let c = 0; c < 3; c++) bytes.writeFloatLE(xyz[c] / length, (i + c) * 4);
@@ -249,21 +274,27 @@ function build(snapshot, options) {
       attributes.NORMAL = accessor(bytes, count, 'VEC3', 5126, 34962);
     }
     if (Object.hasOwn(mesh, 'texcoords')) {
-      const uv = array(mesh.texcoords, count * 2, count * 2, budget), bytes = Buffer.alloc(uv.length * 4);
-      for (let i = 0; i < uv.length; i++) bytes.writeFloatLE(number(uv[i], budget), i * 4);
+      const uvData = numericArray(mesh.texcoords, count * 2, count * 2, 'float32', budget, decodedGeometry), uv = uvData.values, bytes = Buffer.alloc(uv.length * 4);
+      for (let i = 0; i < uv.length; i++) bytes.writeFloatLE(number(uv[i], uvData.budget), i * 4);
       attributes.TEXCOORD_0 = accessor(bytes, count, 'VEC2', 5126, 34962);
+    }
+    if (Object.hasOwn(mesh, 'colors')) {
+      const colorData = numericArray(mesh.colors, count * 4, count * 4, 'float32', budget, decodedGeometry), colors = colorData.values, bytes = Buffer.alloc(colors.length * 4);
+      for (let i = 0; i < colors.length; i++) { const color = number(colors[i], colorData.budget); if (color < 0 || color > 1) reject(); bytes.writeFloatLE(color, i * 4); }
+      attributes.COLOR_0 = accessor(bytes, count, 'VEC4', 5126, 34962);
     }
     if (Object.hasOwn(mesh, 'joints') !== Object.hasOwn(mesh, 'weights')) reject();
     let maximumJoint = -1;
     if (Object.hasOwn(mesh, 'joints')) {
       if (!Object.hasOwn(input, 'scene')) reject();
-      const joints = array(mesh.joints, count * 4, count * 4, budget), weights = array(mesh.weights, count * 4, count * 4, budget);
+      const jointData = numericArray(mesh.joints, count * 4, count * 4, 'uint32', budget, decodedGeometry), joints = jointData.values;
+      const weightData = numericArray(mesh.weights, count * 4, count * 4, 'float32', budget, decodedGeometry), weights = weightData.values;
       const jointBytes = Buffer.alloc(joints.length * 2), weightBytes = Buffer.alloc(weights.length * 4);
       let normalized = false;
       for (let i = 0; i < joints.length; i += 4) {
         const values = [];
         for (let j = 0; j < 4; j++) {
-          const joint = number(joints[i + j], budget, false), weight = number(weights[i + j], budget);
+          const joint = number(joints[i + j], jointData.budget, false), weight = number(weights[i + j], weightData.budget);
           if (!Number.isSafeInteger(joint) || joint < 0 || weight < 0 || weight > 1) reject();
           bound(joint + 1, limits.joints);
           maximumJoint = Math.max(maximumJoint, joint); jointBytes.writeUInt16LE(joint, (i + j) * 2); values.push(weight);
@@ -280,11 +311,11 @@ function build(snapshot, options) {
     meshJoints.push(maximumJoint);
     let indexAccessor, triangles;
     if (Object.hasOwn(mesh, 'indices')) {
-      const indices = array(mesh.indices, 3, limits.triangles * 3, budget);
+      const indexData = numericArray(mesh.indices, 3, limits.triangles * 3, 'uint32', budget, decodedGeometry), indices = indexData.values;
       if (indices.length % 3) reject();
       triangles = indices.length / 3; bound(triangleCount + triangles, limits.triangles);
       let maximum = 0;
-      for (const index of indices) { number(index, budget, false); if (!Number.isSafeInteger(index) || index < 0 || index >= count) reject(); maximum = Math.max(maximum, index); }
+      for (const index of indices) { number(index, indexData.budget, false); if (!Number.isSafeInteger(index) || index < 0 || index >= count) reject(); maximum = Math.max(maximum, index); }
       // 0xffff is the primitive-restart sentinel and cannot occur in a uint16 index accessor.
       const small = maximum < 65535, bytes = Buffer.alloc(indices.length * (small ? 2 : 4));
       for (let i = 0; i < indices.length; i++) small ? bytes.writeUInt16LE(indices[i], i * 2) : bytes.writeUInt32LE(indices[i], i * 4);

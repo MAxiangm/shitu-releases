@@ -85,7 +85,7 @@ function fixture(t, options = {}) {
   let time = 100;
   const scope = {
     WebGLRenderingContext: GL, WebGL2RenderingContext: GL,
-    location: { href: `https://sketchfab.com/models/${ID}/embed`, origin: 'https://sketchfab.com' },
+    location: { href: options.initialUrl || `https://sketchfab.com/models/${ID}/embed`, origin: 'https://sketchfab.com' },
     setTimeout, requestAnimationFrame: callback => { raf.push(callback); return raf.length; }, btoa: s => Buffer.from(s, 'binary').toString('base64'),
     fetch() { throw new Error('Recorder must not make network requests'); },
     addEventListener: (type, fn) => listeners.set(type, fn), removeEventListener: type => listeners.delete(type),
@@ -209,6 +209,71 @@ test('W added after quantization preserves shader operation order', async t => {
   assert.deepEqual((await f.recorder.snapshot(ID)).meshes[0].positions, [11, 21, 31, 13, 21, 31, 11, 23, 31]);
 });
 
+test('active default quantization and UV uniforms need no explicit upload', async t => {
+  const f = fixture(t);
+  const p = f.program(['Vertex', 'TexCoord0'], ['uQVS', 'uQVT', 'uQUV0'], [{ type: 35633,
+    source: 'void main(){vec3 localVertex=Vertex.xyz;localVertex=localVertex*uQVS+uQVT;vTexCoord0=TexCoord0.xy*uQUV0.zw+uQUV0.xy;gl_Position=vec4(localVertex,1.0);}' }]);
+  p.defaultValues = { uQVS: [1, 1, 1], uQVT: [0, 0, 0], uQUV0: [0, 0, 1, 1] };
+  f.attribute(0, new Uint16Array([0, 0, 0, 65535, 0, 0, 0, 65535, 0]), 3, f.gl.UNSIGNED_SHORT, true);
+  f.attribute(1, new Uint16Array([0, 0, 65535, 0, 0, 65535]), 2, f.gl.UNSIGNED_SHORT, true);
+  f.gl.drawArrays(f.gl.TRIANGLES, 0, 3);
+  const mesh = (await f.recorder.snapshot(ID)).meshes[0];
+  assert.deepEqual(mesh.positions, [0, 0, 0, 1, 0, 0, 0, 1, 0]);
+  assert.deepEqual(mesh.texcoords, [0, 0, 1, 0, 0, 1]);
+});
+
+test('observed vertex colors preserve source sRGB meaning and ignore unused alpha', async t => {
+  const f = fixture(t);
+  const p = f.program(['Vertex', 'Color'], ['uArrayColorEnabled', 'uModelMatrix'], [
+    { type: 35633, source: 'void main(){vColor = uArrayColorEnabled == 1.0 ? Color : vec4(1.0);gl_Position=uModelMatrix*vec4(Vertex,1.0);}' },
+    { type: 35632, source: 'vec3 getVertexColor(){return sRGBToLinear(vColor.rgb);}void main(){vec3 albedo=vec3(1.0);albedo *= getVertexColor();}' }
+  ]);
+  f.attribute(0, new Float32Array([0,0,0, 1,0,0, 0,1,0]), 3);
+  f.attribute(1, new Uint8Array([255,128,0,0, 0,255,128,0, 128,0,255,0]), 4, f.gl.UNSIGNED_BYTE, true);
+  f.gl.uniformMatrix4fv(f.gl.getUniformLocation(p, 'uModelMatrix'), false, IDENTITY);
+  f.gl.uniform1f(f.gl.getUniformLocation(p, 'uArrayColorEnabled'), 1);
+  f.gl.drawArrays(f.gl.TRIANGLES, 0, 3);
+  const colors = (await f.recorder.snapshot(ID)).meshes[0].colors, half = Math.pow((128 / 255 + 0.055) / 1.055, 2.4);
+  assert.deepEqual(colors, [1,half,0,1, 0,1,half,1, half,0,1,1]);
+  f.gl.uniform1f(f.gl.getUniformLocation(p, 'uArrayColorEnabled'), 0); f.gl.drawArrays(f.gl.TRIANGLES, 0, 3);
+  assert.equal((await f.recorder.snapshot(ID)).meshes[0].colors, undefined);
+});
+
+test('a recorder installed on the newsfeed captures a later same-origin model navigation', async t => {
+  const f = fixture(t, { initialUrl: 'https://sketchfab.com/feed' });
+  await assert.rejects(f.recorder.snapshot(ID), { code: 'SKETCHFAB_VIEWER_INVALID' });
+  f.scope.location.href = `https://sketchfab.com/3d-models/model-${ID}`;
+  f.triangle();
+  const snapshot = await f.recorder.snapshot(ID);
+  assert.equal(snapshot.modelId, ID); assert.equal(snapshot.meshes.length, 1);
+});
+
+test('a canvas shown before its first draw waits for geometry without requiring a reload', async t => {
+  const f = fixture(t);
+  const capture = f.recorder.snapshot(ID, { waitForGeometryMs: 250 });
+  setTimeout(() => f.triangle(), 10);
+  assert.equal((await capture).meshes.length, 1);
+});
+
+test('the production compact snapshot round-trips through the desktop exporter', async t => {
+  const f = fixture(t); f.triangle();
+  const { compactGeometry } = require('../extension/sketchfab-geometry-transfer.js');
+  f.scope.MosaicSketchfabGeometryTransfer = { compactGeometry: value => compactGeometry(value, { minimumComponents: 0 }) };
+  const packed = await f.recorder.snapshot(ID, { compact: true });
+  assert.equal(packed.meshes[0].positions.componentType, 'float32');
+  assert.equal(packed.meshes[0].indices.componentType, 'uint32');
+  const exported = require('../src/sketchfab-viewer-export.cjs').exportSketchfabViewer(packed);
+  assert.equal(exported.stats.vertexCount, 3); assert.equal(exported.stats.triangleCount, 1);
+  assert.equal(exported.stats.inputJsonBytes, Buffer.byteLength(JSON.stringify(packed)));
+});
+
+test('navigation cancels the first-geometry wait instead of capturing a different model', async t => {
+  const f = fixture(t);
+  const capture = f.recorder.snapshot(ID, { waitForGeometryMs: 250 });
+  setTimeout(() => { f.scope.location.href = `https://sketchfab.com/models/${OTHER}/embed`; }, 10);
+  await assert.rejects(capture, { code: 'SKETCHFAB_VIEWER_INVALID' });
+});
+
 test('WebGL1 keeps maximum unsigned-byte index as a vertex, not primitive restart', async t => {
   const f = fixture(t); delete f.scope.WebGL2RenderingContext;
   f.program(['Vertex']);
@@ -233,6 +298,32 @@ test('transparent base-color PNG capture restores framebuffer, pack buffer and p
 test('missing readable texture is an incomplete result, not a silent untextured success', async t => {
   const f = fixture(t); f.triangle({ textured: true }); f.gl.framebufferComplete = false;
   await assert.rejects(f.recorder.snapshot(ID), { code: 'SKETCHFAB_VIEWER_INCOMPLETE' });
+});
+
+test('compressed texture fallback preserves sRGB and cannot record its internal copy draw', async t => {
+  const seen = [];
+  const f = fixture(t, { textureReadback(gl, texture, width, height, settings) {
+    seen.push({ texture, width, height, settings });
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([999, 999, 999]), 35044);
+    gl.drawArrays(gl.TRIANGLES, 0, 300);
+    return new Uint8Array([123, 45, 67, 89]);
+  } });
+  const { texture } = f.triangle({ textured: true });
+  f.gl.compressedTexImage2D(f.gl.TEXTURE_2D, 0, 0x8c4f, 1, 1, 0, new Uint8Array(16));
+  f.gl.drawElements(f.gl.TRIANGLES, 3, f.gl.UNSIGNED_SHORT, 0);
+  f.gl.framebufferComplete = false;
+  const output = await f.recorder.snapshot(ID);
+  assert.equal(output.meshes.length, 1);
+  assert.deepEqual(output.meshes[0].positions, [0, 0, 0, 1, 0, 0, 0, 1, 0]);
+  assert.deepEqual(f.images[0].pixels, [123, 45, 67, 89]);
+  assert.equal(seen[0].texture, texture); assert.equal(seen[0].settings.encodeSrgb, true);
+});
+
+test('a texture beyond the readback pixel limit reports size, not an endless loading hint', async t => {
+  const f = fixture(t); f.triangle({ textured: true });
+  f.gl.texImage2D(f.gl.TEXTURE_2D, 0, f.gl.RGBA, 4097, 4096, 0, f.gl.RGBA, f.gl.UNSIGNED_BYTE, null);
+  f.gl.drawElements(f.gl.TRIANGLES, 3, f.gl.UNSIGNED_SHORT, 0);
+  await assert.rejects(f.recorder.snapshot(ID), { code: 'SKETCHFAB_VIEWER_TOO_LARGE' });
 });
 
 test('known base-color sampler without a bound texture cannot silently lose its material', async t => {

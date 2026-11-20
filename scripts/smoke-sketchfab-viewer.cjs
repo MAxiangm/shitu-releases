@@ -28,13 +28,15 @@ function preload() {
   const { ipcRenderer } = require('electron');
   const path = require('node:path');
   const config = require(path.join(__dirname, 'config.json'));
+  window.MosaicSketchfabGeometryTransfer = require(path.join(config.root, 'extension/sketchfab-geometry-transfer.js'));
+  window.MosaicSketchfabTextureReadback = require(path.join(config.root, 'extension/sketchfab-texture-readback.js'));
   window.MosaicSketchfabSceneRecorder = require(path.join(config.root, 'extension/sketchfab-scene-recorder.js'));
   const { installSketchfabViewerRecorder } = require(path.join(config.root, 'extension/sketchfab-viewer-recorder.js'));
   const recorder = installSketchfabViewerRecorder(window);
   ipcRenderer.on('smoke-snapshot', async (_event, message) => {
     try {
       if (!recorder) throw new Error('Recorder was not installed');
-      const snapshot = await recorder.snapshot(message.modelId, { waitMs: 800 });
+      const snapshot = await recorder.snapshot(message.modelId, { waitMs: 800, compact: config.compact, waitForGeometryMs: 15000 });
       ipcRenderer.send('smoke-snapshot-result', { requestId: message.requestId, ok: true, snapshot });
     } catch (error) { ipcRenderer.send('smoke-snapshot-result', { requestId: message.requestId, ok: false, code: error.code || 'SMOKE_CAPTURE_FAILED', detail: error.stack }); }
   });
@@ -55,7 +57,7 @@ vec3 getMaterialEmitColor(){return uEmitColorFactor*sRGBToLinear(texture2D(Textu
 vec3 getMaterialNormalMap(){vec3 nmap=(texture2D(Texture1,vTexCoord0).rgb)*2.0-1.0;nmap.y=uNormalMapFlipY==1?-nmap.y:nmap.y;return nmap;}
 vec3 transformNormal(const in float factor,in vec3 normal,const in vec3 t,const in vec3 b,in vec3 n){normal.xy=factor*normal.xy;return normalize(normal.x*t+normal.y*b+normal.z*n);}
 void main(){vec3 albedo=getMaterialAlbedo();vec4 tangent=vec4(1.,0.,0.,1.);vec3 binormal=vec3(0.,1.,0.);vec3 frontNormal=vNormal;vec3 materialNormal=getMaterialNormalMap();materialNormal=transformNormal(uNormalMapFactor,materialNormal,tangent.xyz,binormal,frontNormal);float light=(0.4+0.1*getMaterialMetalness()+0.1*getMaterialRoughness()+0.1*abs(materialNormal.y)+0.1*abs(vNormal.z))*getMaterialAO();gl_FragColor=vec4(albedo*light+getMaterialEmitColor(),1.0);}` :
-    'precision mediump float;uniform sampler2D Texture0;varying vec2 vTexCoord0;varying vec3 vNormal;void main(){vec4 albedo=texture2D(Texture0,vTexCoord0);gl_FragColor=vec4(albedo.rgb*(0.9+0.1*abs(vNormal.z)),albedo.a);}';
+    'precision mediump float;uniform sampler2D Texture0;varying vec2 vTexCoord0;varying vec3 vNormal;varying vec4 vColor;vec3 sRGBToLinear(vec3 x){return pow((x+0.055)/1.055,vec3(2.4));}vec3 getVertexColor(){return sRGBToLinear(vColor.rgb);}void main(){vec4 albedo=texture2D(Texture0,vTexCoord0);albedo.rgb*=getVertexColor();gl_FragColor=vec4(albedo.rgb*(0.9+0.1*abs(vNormal.z)),albedo.a);}';
   const images = pbrImages || [png];
   return `<!doctype html><meta charset="utf-8"><title>Offline textured triangle</title><canvas id="fixture" width="640" height="640"></canvas><script>
   const canvas = document.getElementById('fixture');
@@ -63,11 +65,12 @@ void main(){vec3 albedo=getMaterialAlbedo();vec4 tangent=vec4(1.,0.,0.,1.);vec3 
   if (!gl) throw new Error('WebGL unavailable');
   function shader(type, source) { const s=gl.createShader(type);gl.shaderSource(s,source);gl.compileShader(s);if(!gl.getShaderParameter(s,gl.COMPILE_STATUS))throw new Error('Shader failed');return s; }
   const program=gl.createProgram();
-  gl.attachShader(program,shader(gl.VERTEX_SHADER,'attribute vec3 Vertex;attribute vec3 Normal;attribute vec2 TexCoord0;uniform mat4 uModelMatrix;uniform mat4 uModelViewMatrix;uniform mat4 uProjectionMatrix;varying vec2 vTexCoord0;varying vec3 vNormal;void main(){vTexCoord0=TexCoord0;vNormal=Normal;gl_Position=uProjectionMatrix*uModelViewMatrix*uModelMatrix*vec4(Vertex,1.0);}'));
+  gl.attachShader(program,shader(gl.VERTEX_SHADER,'attribute vec3 Vertex;attribute vec3 Normal;attribute vec2 TexCoord0;attribute vec4 Color;uniform float uArrayColorEnabled;uniform mat4 uModelMatrix;uniform mat4 uModelViewMatrix;uniform mat4 uProjectionMatrix;varying vec2 vTexCoord0;varying vec3 vNormal;varying vec4 vColor;void main(){vTexCoord0=TexCoord0;vNormal=Normal;vColor=uArrayColorEnabled==1.0?Color:vec4(1.0);gl_Position=uProjectionMatrix*uModelViewMatrix*uModelMatrix*vec4(Vertex,1.0);}'));
   gl.attachShader(program,shader(gl.FRAGMENT_SHADER,${JSON.stringify(fragment)}));
   gl.linkProgram(program);if(!gl.getProgramParameter(program,gl.LINK_STATUS))throw new Error('Program failed');gl.useProgram(program);
   function attribute(name,size,values){const b=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,b);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array(values),gl.STATIC_DRAW);const i=gl.getAttribLocation(program,name);gl.enableVertexAttribArray(i);gl.vertexAttribPointer(i,size,gl.FLOAT,false,0,0);}
   attribute('Vertex',3,[-0.8,-0.8,0,0.8,-0.8,0,0,0.8,0]);attribute('Normal',3,[0,0,1,0,0,1,0,0,1]);attribute('TexCoord0',2,[0,0,1,0,0.5,1]);
+  if(!${Boolean(pbrImages)}){attribute('Color',4,[0.5,1,0.25,1,0.5,1,0.25,1,0.5,1,0.25,1]);gl.uniform1f(gl.getUniformLocation(program,'uArrayColorEnabled'),1);}
   const indices=gl.createBuffer();gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,indices);gl.bufferData(gl.ELEMENT_ARRAY_BUFFER,new Uint16Array([0,1,2]),gl.STATIC_DRAW);
   const identity=new Float32Array([1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1]);for(const name of ['uModelMatrix','uModelViewMatrix','uProjectionMatrix'])gl.uniformMatrix4fv(gl.getUniformLocation(program,name),false,identity);
   for(const [name,value]of Object.entries(${JSON.stringify(pbrImages ? { uAlbedoPBRFactor: 1, uMetalnessPBRFactor: 0.9, uRoughnessPBRFactor: 0.8, uNormalMapFactor: 0.75, uAOPBRFactor: 0.6, uEmitColorFactor: 0.5 } : {})}))gl.uniform1f(gl.getUniformLocation(program,name),value);
@@ -81,6 +84,17 @@ function glbParts(bytes) {
   check(bytes.readUInt32LE(8) === bytes.length, 'GLB length differs');
   const length = bytes.readUInt32LE(12), json = JSON.parse(bytes.subarray(20, 20 + length));
   return { json, binary: bytes.subarray(28 + length) };
+}
+function inspectionGeometry(snapshot) {
+  return { ...snapshot, meshes: snapshot.meshes.map(mesh => {
+    const copy = { ...mesh };
+    for (const key of ['positions', 'normals', 'texcoords', 'colors', 'weights', 'joints', 'indices']) {
+      const value = copy[key]; if (!value || Array.isArray(value)) continue;
+      const bytes = Buffer.from(value.data, 'base64');
+      copy[key] = Array.from({ length: value.count }, (_, i) => value.componentType === 'float32' ? bytes.readFloatLE(i * 4) : bytes.readUInt32LE(i * 4));
+    }
+    return copy;
+  }) };
 }
 function bounds(snapshot) {
   const min = [Infinity, Infinity, Infinity], max = [-Infinity, -Infinity, -Infinity];
@@ -180,7 +194,7 @@ async function childMain(config) {
     async function snapshot(window, modelId) {
       const requestId = crypto.randomBytes(16).toString('hex');
       return new Promise((resolve, reject) => {
-        const timer = setTimeout(() => finish(new Error('Snapshot response timed out')), 20000);
+        const timer = setTimeout(() => finish(new Error('Snapshot response timed out')), 65000);
         const listener = (event, value) => {
           if (event.sender !== window.webContents || value?.requestId !== requestId) return;
           finish(value.ok ? null : Object.assign(new Error(value.code || 'Snapshot failed'), { remoteStack: value.detail }), value.snapshot);
@@ -215,7 +229,7 @@ async function childMain(config) {
         captureSession.on('will-download', event => event.preventDefault());
         await deadline(captureWindow.loadURL(url), 45000, 'Page load timed out');
         result.phase = 'drawing'; await flush();
-        if (live) await wait(15000);
+        if (live) await wait(config.loadWaitMs || 15000);
         else {
           for (let i = 0; i < 80; i++) { if (await captureWindow.webContents.executeJavaScript('window.fixtureReady === true')) break; await wait(100); }
           check(await captureWindow.webContents.executeJavaScript('window.fixtureReady === true'), 'Offline fixture did not draw');
@@ -226,13 +240,13 @@ async function childMain(config) {
           result.captureStimulus = 'One-pixel resize of this isolated hidden window to request a fresh frame';
           captureWindow.setContentSize(1001, 700);
         }
-        const value = JSON.parse(JSON.stringify(await capture));
-        await fs.writeFile(path.join(directory, 'snapshot.json'), JSON.stringify(value));
+        const wireValue = JSON.parse(JSON.stringify(await capture)), value = inspectionGeometry(wireValue);
+        await fs.writeFile(path.join(directory, 'snapshot.json'), JSON.stringify(wireValue));
         const animationPreview = Boolean(value.scene?.animations?.length);
         check(value.coordinateSystem === 'sketchfab-z-up', 'Recorder coordinate system is missing');
         result.coordinateSystem = value.coordinateSystem; result.expectedPreviewBounds = expectedPreviewBounds(value);
         result.bounds = bounds(value); result.snapshot = { meshes: value.meshes.length, images: value.images.length, warnings: value.warnings || [] };
-        const exported = exportSketchfabViewer(value); result.export = exported.stats;
+        const exported = exportSketchfabViewer(wireValue); result.export = exported.stats;
         const glb = path.join(directory, 'captured.glb'); await fs.writeFile(glb, exported.glb);
         const parsed = glbParts(exported.glb);
         result.materials = parsed.json.materials.map(m => ({ factor: m.pbrMetallicRoughness.baseColorFactor, textured: !!m.pbrMetallicRoughness.baseColorTexture, alphaMode: m.alphaMode,
@@ -242,6 +256,8 @@ async function childMain(config) {
         if (!live && !pbr) {
           check(exported.stats.vertexCount === 3 && exported.stats.triangleCount === 1 && exported.stats.imageCount === 1, 'Offline geometry or texture count differs');
           check(value.meshes[0].normals?.length === 9 && value.meshes[0].texcoords?.length === 6, 'Offline normals or UVs missing');
+          check(value.meshes[0].colors?.length === 12 && parsed.json.meshes[0].primitives[0].attributes.COLOR_0 !== undefined, 'Offline vertex colors missing');
+          check(Math.abs(value.meshes[0].colors[0] - Math.pow((0.5 + 0.055) / 1.055, 2.4)) < 1e-7 && value.meshes[0].colors[3] === 1, 'Vertex color transfer or alpha differs');
           check(parsed.json.materials[0].alphaMode === 'BLEND', 'PNG transparency was lost');
           const image = parsed.json.images[0], view = parsed.json.bufferViews[image.bufferView];
           const decoded = await sharp(parsed.binary.subarray(view.byteOffset, view.byteOffset + view.byteLength)).ensureAlpha().raw().toBuffer();
@@ -423,6 +439,9 @@ async function childMain(config) {
 async function parentMain() {
   const modelsArg = process.argv.find(arg => arg.startsWith('--models='));
   const models = modelsArg ? modelsArg.slice('--models='.length).split(',') : undefined;
+  const loadWaitArg = process.argv.find(arg => arg.startsWith('--load-wait='));
+  const loadWaitMs = loadWaitArg ? Number(loadWaitArg.slice('--load-wait='.length)) : 15000;
+  check(Number.isSafeInteger(loadWaitMs) && loadWaitMs >= 0 && loadWaitMs <= 90000, 'Load wait must be 0..90000 ms');
   const referenceArg = process.argv.find(arg => arg.startsWith('--pose-reference='));
   let poseReference;
   if (referenceArg) {
@@ -436,7 +455,7 @@ async function parentMain() {
   check(!models || models.length > 0 && models.length <= 8 && models.every(id => /^[a-f0-9]{32}$/.test(id)), 'Expected --models=<32-hex-id>[,<32-hex-id>...] (maximum 8)');
   const live = process.argv.includes('--live') || Boolean(models), base = await fs.mkdtemp(path.join(ROOT, 'tmp', 'sketchfab-viewer-smoke-'));
   await fs.writeFile(path.join(base, 'package.json'), JSON.stringify({ name: 'mosaic-sketchfab-viewer-smoke', main: __filename }));
-  await fs.writeFile(path.join(base, 'config.json'), JSON.stringify({ root: ROOT, base, live, models, poseReference, diagnosticRedraw: process.argv.includes('--diagnostic-redraw') }));
+  await fs.writeFile(path.join(base, 'config.json'), JSON.stringify({ root: ROOT, base, live, models, poseReference, loadWaitMs, compact: process.argv.includes('--compact'), diagnosticRedraw: process.argv.includes('--diagnostic-redraw') }));
   await fs.writeFile(path.join(base, 'preload.cjs'), `(${preload.toString()})();`);
   const env = {};
   for (const key of ['SystemRoot','WINDIR','PATH','PATHEXT','COMSPEC','SYSTEMDRIVE','PROGRAMFILES','PROGRAMFILES(X86)','NUMBER_OF_PROCESSORS','PROCESSOR_ARCHITECTURE']) if (process.env[key]) env[key] = process.env[key];

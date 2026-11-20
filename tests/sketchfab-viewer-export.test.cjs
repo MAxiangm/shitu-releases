@@ -64,6 +64,11 @@ function multiply(a, b) {
 function invalid(input, options, code = 'SKETCHFAB_VIEWER_INVALID') {
   assert.throws(() => exportSketchfabViewer(input, options), error => error.code === code && !error.message.includes('fixture-secret'));
 }
+function packed(values, componentType = 'float32') {
+  const bytes = Buffer.alloc(values.length * 4);
+  values.forEach((value, i) => componentType === 'float32' ? bytes.writeFloatLE(value, i * 4) : bytes.writeUInt32LE(value, i * 4));
+  return { componentType, count: values.length, data: bytes.toString('base64') };
+}
 
 test('writes valid GLB chunks, exact positions, float bounds, indices and node matrix without mutating input', () => {
   const input = snapshot([{ ...triangle(), name: '三角形', positions: [-0.1, 0, 0, 1.1, 0, 0, 0, 2.2, 0], normals: [0, 0, 1, 0, 0, 1, 0, 0, 1],
@@ -121,6 +126,18 @@ test('coordinate conversion is opt-in and rejects unrecognized coordinate system
   const parsed = parseGlb(exportSketchfabViewer(snapshot([triangle(), triangle()])).glb);
   assert.deepEqual(parsed.doc.scenes[0].nodes, [0, 1]); assert.equal(parsed.doc.nodes.length, 2);
   for (const value of ['gltf-y-up', 'SKETCHFAB-Z-UP', '', null, 1, undefined]) invalid({ ...snapshot(), coordinateSystem: value });
+});
+
+test('linear vertex colors survive ordinary and compact GLB export with independent alpha', () => {
+  const input = snapshot([{ ...triangle(), colors: [1,0.25,0,1, 0,1,0.5,1, 0.1,0,1,1] }]);
+  const compact = require('../extension/sketchfab-geometry-transfer.js').compactGeometry(input, { minimumComponents: 0 });
+  for (const source of [input, compact]) {
+    const result = exportSketchfabViewer(source), parsed = parseGlb(result.glb), attribute = parsed.doc.meshes[0].primitives[0].attributes.COLOR_0;
+    assert.equal(parsed.doc.accessors[attribute].type, 'VEC4');
+    assert.deepEqual(accessor(parsed, attribute), input.meshes[0].colors.map(Math.fround));
+    assert.equal(result.stats.inputJsonBytes, Buffer.byteLength(JSON.stringify(source)));
+  }
+  for (const colors of [[1,1,1], [2,...input.meshes[0].colors.slice(1)], [-0.1,...input.meshes[0].colors.slice(1)]]) invalid(snapshot([{ ...triangle(), colors }]));
 });
 
 test('uses uint32 at the uint16 primitive-restart boundary and preserves large indices', () => {
@@ -356,4 +373,71 @@ test('animation channels reject nonincreasing float timestamps, non-TRS targets 
   mutate((c, s) => { s.scene.nodes[2].matrix = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]; });
   const input = skinnedFixture();
   for (const limits of [{ nodes: 3 }, { joints: 1 }, { animationChannels: 1 }, { keyframes: 4 }]) invalid(input, { limits }, 'SKETCHFAB_VIEWER_TOO_LARGE');
+});
+
+test('packed geometry produces the same GLB as arrays and counts only its on-wire JSON once', () => {
+  const raw = snapshot([{ ...triangle(), positions: [0.123456789, 0, 0, 1, 0, 0, 0, 1, 0], normals: [0,0,1, 0,0,1, 0,0,1],
+    texcoords: [0,0, 1,0, 0,1], indices: [0,1,2] }]);
+  const input = structuredClone(raw);
+  for (const key of ['positions', 'normals', 'texcoords']) input.meshes[0][key] = packed(input.meshes[0][key]);
+  input.meshes[0].indices = packed(input.meshes[0].indices, 'uint32');
+  const copy = structuredClone(input), size = Buffer.byteLength(JSON.stringify(input));
+  const result = exportSketchfabViewer(input, { limits: { jsonBytes: size } });
+  assert.deepEqual(result.glb, exportSketchfabViewer(raw).glb); assert.deepEqual(input, copy);
+  assert.equal(result.stats.inputJsonBytes, size);
+  invalid(input, { limits: { jsonBytes: size - 1 } }, 'SKETCHFAB_VIEWER_TOO_LARGE');
+  const mixed = structuredClone(input); mixed.meshes[0].normals = raw.meshes[0].normals;
+  assert.deepEqual(exportSketchfabViewer(mixed).glb, result.glb);
+});
+
+test('packed joints and weights preserve actual skinning data without changing animation JSON', () => {
+  const raw = skinnedFixture(), input = structuredClone(raw);
+  input.meshes[0].joints = packed(input.meshes[0].joints, 'uint32');
+  input.meshes[0].weights = packed(input.meshes[0].weights);
+  const result = exportSketchfabViewer(input);
+  assert.deepEqual(result.glb, exportSketchfabViewer(raw).glb);
+  assert.equal(result.stats.inputJsonBytes, Buffer.byteLength(JSON.stringify(input)));
+});
+
+test('packed geometry rejects wrong component types, shapes, noncanonical bytes and nonfinite floats', () => {
+  const positions = packed(triangle().positions);
+  for (const value of [null, {}, { ...positions, componentType: 'float64' }, { ...positions, componentType: 'uint32' },
+    { ...positions, count: 9.5 }, { ...positions, count: '9' }, { ...positions, count: -1 }, { ...positions, count: 8 },
+    { ...positions, data: positions.data + '\n' }, { ...positions, data: positions.data.slice(4) },
+    { ...positions, data: positions.data + 'AAAA' }, { ...positions, data: 'data:application/octet-stream;base64,' + positions.data },
+    { ...positions, url: 'fixture-secret' }, Object.assign(Object.create({ inherited: true }), positions)]) {
+    invalid(snapshot([{ positions: value }]));
+  }
+  for (const value of [NaN, Infinity, -Infinity]) {
+    const input = triangle().positions.slice(); input[0] = value;
+    invalid(snapshot([{ positions: packed(input) }]));
+  }
+  let read = false; const getter = { ...positions }; Object.defineProperty(getter, 'data', { enumerable: true, get() { read = true; return positions.data; } });
+  invalid(snapshot([{ positions: getter }])); assert.equal(read, false);
+  invalid(snapshot([{ ...triangle(), indices: packed([0,1,3], 'uint32') }]));
+  invalid(snapshot([{ ...triangle(), indices: packed([0,1,2]) }]));
+  const padded = packed([0,1,2,3,4,5,6,7,8,9]);
+  assert.ok(padded.data.endsWith('=='));
+  const offset = padded.data.length - 3, symbols = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+  const altered = padded.data.slice(0, offset) + symbols[symbols.indexOf(padded.data[offset]) ^ 1] + padded.data.slice(offset + 1);
+  invalid(snapshot([{ positions: { ...padded, data: altered } }]));
+});
+
+test('decoded geometry has an aggregate byte cap separate from its compact JSON budget', () => {
+  const input = snapshot([{ positions: packed(triangle().positions) }]);
+  assert.equal(exportSketchfabViewer(input, { limits: { geometryBytes: 36 } }).stats.vertexCount, 3);
+  invalid(input, { limits: { geometryBytes: 35 } }, 'SKETCHFAB_VIEWER_TOO_LARGE');
+  invalid(snapshot([triangle(), { positions: packed(triangle().positions) }]), { limits: { geometryBytes: 71 } }, 'SKETCHFAB_VIEWER_TOO_LARGE');
+});
+
+test('a half-million-vertex scan fits compact transfer without raising the 48 MiB limit', { timeout: 30000 }, () => {
+  const { compactGeometry } = require('../extension/sketchfab-geometry-transfer.js');
+  const vertexCount = 500000, triangleCount = 1000000;
+  const raw = snapshot([{ positions: Array.from({ length: vertexCount * 3 }, (_, i) => (i % 997) / 997),
+    normals: Array(vertexCount * 3).fill(1 / Math.sqrt(3)), indices: Array.from({ length: triangleCount * 3 }, (_, i) => i % vertexCount) }]);
+  invalid(raw, undefined, 'SKETCHFAB_VIEWER_TOO_LARGE');
+  const input = compactGeometry(raw), result = exportSketchfabViewer(input);
+  assert.equal(result.stats.vertexCount, vertexCount); assert.equal(result.stats.triangleCount, triangleCount);
+  assert.ok(result.stats.inputJsonBytes < 48 * 1024 * 1024); assert.equal(DEFAULT_LIMITS.jsonBytes, 48 * 1024 * 1024);
+  assert.equal(result.stats.inputJsonBytes, Buffer.byteLength(JSON.stringify(input)));
 });

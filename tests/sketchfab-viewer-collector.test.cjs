@@ -54,6 +54,16 @@ test('viewer export must use its capability and dedicated route', async t => {
   assert.equal((await enabled.request(enabled.body(), '/v1/capture')).ok, false);
   assert.equal(enabled.library.snapshot().assets.length, 0);
 });
+
+test('compact geometry passes the real collector and remains a valid library model', async t => {
+  const f = await fixture(t), body = f.body();
+  body.viewerSnapshot = require('../extension/sketchfab-geometry-transfer.js').compactGeometry(body.viewerSnapshot, { minimumComponents: 0 });
+  const result = await f.request(body);
+  assert.equal(result.ok, true); assert.equal(result.imported, 1);
+  assert.equal(result.modelStats.vertexCount, 3); assert.equal(result.modelStats.triangleCount, 1);
+  const file = await fs.readFile(f.library.getAssetPath(result.assetIds[0], 'original'));
+  assert.equal(file.toString('ascii', 0, 4), 'glTF'); assert.equal(file.readUInt32LE(8), file.length);
+});
 test('PBR material factors reach the imported GLB unchanged through the collector', async t => {
   const f = await fixture(t), body = f.body();
   body.viewerSnapshot.meshes[0].material = { metallicFactor: 0.65, roughnessFactor: 0.25,
