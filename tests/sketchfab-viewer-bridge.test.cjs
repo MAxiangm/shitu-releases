@@ -46,6 +46,17 @@ test('viewer bridge rejects a different model in the returned snapshot', async (
     modelId: 'f'.repeat(32), meshes: [{ positions: [] }], images: [] } })));
   await assert.rejects(harness.bridge.capture({ modelId: MODEL, target: harness.target }), { code: 'SKETCHFAB_VIEWER_INVALID' });
 });
+
+test('the viewer transport accepts the 8K payload budget and rejects larger messages', async () => {
+  let bytes = 160 * 1024 * 1024;
+  class SizeOnlyEncoder { encode() { return { byteLength: bytes }; } }
+  const harness = setup((request, _origin, respond) => respond(answer(request)), { TextEncoder: SizeOnlyEncoder });
+  assert.equal(harness.bridge.MAX_JSON_BYTES, 384 * 1024 * 1024);
+  assert.equal((await harness.bridge.capture({ modelId: MODEL, target: harness.target })).modelId, MODEL);
+  bytes = 384 * 1024 * 1024 + 1;
+  await assert.rejects(harness.bridge.capture({ modelId: MODEL, target: harness.target }), { code: 'SKETCHFAB_VIEWER_TOO_LARGE' });
+  assert.equal(harness.listeners.size, 0);
+});
 test('viewer bridge reports a distinct export timeout and removes its listener', async () => {
   const harness = setup(() => {});
   await assert.rejects(harness.bridge.capture({ modelId: MODEL, target: harness.target, timeout: 5 }), { code: 'SKETCHFAB_VIEWER_TIMEOUT' });

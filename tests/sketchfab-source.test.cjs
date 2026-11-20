@@ -92,7 +92,7 @@ test('model transport accepts only canonical identity fields, never credentials 
   assert.throws(() => sketchfab.checkedSource(model(), 'https://sketchfab.com.evil.test/'), { code: 'SKETCHFAB_SOURCE_INVALID' });
 });
 
-async function worker({ capable = true, viewerCapable = false, reply, progress = [], resolveReply } = {}) {
+async function worker({ capable = true, viewerCapable = false, reply, progress = [], resolveReply, sendToTab } = {}) {
   const requests = [], messages = [], timeoutValues = [], storage = { shituConnection: { port: 38475, token: 'a'.repeat(64) } };
   let listener;
   const chrome = {
@@ -104,7 +104,8 @@ async function worker({ capable = true, viewerCapable = false, reply, progress =
     contextMenus: { removeAll: fn => fn(), create: (_entry, fn) => fn?.(), onClicked: { addListener() {} } },
     tabs: { sendMessage: async (_id, message, target) => {
       messages.push({ ...structuredClone(message), target: structuredClone(target) });
-      if (message.type === 'shitu:resolve-sketchfab') return resolveReply || { ok: true,
+      if (sendToTab) { const result = await sendToTab(message, target); if (result !== undefined) return result; }
+      if (message.type === 'shitu:resolve-sketchfab') return (typeof resolveReply === 'function' ? resolveReply(message) : resolveReply) || { ok: true,
         archiveUrl: `https://sketchfab-prod-media.s3.amazonaws.com/archives/${id}/gltf/model.zip?Signature=fixture-only` };
     } }
   };
@@ -118,6 +119,7 @@ async function worker({ capable = true, viewerCapable = false, reply, progress =
       return Response.json({ ok: true, app: '拾图', version: '0.29.25', ready: true, sketchfabDownload: true, sketchfabBrowserDownload: capable, sketchfabViewerCapture: viewerCapable, captureProgress: progress.length > 0 });
     } });
   vm.runInContext(await fs.readFile(path.join(root, 'extension/sketchfab-source.js'), 'utf8'), context);
+  vm.runInContext(await fs.readFile(path.join(root, 'extension/sketchfab-viewer-transfer.js'), 'utf8'), context);
   vm.runInContext(await fs.readFile(path.join(root, 'extension/background.js'), 'utf8'), context);
   return { requests, messages, timeoutValues, storage, send: input => new Promise(resolve => listener({ type: 'shitu:capture', media: input, clientCaptureId: '1795100000000-1' },
     { id: 'fixture-extension', url, tab: { id: 7, url }, frameId: 0, documentId: 'selected-document' }, resolve)) };
@@ -157,6 +159,43 @@ test('Sketchfab worker relays viewer data only with desktop capability and never
   const unavailable = await worker({ resolveReply: { ok: true, viewerSnapshot: snapshot } });
   assert.equal((await unavailable.send(model())).ok, false);
   assert.equal(unavailable.requests.some(value => value.route === '/v1/capture-sketchfab-viewer'), false);
+});
+
+test('Sketchfab worker pulls model chunks only from the selected document and releases the transfer', async () => {
+  const transfer = require('../extension/sketchfab-viewer-transfer.js');
+  const store = transfer.createStore({ inlineBytes: 1 });
+  const snapshot = { version: 1, modelId: id, meshes: [{ positions: [0,0,0,1,0,0,0,1,0] }], images: [] };
+  const instance = await worker({ viewerCapable: true,
+    resolveReply: message => ({ ok: true, ...store.prepare(snapshot, message) }),
+    sendToTab: (message, target) => {
+      if (!['shitu:read-sketchfab-viewer', 'shitu:release-sketchfab-viewer'].includes(message.type)) return;
+      assert.deepEqual(structuredClone(target), { documentId: 'selected-document' });
+      if (message.type === 'shitu:read-sketchfab-viewer') return store.read(message);
+      return { ok: store.release(message) };
+    } });
+  const result = await instance.send(model());
+  assert.equal(result.ok, true, result.error);
+  const request = instance.requests.find(value => value.route === '/v1/capture-sketchfab-viewer');
+  assert.deepEqual(request.body.viewerSnapshot, snapshot);
+  assert.equal(instance.messages.filter(value => value.type === 'shitu:read-sketchfab-viewer').length, 1);
+  assert.equal(instance.messages.filter(value => value.type === 'shitu:release-sketchfab-viewer').length, 1);
+  assert.equal(JSON.stringify(instance.storage).includes('positions'), false);
+});
+
+test('Sketchfab worker rejects tampered model chunks before submitting to the desktop', async () => {
+  const transfer = require('../extension/sketchfab-viewer-transfer.js');
+  for (const change of [response => ({ ...response, requestId: '1795100000000-9' }), response => ({ ...response, data: response.data + 'x' })]) {
+    const store = transfer.createStore({ inlineBytes: 1 });
+    const snapshot = { version: 1, modelId: id, meshes: [{ positions: [] }], images: [] };
+    const instance = await worker({ viewerCapable: true,
+      resolveReply: message => ({ ok: true, ...store.prepare(snapshot, message) }),
+      sendToTab: message => message.type === 'shitu:read-sketchfab-viewer' ? change(store.read(message)) :
+        message.type === 'shitu:release-sketchfab-viewer' ? { ok: store.release(message) } : undefined });
+    const result = await instance.send(model());
+    assert.equal(result.ok, false); assert.equal(result.code, 'SKETCHFAB_VIEWER_INVALID');
+    assert.equal(instance.requests.some(value => value.route === '/v1/capture-sketchfab-viewer'), false);
+    assert.equal(instance.messages.filter(value => value.type === 'shitu:release-sketchfab-viewer').length, 1);
+  }
 });
 
 test('Sketchfab worker refuses mixed or wrong-model viewer responses before a desktop request', async () => {

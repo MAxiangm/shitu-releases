@@ -6,10 +6,10 @@
 })(typeof globalThis === 'object' ? globalThis : this, function (scope) {
   'use strict';
   const MIN_COMPONENTS = 250000;
-  const MAX_GEOMETRY_BYTES = 128 * 1024 * 1024;
+  const MAX_GEOMETRY_BYTES = 192 * 1024 * 1024, MAX_VERTICES = 3000000;
   const FLOAT_MAX = 3.4028234663852886e38;
-  const FIELDS = Object.freeze({ positions: ['float32', 3000000], normals: ['float32', 3000000],
-    texcoords: ['float32', 2000000], colors: ['float32', 4000000], weights: ['float32', 4000000], indices: ['uint32', 6000000], joints: ['uint32', 4000000] });
+  const FIELDS = Object.freeze({ positions: ['float32', MAX_VERTICES * 3], normals: ['float32', MAX_VERTICES * 3],
+    texcoords: ['float32', MAX_VERTICES * 2], colors: ['float32', MAX_VERTICES * 4], weights: ['float32', MAX_VERTICES * 4], indices: ['uint32', 6000000], joints: ['uint32', MAX_VERTICES * 4] });
   function fail(large = false) { throw Object.assign(new Error('Sketchfab geometry transfer failed'), { code: large ? 'SKETCHFAB_VIEWER_TOO_LARGE' : 'SKETCHFAB_VIEWER_INVALID' }); }
   function copyRecord(value) {
     if (!value || typeof value !== 'object' || ![Object.prototype, null].includes(Object.getPrototypeOf(value))) fail();
@@ -73,5 +73,5 @@
     }
     return output;
   }
-  return { compactGeometry, MIN_COMPONENTS, MAX_GEOMETRY_BYTES };
+  return { compactGeometry, MIN_COMPONENTS, MAX_GEOMETRY_BYTES, MAX_VERTICES };
 });

@@ -204,7 +204,7 @@ test('rejects malformed image bytes, MIME mismatches and noncanonical base64', (
 test('enforces exact JSON bytes and every resource cap before producing a GLB', () => {
   const input = snapshot(), jsonBytes = Buffer.byteLength(JSON.stringify(input));
   assert.equal(exportSketchfabViewer(input, { limits: { jsonBytes } }).stats.inputJsonBytes, jsonBytes);
-  // A 16 MiB per-image policy is now a valid tightening of the shared 32 MiB ceiling.
+  // Smaller per-image policies remain valid tightenings of the shared ceiling.
   // Use the tiny fixture so this compatibility check does not allocate a large image.
   assert.equal(exportSketchfabViewer(snapshot([triangle()], [image()]), { limits: { imageBytes: 16 * 1024 * 1024 } }).stats.imageCount, 1);
   invalid(input, { limits: { jsonBytes: jsonBytes - 1 } }, 'SKETCHFAB_VIEWER_TOO_LARGE');
@@ -220,12 +220,33 @@ test('enforces exact JSON bytes and every resource cap before producing a GLB', 
 });
 
 test('bounds decoded dimensions and total declared image pixels for PNG and JPEG', () => {
-  for (const value of [image(pngSize(8193, 1)), image(pngSize(1, 8193)), image(pngSize(4097, 8192)),
-    image(jpegSize(8193, 1), 'image/jpeg'), image(jpegSize(4097, 8192), 'image/jpeg')]) {
+  for (const value of [image(pngSize(8193, 1)), image(pngSize(1, 8193)),
+    image(jpegSize(8193, 1), 'image/jpeg')]) {
     invalid(snapshot([triangle()], [value]), undefined, 'SKETCHFAB_VIEWER_TOO_LARGE');
+  }
+  // Header fixtures exercise pixel budgeting without allocating decoded 8K images.
+  for (const values of [[image(pngSize(4097, 8192)), image(pngSize(4097, 8192))],
+    [image(jpegSize(4097, 8192), 'image/jpeg'), image(jpegSize(4097, 8192), 'image/jpeg')]]) {
+    invalid(snapshot([triangle()], values), undefined, 'SKETCHFAB_VIEWER_TOO_LARGE');
   }
   assert.equal(exportSketchfabViewer(snapshot([triangle()], [image()]), { limits: { imageDimension: 1, totalImagePixels: 1 } }).stats.imageCount, 1);
   invalid(snapshot([triangle()], [image(pngSize(2, 1))]), { limits: { imageDimension: 1 } }, 'SKETCHFAB_VIEWER_TOO_LARGE');
+});
+
+test('one 8K texture reaches the bounded pixel ceiling without weakening custom limits', () => {
+  assert.equal(DEFAULT_LIMITS.jsonBytes, 384 * 1024 * 1024);
+  assert.equal(DEFAULT_LIMITS.vertices, 3_000_000);
+  assert.equal(DEFAULT_LIMITS.imageBytes, 96 * 1024 * 1024);
+  assert.equal(DEFAULT_LIMITS.totalImageBytes, 96 * 1024 * 1024);
+  assert.equal(DEFAULT_LIMITS.totalImagePixels, 8192 * 8192);
+  assert.equal(DEFAULT_LIMITS.outputBytes, 256 * 1024 * 1024);
+  assert.equal(DEFAULT_LIMITS.geometryBytes, 192 * 1024 * 1024);
+  for (const texture of [image(pngSize(8192, 8192)), image(jpegSize(8192, 8192), 'image/jpeg')]) {
+    const input = snapshot([triangle()], [texture]);
+    assert.equal(exportSketchfabViewer(input).stats.imageCount, 1);
+    invalid(input, { limits: { totalImagePixels: 8192 * 8192 - 1 } }, 'SKETCHFAB_VIEWER_TOO_LARGE');
+    invalid(snapshot([triangle()], [texture, image()]), undefined, 'SKETCHFAB_VIEWER_TOO_LARGE');
+  }
 });
 
 test('accepts deeply frozen JSON data and never calls toJSON supplied by an input', () => {
@@ -430,14 +451,14 @@ test('decoded geometry has an aggregate byte cap separate from its compact JSON 
   invalid(snapshot([triangle(), { positions: packed(triangle().positions) }]), { limits: { geometryBytes: 71 } }, 'SKETCHFAB_VIEWER_TOO_LARGE');
 });
 
-test('a half-million-vertex scan fits compact transfer without raising the 48 MiB limit', { timeout: 30000 }, () => {
+test('compact geometry leaves transfer room for an 8K texture in a half-million-vertex scan', { timeout: 30000 }, () => {
   const { compactGeometry } = require('../extension/sketchfab-geometry-transfer.js');
   const vertexCount = 500000, triangleCount = 1000000;
   const raw = snapshot([{ positions: Array.from({ length: vertexCount * 3 }, (_, i) => (i % 997) / 997),
     normals: Array(vertexCount * 3).fill(1 / Math.sqrt(3)), indices: Array.from({ length: triangleCount * 3 }, (_, i) => i % vertexCount) }]);
-  invalid(raw, undefined, 'SKETCHFAB_VIEWER_TOO_LARGE');
-  const input = compactGeometry(raw), result = exportSketchfabViewer(input);
+  invalid(raw, { limits: { jsonBytes: 48 * 1024 * 1024 } }, 'SKETCHFAB_VIEWER_TOO_LARGE');
+  const input = compactGeometry(raw), result = exportSketchfabViewer(input, { limits: { jsonBytes: 48 * 1024 * 1024 } });
   assert.equal(result.stats.vertexCount, vertexCount); assert.equal(result.stats.triangleCount, triangleCount);
-  assert.ok(result.stats.inputJsonBytes < 48 * 1024 * 1024); assert.equal(DEFAULT_LIMITS.jsonBytes, 48 * 1024 * 1024);
+  assert.ok(result.stats.inputJsonBytes < 48 * 1024 * 1024);
   assert.equal(result.stats.inputJsonBytes, Buffer.byteLength(JSON.stringify(input)));
 });

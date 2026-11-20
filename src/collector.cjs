@@ -19,6 +19,7 @@ const { youtubeMediaUrl, youtubeBrowserSource, stageYouTubeBrowser } = require('
 const { youtubeRecordingUrl, youtubeRecordingSource, stageYouTubeRecording } = require('./youtube-recording-source.cjs');
 const { stageSketchfabModel, checkedSketchfabPage, checkedSketchfabArchiveUrl } = require('./sketchfab-download.cjs');
 const { stageSketchfabViewerModel } = require('./sketchfab-viewer-download.cjs');
+const { DEFAULT_LIMITS: VIEWER_LIMITS } = require('./sketchfab-viewer-export.cjs');
 
 const DEFAULT_ORIGIN = 'chrome-extension://mdleapcbplpefdgchdklofdnpjgokdhh';
 const INLINE_LIMIT = 20 * 1024 * 1024;
@@ -72,8 +73,11 @@ function identify(buffer) {
   return null;
 }
 async function readJSON(request, limit) {
+  // Reject an oversized declared body before buffering it. The streaming count
+  // below still enforces the same limit when Content-Length is absent.
+  if (/^\d+$/.test(request.headers['content-length'] || '') && Number(request.headers['content-length']) > limit) throw new Error('请求数据超过此采集接口的大小上限');
   const chunks = []; let size = 0;
-  for await (const chunk of request) { size += chunk.length; if (size > limit) throw new Error('请求太大，浏览器素材数据上限为 20 MB'); chunks.push(chunk); }
+  for await (const chunk of request) { size += chunk.length; if (size > limit) throw new Error('请求数据超过此采集接口的大小上限'); chunks.push(chunk); }
   try { return JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { throw new Error('采集请求格式无效'); }
 }
 
@@ -592,7 +596,7 @@ function createCollector({ library, configPath, onImported = () => {}, onLocate,
       return json(415,{ok:false,error:'只支持 JSON 请求'});
     }
     try {
-      const body = await readJSON(request, request.url === '/v1/capture-sketchfab-viewer' ? 48*1024*1024+32768 : request.url === '/v1/capture' ? 28*1024*1024+32768 : request.url === '/v1/capture-browser-data' ? BROWSER_MESSAGE_LIMIT : 4096);
+      const body = await readJSON(request, request.url === '/v1/capture-sketchfab-viewer' ? VIEWER_LIMITS.jsonBytes+32768 : request.url === '/v1/capture' ? 28*1024*1024+32768 : request.url === '/v1/capture-browser-data' ? BROWSER_MESSAGE_LIMIT : 4096);
       if ((request.url === '/v1/capture-sketchfab-viewer' && (sketchfabViewerCapture !== true || body?.sourceType !== 'sketchfab' || !Object.hasOwn(body || {}, 'viewerSnapshot'))) ||
           (request.url === '/v1/capture' && Object.hasOwn(body || {}, 'viewerSnapshot'))) throw captureError('SKETCHFAB_VIEWER_INVALID', '网页模型采集接口无效，请更新后重试。');
       if (request.url === '/v1/ping') return json(200,{ok:true,app:'拾图',version:appVersion,...readyStatus()});

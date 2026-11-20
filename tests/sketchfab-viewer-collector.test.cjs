@@ -4,8 +4,10 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const os = require('node:os');
+const http = require('node:http');
 const { Library } = require('../src/library.cjs');
 const { createCollector } = require('../src/collector.cjs');
+const { DEFAULT_LIMITS: VIEWER_LIMITS } = require('../src/sketchfab-viewer-export.cjs');
 const ID = '0123456789abcdef0123456789abcdef';
 const PAGE = `https://sketchfab.com/3d-models/${ID}`;
 const source = () => ({ version: 1, modelId: ID, meshes: [{ positions: [0,0,0, 1,0,0, 0,1,0], indices: [0,1,2] }], images: [] });
@@ -21,9 +23,35 @@ async function fixture(t, enabled = true) {
     return (await fetch(collector.info().baseUrl + route, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Shitu-Token': token },
       body: JSON.stringify(body) })).json();
   }
+  async function oversizedDeclaredBody(length, route = '/v1/capture-sketchfab-viewer') {
+    // The server must reject the header before requesting hundreds of MiB of
+    // body data. No large image, JSON string or pixel buffer is allocated here.
+    return new Promise((resolve, reject) => {
+      const request = http.request(collector.info().baseUrl + route, { method: 'POST', headers: {
+        'Content-Type': 'application/json', 'X-Shitu-Token': token, 'Content-Length': length, Connection: 'close',
+      } }, response => {
+        const chunks = [];
+        response.on('data', chunk => chunks.push(chunk));
+        response.on('end', () => { request.destroy(); resolve({ status: response.statusCode, body: JSON.parse(Buffer.concat(chunks)) }); });
+      });
+      request.on('error', reject); request.end();
+    });
+  }
   const body = extra => ({ kind: 'model', sourceType: 'sketchfab', modelId: ID, url: PAGE, pageUrl: PAGE, name: 'Rendered triangle', viewerSnapshot: source(), ...extra });
-  return { directory, library, request, body };
+  return { directory, library, request, body, oversizedDeclaredBody };
 }
+
+test('viewer request metadata is bounded before buffering and other routes retain smaller limits', { timeout: 10000 }, async t => {
+  const f = await fixture(t);
+  for (const [route, limit] of [['/v1/capture-sketchfab-viewer', VIEWER_LIMITS.jsonBytes + 32768],
+    ['/v1/capture', 28 * 1024 * 1024 + 32768], ['/v1/ping', 4096]]) {
+    const result = await f.oversizedDeclaredBody(limit + 1, route);
+    assert.equal(result.status, 400); assert.equal(result.body.ok, false);
+    assert.equal(result.body.error, '请求数据超过此采集接口的大小上限');
+  }
+  assert.equal(f.library.snapshot().assets.length, 0);
+  assert.equal((await f.request({}, '/v1/ping')).ok, true);
+});
 test('viewer snapshot imports a self-contained GLB without account or archive access', async t => {
   const f = await fixture(t);
   assert.equal((await f.request({}, '/v1/ping')).sketchfabViewerCapture, true);

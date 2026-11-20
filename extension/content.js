@@ -19,6 +19,7 @@
   let youtubeContext;
   const youtubeSelections = new Map();
   const sketchfabCaptures = new Map();
+  const sketchfabViewerTransfer = globalThis.MosaicSketchfabViewerTransfer?.createStore();
   let youtubeSelectionSerial = 0;
   const videoMenuEvents = new WeakSet();
   let captureSerial = 0;
@@ -575,6 +576,7 @@
   }
   async function capture(media) {
     const captureId = `${Date.now()}-${++captureSerial}`;
+    sketchfabViewerTransfer?.clear(); sketchfabCaptures.clear();
     if (media.kind === 'model' && media.sketchfabSelection) sketchfabCaptures.set(captureId, {
       selection: media.sketchfabSelection, modelId: media.modelId, pageUrl: location.href, requestId: null, resolving: false
     });
@@ -606,7 +608,7 @@
       if (!submitted) {
         try { void chrome.runtime.sendMessage({ type: 'shitu:capture-failed', name: media?.name, error: message }).catch(() => {}); } catch {}
       }
-    } finally { sketchfabCaptures.delete(captureId); if (activeCaptureId === captureId) activeCaptureId = null; }
+    } finally { sketchfabViewerTransfer?.clearCapture(captureId); sketchfabCaptures.delete(captureId); if (activeCaptureId === captureId) activeCaptureId = null; }
   }
   function takeGesture(event) {
     event.preventDefault();
@@ -714,6 +716,9 @@
   });
   window.addEventListener('resize', dismissVideoMenu);
   window.addEventListener('scroll', dismissVideoMenu, true);
+  for (const event of ['pagehide', 'popstate', 'hashchange']) window.addEventListener(event, () => {
+    sketchfabViewerTransfer?.clear(); sketchfabCaptures.clear();
+  });
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (sender.id !== chrome.runtime.id) return;
     if (message?.type === 'shitu:status') {
@@ -727,6 +732,20 @@
       if (message.clientCaptureId) options.onRead = browserProgress(message.clientCaptureId);
       resolveMedia(message.media, options).then(media => sendResponse({ ok: true, media }), error => sendResponse({ ok: false, error: error.message }));
       return true;
+    }
+    if (message?.type === 'shitu:read-sketchfab-viewer' || message?.type === 'shitu:release-sketchfab-viewer') {
+      if (message.type === 'shitu:release-sketchfab-viewer') {
+        sendResponse({ ok: Boolean(sketchfabViewerTransfer?.release(message)) }); return;
+      }
+      const helper = globalThis.MosaicSketchfab, selected = sketchfabCaptures.get(message.clientCaptureId);
+      if (!helper || !selected || selected.modelId !== message.modelId || selected.requestId !== message.requestId ||
+          selected.pageUrl !== location.href || !helper.selectionCurrent(selected.selection, location.href)) {
+        sketchfabViewerTransfer?.clearCapture(message.clientCaptureId);
+        sendResponse({ ok: false, code: 'SKETCHFAB_SOURCE_CHANGED' }); return;
+      }
+      try { sendResponse(sketchfabViewerTransfer ? sketchfabViewerTransfer.read(message) : { ok: false, code: 'SKETCHFAB_VIEWER_UNAVAILABLE' }); }
+      catch (error) { sendResponse({ ok: false, code: helper.downloadError(error?.code).code }); }
+      return;
     }
     if (message?.type === 'shitu:resolve-sketchfab') {
       const helper = globalThis.MosaicSketchfab, selected = sketchfabCaptures.get(message.clientCaptureId);
@@ -751,7 +770,7 @@
             try { origin = new URL(element.getAttribute?.('src') || element.src, location.href).origin; } catch { throw helper.downloadError('SKETCHFAB_SOURCE_CHANGED'); }
           }
           const viewerSnapshot = await bridge.capture({ modelId: message.modelId, target, origin, isCurrent: current });
-          return { viewerSnapshot };
+          return sketchfabViewerTransfer ? sketchfabViewerTransfer.prepare(viewerSnapshot, message, current) : { viewerSnapshot };
         }
       };
       resolveChosen().then(

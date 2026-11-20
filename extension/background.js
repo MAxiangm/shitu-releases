@@ -1,12 +1,12 @@
 'use strict';
 
-if (typeof importScripts === 'function') importScripts('video-page-source.js', 'youtube-browser-source.js', 'sketchfab-source.js');
+if (typeof importScripts === 'function') importScripts('video-page-source.js', 'youtube-browser-source.js', 'sketchfab-source.js', 'sketchfab-viewer-transfer.js');
 
 const CONFIG_KEY = 'shituConnection';
 const LAST_KEY = 'shituLastCapture';
 const DESTINATIONS_KEY = 'shituCaptureDestinations';
 // A running worker can read an updated manifest without having loaded new code.
-const WORKER_VERSION = '0.11.32';
+const WORKER_VERSION = '0.11.33';
 const BROWSER_SESSION_SITES = {
   youtube: { label: 'YouTube', domain: 'youtube.com', capability: 'youtubeBrowserSession', field: 'youtubeSession' },
   bilibili: { label: 'Bilibili', domain: 'bilibili.com', capability: 'bilibiliBrowserSession', field: 'bilibiliSession' }
@@ -467,10 +467,21 @@ async function readSketchfabFromPage(media, sender, clientCaptureId, requestId, 
     throw helper.downloadError(error?.code === 'PAGE_READ_TIMEOUT' ? 'SKETCHFAB_DOWNLOAD_TIMEOUT' : 'SKETCHFAB_SOURCE_CHANGED');
   }
   if (!reply?.ok) throw helper.downloadError(reply?.code);
+  if (Object.hasOwn(reply, 'viewerTransfer')) {
+    const transfer = globalThis.MosaicSketchfabViewerTransfer;
+    if (!allowViewer || !transfer || Object.hasOwn(reply, 'archiveUrl') || Object.hasOwn(reply, 'viewerSnapshot')) throw helper.downloadError('SKETCHFAB_VIEWER_INVALID');
+    try {
+      const viewerSnapshot = await transfer.receive(reply.viewerTransfer, { modelId: media.modelId, clientCaptureId, requestId }, {
+        read: message => readFromPage(sender, { type: 'shitu:read-sketchfab-viewer', ...message }, transfer.READ_TIMEOUT_MS),
+        release: message => readFromPage(sender, { type: 'shitu:release-sketchfab-viewer', ...message }, 1000),
+      });
+      reply = { ok: true, viewerSnapshot };
+    } catch (error) { throw helper.downloadError(error?.code); }
+  }
   if (Object.hasOwn(reply, 'viewerSnapshot')) {
     if (!allowViewer || Object.hasOwn(reply, 'archiveUrl') || reply.viewerSnapshot?.version !== 1 || reply.viewerSnapshot?.modelId !== media.modelId ||
         !Array.isArray(reply.viewerSnapshot.meshes) || !reply.viewerSnapshot.meshes.length || reply.viewerSnapshot.meshes.length > 512 ||
-        new TextEncoder().encode(JSON.stringify(reply.viewerSnapshot)).byteLength > 48 * 1024 * 1024) throw helper.downloadError('SKETCHFAB_VIEWER_INVALID');
+        new TextEncoder().encode(JSON.stringify(reply.viewerSnapshot)).byteLength > 384 * 1024 * 1024) throw helper.downloadError('SKETCHFAB_VIEWER_INVALID');
     return { viewerSnapshot: reply.viewerSnapshot };
   }
   return { archiveUrl: helper.checkedArchiveUrl(reply.archiveUrl, media.modelId) };

@@ -3,7 +3,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
-const { compactGeometry, MIN_COMPONENTS } = require('../extension/sketchfab-geometry-transfer.js');
+const { compactGeometry, MIN_COMPONENTS, MAX_GEOMETRY_BYTES, MAX_VERTICES } = require('../extension/sketchfab-geometry-transfer.js');
 const sample = () => ({ version: 1, modelId: '0123456789abcdef0123456789abcdef', meshes: [{
   positions: [0.123456789, 0, 0, 1, 0, 0, 0, 1, 0], normals: [0,0,1, 0,0,1, 0,0,1], texcoords: [0,0,1,0,0,1],
   indices: [0,1,2], joints: [0,1,0,0, 0,1,0,0, 0,1,0,0], weights: [0.5,0.5,0,0, 1,0,0,0, 0,1,0,0], material: { metallicFactor: 0.4 } }], images: [],
@@ -27,6 +27,20 @@ test('the threshold applies to total geometry across many meshes and leaves smal
   const half = Math.ceil(MIN_COMPONENTS / 2), large = { meshes: [{ positions: Array(half).fill(0.1) }, { positions: Array(half).fill(0.2) }] };
   const converted = compactGeometry(large);
   assert.equal(converted.meshes[0].positions.count, half); assert.equal(converted.meshes[1].positions.count, half);
+});
+
+test('expanded flat-shaded geometry uses a bounded three-million-vertex transfer policy', () => {
+  const { DEFAULT_LIMITS } = require('../src/sketchfab-viewer-export.cjs');
+  assert.equal(MAX_VERTICES, 3000000);
+  assert.equal(MAX_VERTICES, DEFAULT_LIMITS.vertices);
+  assert.equal(MAX_GEOMETRY_BYTES, 192 * 1024 * 1024);
+  assert.equal(MAX_GEOMETRY_BYTES, DEFAULT_LIMITS.geometryBytes);
+  // Oversized lengths fail before element access or binary materialization.
+  const positions = new Array(MAX_VERTICES * 3 + 1);
+  let read = false;
+  Object.defineProperty(positions, '0', { enumerable: true, get() { read = true; return 0; } });
+  assert.throws(() => compactGeometry({ meshes: [{ positions }] }), { code: 'SKETCHFAB_VIEWER_TOO_LARGE' });
+  assert.equal(read, false);
 });
 
 test('the browser UMD path encodes without a Node Buffer global', () => {

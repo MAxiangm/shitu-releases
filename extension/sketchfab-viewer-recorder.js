@@ -5,9 +5,10 @@
   else if (api.isSketchfabPage(root.location?.href)) api.installSketchfabViewerRecorder(root);
 })(typeof globalThis === 'object' ? globalThis : this, function () {
   'use strict';
-  const DEFAULTS = Object.freeze({ maxVertices: 1000000, maxMeshes: 512, maxImages: 128,
-    maxImageBytes: 32 * 1024 * 1024, maxJsonBytes: 48 * 1024 * 1024, maxShadowBytes: 128 * 1024 * 1024,
-    maxTexturePixels: 4096 * 4096, maxIndices: 3000000, waitMs: 700, minRequestInterval: 1200 });
+  const DEFAULTS = Object.freeze({ maxVertices: 3000000, maxMeshes: 512, maxImages: 128,
+    maxImageBytes: 96 * 1024 * 1024, maxJsonBytes: 384 * 1024 * 1024, maxShadowBytes: 128 * 1024 * 1024,
+    maxTextureDimension: 8192, maxTexturePixels: 8192 * 8192, maxImagePixels: 64 * 1024 * 1024,
+    maxIndices: 3000000, waitMs: 700, minRequestInterval: 1200 });
   const C = { ARRAY: 34962, ELEMENT: 34963, TEXTURE_2D: 3553, TEXTURE0: 33984, FLOAT: 5126,
     BYTE: 5120, UBYTE: 5121, SHORT: 5122, USHORT: 5123, INT: 5124, UINT: 5125, HALF: 5131,
     TRIANGLES: 4, STRIP: 5, FAN: 6, RGBA: 6408, RGB: 6407, SAMPLER_2D: 35678 };
@@ -540,6 +541,34 @@
       }
       return out;
     }
+    function compactStaticVertices(mesh, sourceVertices) {
+      // Without source normals, joining corners would change the normals the
+      // preview computes. Skin weights are attached later by the scene reader.
+      if (!mesh.normals) return sourceVertices;
+      const fields = [['positions', 3], ['normals', 3], ['texcoords', 2], ['colors', 4]]
+        .filter(([name]) => Array.isArray(mesh[name]));
+      const count = mesh.positions.length / 3, remap = new Uint32Array(count), unique = new Map(), representatives = [];
+      for (let vertex = 0; vertex < count; vertex++) {
+        const tuple = [];
+        for (const [name, size] of fields) for (let c = 0; c < size; c++) {
+          // GLB writes these attributes as Float32. Quantized W offsets can
+          // produce different JS doubles that encode to the exact same float.
+          const value = Math.fround(mesh[name][vertex * size + c]);
+          tuple.push(Object.is(value, -0) ? '-0' : String(value));
+        }
+        const key = tuple.join(','), previous = unique.get(key);
+        if (previous !== undefined) remap[vertex] = previous;
+        else { remap[vertex] = representatives.length; unique.set(key, representatives.length); representatives.push(vertex); }
+      }
+      if (representatives.length === count) return sourceVertices;
+      for (const [name, size] of fields) {
+        const source = mesh[name], output = [];
+        for (const vertex of representatives) for (let c = 0; c < size; c++) output.push(source[vertex * size + c]);
+        mesh[name] = output;
+      }
+      mesh.indices = mesh.indices.map(index => remap[index]);
+      return representatives.map(vertex => sourceVertices[vertex]);
+    }
     function meshFor(d) {
       for (const attribute of Object.values(d.attributes)) if (buffer(d.s, attribute.buffer)?.version !== attribute.version) throw failure('SKETCHFAB_VIEWER_INCOMPLETE');
       const raw = [];
@@ -621,12 +650,13 @@
         mesh.material.baseColorFactor[3] *= d.opacityFactor;
       }
       if (!color && !d.texture) warn('未识别底色参数，当前网格使用默认材质。');
-      meshVertices.set(mesh, vertices);
+      meshVertices.set(mesh, d.sceneBinding?.isRig ? vertices : compactStaticVertices(mesh, vertices));
       return mesh;
     }
     async function pixelsFromTexture(t) {
       if (!t || t.deleted || !t.width || !t.height || t.target !== C.TEXTURE_2D) throw failure('SKETCHFAB_VIEWER_INCOMPLETE', 'texture-unavailable');
-      if (t.width * t.height > limits.maxTexturePixels) throw failure('SKETCHFAB_VIEWER_TOO_LARGE', 'texture-dimensions');
+      if (t.width > limits.maxTextureDimension || t.height > limits.maxTextureDimension ||
+          t.width * t.height > limits.maxTexturePixels) throw failure('SKETCHFAB_VIEWER_TOO_LARGE', 'texture-dimensions');
       const gl = t.gl, framebuffer = gl.createFramebuffer(), pixels = new Uint8Array(t.width * t.height * 4);
       const get = key => key === undefined ? undefined : gl.getParameter(key);
       const framebufferBinding = get(gl.FRAMEBUFFER_BINDING || 36006), pack = get(gl.PACK_ALIGNMENT || 3333);
@@ -668,6 +698,10 @@
       return ctx.getImageData(0, 0, t.width, t.height).data;
     }
     async function pngFromPixels(width, height, pixels, name) {
+      if (pending) {
+        pending.imagePixels += width * height;
+        if (pending.imagePixels > limits.maxImagePixels) throw failure('SKETCHFAB_VIEWER_TOO_LARGE', 'image-pixel-budget');
+      }
       const canvas = scope.OffscreenCanvas ? new scope.OffscreenCanvas(width, height) : scope.document?.createElement('canvas');
       if (!canvas) throw failure('SKETCHFAB_VIEWER_INCOMPLETE'); canvas.width = width; canvas.height = height;
       const ctx = canvas.getContext('2d'); if (!ctx) throw failure('SKETCHFAB_VIEWER_INCOMPLETE');
@@ -682,9 +716,11 @@
       return { name, mimeType: 'image/png', data: data.slice(22) };
     }
     async function pngFromTexture(t, rgbOnly = false) {
+      const width = t.width, height = t.height, version = t.version, name = 'base-color-' + t.id + '.png';
       const pixels = await pixelsFromTexture(t);
+      if (t.version !== version) throw failure('SKETCHFAB_VIEWER_INCOMPLETE', 'texture-updated');
       if (rgbOnly) for (let i = 3; i < pixels.length; i += 4) pixels[i] = 255;
-      return pngFromPixels(t.width, t.height, pixels, 'base-color-' + t.id + '.png');
+      return pngFromPixels(width, height, pixels, name);
     }
     async function pngWithOpacity(d) {
       const opacity = d.opacityTexture;
@@ -717,12 +753,13 @@
       if (!channel.texture) return { value: adjust(1) };
       const texture = channel.texture;
       if (texture.version !== channel.version) throw failure('SKETCHFAB_VIEWER_INCOMPLETE');
+      const sourceWidth = texture.width, sourceHeight = texture.height;
       const pixels = await pixelsFromTexture(texture);
       if (texture.version !== channel.version) throw failure('SKETCHFAB_VIEWER_INCOMPLETE');
-      const at = (x, y) => pixels[(Math.max(0, Math.min(texture.height - 1, y)) * texture.width + Math.max(0, Math.min(texture.width - 1, x))) * 4 + channel.channel] / 255;
-      if (channel.constantUV) return { value: adjust(at(Math.floor(channel.constantUV[0] * texture.width), Math.floor(channel.constantUV[1] * texture.height))) };
-      return { width: texture.width, height: texture.height, read(x, y, width, height) {
-        const u = (x + 0.5) * texture.width / width - 0.5, v = (y + 0.5) * texture.height / height - 0.5;
+      const at = (x, y) => pixels[(Math.max(0, Math.min(sourceHeight - 1, y)) * sourceWidth + Math.max(0, Math.min(sourceWidth - 1, x))) * 4 + channel.channel] / 255;
+      if (channel.constantUV) return { value: adjust(at(Math.floor(channel.constantUV[0] * sourceWidth), Math.floor(channel.constantUV[1] * sourceHeight))) };
+      return { width: sourceWidth, height: sourceHeight, read(x, y, width, height) {
+        const u = (x + 0.5) * sourceWidth / width - 0.5, v = (y + 0.5) * sourceHeight / height - 0.5;
         const left = Math.floor(u), top = Math.floor(v), fx = u - left, fy = v - top;
         return adjust((at(left, top) * (1 - fx) + at(left + 1, top) * fx) * (1 - fy) +
           (at(left, top + 1) * (1 - fx) + at(left + 1, top + 1) * fx) * fy);
@@ -793,7 +830,7 @@
     async function snapshot(modelId, { waitMs = limits.waitMs, compact = false, waitForGeometryMs = 0 } = {}) {
       if (disposed || !syncModel() || modelId !== currentId) throw failure('SKETCHFAB_VIEWER_INVALID');
       if (pending) throw failure('SKETCHFAB_VIEWER_UNAVAILABLE');
-      const job = { modelId, draws: new Map(), changed: false, unsupported: false, tooLarge: false, stage: 'waiting' }; pending = job;
+      const job = { modelId, draws: new Map(), changed: false, unsupported: false, tooLarge: false, imagePixels: 0, stage: 'waiting' }; pending = job;
       try {
         if (waitMs > 0) await new Promise(resolve => timeout(resolve, Math.min(1000, waitMs)));
         // The page can display its canvas before the first model draw. Give the

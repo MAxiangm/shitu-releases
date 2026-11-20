@@ -1,6 +1,6 @@
 (function (scope) {
   'use strict';
-  const MAX_JSON_BYTES = 48 * 1024 * 1024;
+  const MAX_JSON_BYTES = 384 * 1024 * 1024;
   const CAPTURE_TIMEOUT_MS = 60000;
   const ID = /^[a-f0-9]{32}$/;
   const failure = code => Object.assign(new Error(code), { code });

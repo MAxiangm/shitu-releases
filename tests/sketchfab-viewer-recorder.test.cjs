@@ -147,6 +147,92 @@ test('static triangle records positions, normals, UV, indices, world matrix and 
   assert.equal(f.gl.nativeCalls.filter(x => x[0] === 'drawElements').length, 1);
 });
 
+function expandedQuad(f, { normalSeam = false, uvSeam = false, colorSeam = false, normals = true, rig = false, translate = 0 } = {}) {
+  const attrs = ['Vertex', ...(normals ? ['Normal'] : []), 'TexCoord0', 'Color', ...(rig ? ['Bones', 'Weights'] : [])];
+  const p = f.program(attrs, [], [
+    { type: 35633, source: 'void main(){vColor=uArrayColorEnabled==1.0?Color:vec4(1.0);gl_Position=uProjectionMatrix*uModelViewMatrix*uModelMatrix*vec4(Vertex,1.0);}' },
+    { type: 35632, source: 'vec3 getVertexColor(){return vColor.rgb;}void main(){vec3 albedo=vec3(1.0);albedo*=getVertexColor();}' }
+  ]);
+  const positions = [0,0,0, 1,0,0, 0,1,0, 0,0,0, 0,1,0, 1,1,0];
+  const normalValues = Array.from({ length: 6 }, () => [0,0,1]).flat();
+  const uvValues = [0,0, 1,0, 0,1, 0,0, 0,1, 1,1];
+  const colorValues = Array.from({ length: 6 }, () => [1,0.5,0.25,1]).flat();
+  if (normalSeam) normalValues.splice(9, 3, 0,1,0);
+  if (uvSeam) uvValues[6] = 0.5;
+  if (colorSeam) colorValues[12] = 0.25;
+  f.attribute(0, new Float32Array(positions), 3);
+  if (normals) f.attribute(attrs.indexOf('Normal'), new Float32Array(normalValues), 3);
+  f.attribute(attrs.indexOf('TexCoord0'), new Float32Array(uvValues), 2);
+  f.attribute(attrs.indexOf('Color'), new Float32Array(colorValues), 4);
+  if (rig) {
+    f.attribute(attrs.indexOf('Bones'), new Uint16Array(24), 4, f.gl.UNSIGNED_SHORT);
+    f.attribute(attrs.indexOf('Weights'), new Float32Array(Array.from({ length: 6 }, () => [1,0,0,0]).flat()), 4);
+  }
+  f.gl.uniform1f(f.gl.getUniformLocation(p, 'uArrayColorEnabled'), 1);
+  const matrix = IDENTITY.slice(); matrix[12] = translate;
+  f.gl.uniformMatrix4fv(f.gl.getUniformLocation(p, 'uModelMatrix'), false, matrix);
+  f.gl.drawArrays(f.gl.TRIANGLES, 0, 6);
+}
+
+test('identical static vertex tuples compact without changing triangle order or output attributes', async t => {
+  const f = fixture(t); expandedQuad(f);
+  const mesh = (await f.recorder.snapshot(ID)).meshes[0];
+  assert.deepEqual(mesh.positions, [0,0,0, 1,0,0, 0,1,0, 1,1,0]);
+  assert.deepEqual(mesh.indices, [0,1,2,0,2,3]);
+  assert.equal(mesh.normals.length, 12); assert.equal(mesh.texcoords.length, 8); assert.equal(mesh.colors.length, 16);
+});
+
+test('static compaction keeps normal, UV and vertex-color seams distinct', async t => {
+  for (const seam of ['normalSeam', 'uvSeam', 'colorSeam']) {
+    const f = fixture(t); expandedQuad(f, { [seam]: true });
+    const mesh = (await f.recorder.snapshot(ID)).meshes[0];
+    assert.equal(mesh.positions.length / 3, 5, seam);
+    assert.deepEqual(mesh.indices, [0,1,2,3,2,4], seam);
+  }
+});
+
+test('quantized corner doubles merge only when their exported Float32 attributes match', async t => {
+  const f = fixture(t);
+  const p = f.program(['Vertex', 'Normal'], [], [{ type: 35633,
+    source: 'void main(){vec3 localVertex=Vertex.xyz;localVertex+=Vertex.w;localVertex=localVertex*uQVS+uQVT;gl_Position=vec4(localVertex,1.0);}' }]);
+  f.attribute(0, new Uint16Array([
+    19968,19968,19968,32, 40000,20000,20000,0, 20000,40000,20000,0,
+    19967,19967,19967,33, 20000,40000,20000,0, 40000,40000,20000,0,
+  ]), 4, f.gl.UNSIGNED_SHORT, true);
+  f.attribute(1, new Float32Array(Array.from({ length: 6 }, () => [0,0,1]).flat()), 3);
+  f.gl.uniform3fv(f.gl.getUniformLocation(p, 'uQVS'), [1,1,1]);
+  f.gl.uniform3fv(f.gl.getUniformLocation(p, 'uQVT'), [0,0,0]);
+  f.gl.drawArrays(f.gl.TRIANGLES, 0, 6);
+  const mesh = (await f.recorder.snapshot(ID)).meshes[0];
+  assert.notEqual(19968 / 65535 + 32 / 65535, 19967 / 65535 + 33 / 65535);
+  assert.deepEqual(mesh.indices, [0,1,2,0,2,3]);
+  assert.equal(mesh.positions.length, 12);
+  assert.equal(Math.fround(mesh.positions[0]), Math.fround(20000 / 65535));
+});
+
+test('static compaction is counted before the combined vertex budget', async t => {
+  const f = fixture(t, { maxVertices: 8 }); expandedQuad(f); expandedQuad(f, { translate: 2 });
+  const snapshot = await f.recorder.snapshot(ID);
+  assert.equal(snapshot.meshes.length, 2);
+  assert.equal(snapshot.meshes.reduce((sum, mesh) => sum + mesh.positions.length / 3, 0), 8);
+});
+
+test('missing normals keep original corners so generated shading cannot change', async t => {
+  const f = fixture(t); expandedQuad(f, { normals: false });
+  const mesh = (await f.recorder.snapshot(ID)).meshes[0];
+  assert.equal(mesh.positions.length / 3, 6);
+  assert.deepEqual(mesh.indices, [0,1,2,3,4,5]);
+});
+
+test('skin bindings preserve distinct source vertices even when static attributes are identical', async t => {
+  const sceneRecorder = sceneStub(), f = fixture(t, { sceneRecorder }); expandedQuad(f, { rig: true });
+  const mesh = (await f.recorder.snapshot(ID)).meshes[0];
+  assert.equal(mesh.positions.length / 3, 6);
+  assert.deepEqual(sceneRecorder.entries[0].vertexIndices, [0,1,2,3,4,5]);
+  assert.deepEqual(mesh.indices, [0,1,2,3,4,5]);
+  assert.equal(mesh.joints.length, 24); assert.equal(mesh.weights.length, 24);
+});
+
 test('bufferData copies typed-array views and bufferSubData honors byte offsets', async t => {
   const f = fixture(t); const p = f.program(['Vertex']);
   const backing = new Float32Array([999, 0, 0, 0, 1, 0, 0, 0, 1, 0, 999]);
@@ -321,9 +407,39 @@ test('compressed texture fallback preserves sRGB and cannot record its internal 
 
 test('a texture beyond the readback pixel limit reports size, not an endless loading hint', async t => {
   const f = fixture(t); f.triangle({ textured: true });
-  f.gl.texImage2D(f.gl.TEXTURE_2D, 0, f.gl.RGBA, 4097, 4096, 0, f.gl.RGBA, f.gl.UNSIGNED_BYTE, null);
+  f.gl.texImage2D(f.gl.TEXTURE_2D, 0, f.gl.RGBA, 8193, 8192, 0, f.gl.RGBA, f.gl.UNSIGNED_BYTE, null);
   f.gl.drawElements(f.gl.TRIANGLES, 3, f.gl.UNSIGNED_SHORT, 0);
   await assert.rejects(f.recorder.snapshot(ID), { code: 'SKETCHFAB_VIEWER_TOO_LARGE' });
+});
+
+test('high-resolution texture uploads replace the preview within fixed dimension and pixel budgets', async t => {
+  const f = fixture(t, { maxTextureDimension: 2, maxTexturePixels: 4, maxImagePixels: 4 });
+  f.triangle({ textured: true });
+  f.gl.texImage2D(f.gl.TEXTURE_2D, 0, f.gl.RGBA, 2, 2, 0, f.gl.RGBA, f.gl.UNSIGNED_BYTE, null);
+  f.gl.drawElements(f.gl.TRIANGLES, 3, f.gl.UNSIGNED_SHORT, 0);
+  const snapshot = await f.recorder.snapshot(ID);
+  assert.equal(snapshot.images.length, 1);
+  assert.equal(f.images[0].pixels.length, 16);
+  assert.deepEqual(f.images[0].pixels.slice(0, 4), [255, 0, 0, 127]);
+  const defaults = require('../extension/sketchfab-viewer-recorder.js').DEFAULT_LIMITS;
+  assert.equal(defaults.maxTextureDimension, 8192);
+  assert.equal(defaults.maxTexturePixels, 8192 * 8192);
+  assert.equal(defaults.maxImagePixels, 64 * 1024 * 1024);
+  assert.equal(defaults.maxVertices, 3000000);
+  assert.equal(defaults.maxJsonBytes, 384 * 1024 * 1024);
+});
+
+test('multiple encoded material maps share one total image pixel budget', async t => {
+  const f = fixture(t, { maxImagePixels: 4 }); pbrTriangle(f);
+  await assert.rejects(f.recorder.snapshot(ID), error => error.code === 'SKETCHFAB_VIEWER_TOO_LARGE' && error.detail === 'image-pixel-budget');
+});
+
+test('a texture resized after pixel readback cannot encode old pixels with new dimensions', async t => {
+  const f = fixture(t); f.triangle({ textured: true });
+  queueMicrotask(() => f.gl.texImage2D(f.gl.TEXTURE_2D, 0, f.gl.RGBA, 2, 2, 0, f.gl.RGBA, f.gl.UNSIGNED_BYTE, null));
+  const capturing = f.recorder.snapshot(ID);
+  await assert.rejects(capturing, error => error.code === 'SKETCHFAB_VIEWER_INCOMPLETE' && error.detail === 'texture-updated');
+  assert.equal(f.images.length, 0);
 });
 
 test('known base-color sampler without a bound texture cannot silently lose its material', async t => {
