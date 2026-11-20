@@ -18,6 +18,7 @@ const { resolveAssetFiles, createDragIcon } = require('./asset-actions.cjs');
 const { assetMenuTemplate } = require('./asset-menu.cjs');
 const sharp = require('sharp');
 const { createImagePlugins } = require('./image-plugins.cjs');
+const { createImageEditorService } = require('./image-editor-service.cjs');
 const { createAppUpdater } = require('./app-updater.cjs');
 const { createUpdateTransport } = require('./update-transport.cjs');
 const { createUpdateScheduler, updateIntervalMs } = require('./update-scheduler.cjs');
@@ -73,6 +74,7 @@ let switchingLibrary=false;
 let draggingAssets=false;
 let movingAssets=0;
 let imagePlugins;
+let imageEditor;
 let videoEngine;
 let audioEngine;
 let audioPreviewService;
@@ -139,7 +141,7 @@ async function saveUserMetadata(method, args, { recordHistory = false, expectedR
   } finally { metadataSaves.delete(save); sendHistory(); }
 }
 function ensureHistoryAvailable() {
-  if (closing || switchingLibrary || importing || draggingAssets || installingUpdate || assetExporter?.busy() || videoTranscodeService?.busy() || imagePlugins?.busy() || collector?.activeCount())
+  if (closing || switchingLibrary || importing || draggingAssets || installingUpdate || assetExporter?.busy() || videoTranscodeService?.busy() || imagePlugins?.busy() || imageEditor?.busy() || collector?.activeCount())
     throw new Error('请等待当前导入、转码、处理或拖放完成后再撤销或重做');
 }
 async function replayHistory(direction, expectedRoot, expectedId) {
@@ -229,7 +231,7 @@ function forwardVideoProgress(event, owner) {
     state: event.state, progress: Number.isFinite(event.progress) ? Math.max(0, Math.min(100, event.progress)) : undefined });
 }
 async function switchLibrary(mode) {
-  if(switchingLibrary || importing || draggingAssets || movingAssets || historyBusy || metadataSaves.size || assetExporter?.busy() || fontExporter?.busy() || videoTranscodeService?.busy() || imagePlugins?.busy() || collector?.activeCount() || bundleRepairBusy)throw new Error('请等待当前素材操作完成后再切换素材库');
+  if(switchingLibrary || importing || draggingAssets || movingAssets || historyBusy || metadataSaves.size || assetExporter?.busy() || fontExporter?.busy() || videoTranscodeService?.busy() || imagePlugins?.busy() || imageEditor?.busy() || collector?.activeCount() || bundleRepairBusy)throw new Error('请等待当前素材操作完成后再切换素材库');
   if(mode==='migrate')requireLibrary();
   switchingLibrary=true;
   try {
@@ -638,6 +640,18 @@ function bindHandlers() {
     return imagePlugins.run(request);
   });
   checkedHandler('plugin-cancel', id => imagePlugins.cancel(id));
+  checkedHandler('image-editor-read', (id, root) => {
+    if (closing || switchingLibrary) throw new Error('请等待当前素材操作完成后再编辑');
+    return imageEditor.read(id, root);
+  });
+  checkedHandler('image-editor-save', request => {
+    if (closing || switchingLibrary || historyBusy || importing || imageEditor.busy()) throw new Error('请等待当前素材操作完成后再保存');
+    return imageEditor.save(request);
+  });
+  checkedHandler('image-editor-export', request => {
+    if (closing || switchingLibrary || imageEditor.busy()) throw new Error('请等待当前素材操作完成后再导出');
+    return imageEditor.exportImage(request);
+  });
   ipcMain.on('shitu:start-drag', (event, ids, expectedRoot) => {
     try { assertTrustedSender(event); } catch { return; }
     if (installingUpdate) return;
@@ -823,16 +837,25 @@ async function createWindow() {
   mainWindow.on('close', event => {
     if (mayClose) { mayClose=false; closing=false; return; }
     event.preventDefault();
-    if (switchingLibrary || importing || draggingAssets || historyBusy || metadataSaves.size || assetExporter?.busy() || fontExporter?.busy() || imagePlugins?.busy() || collector?.activeCount() || bundleRepairBusy) {
+    if (switchingLibrary || importing || draggingAssets || historyBusy || metadataSaves.size || assetExporter?.busy() || fontExporter?.busy() || imagePlugins?.busy() || imageEditor?.busy() || collector?.activeCount() || bundleRepairBusy) {
       dialog.showMessageBox(mainWindow, { type: 'info', title: '素材操作进行中', message: '请等待素材操作完成后再关闭 Mosaic。图片处理任务可在插件中心取消。', buttons: ['知道了'] });
       return;
     }
     if (closing) return;
     closing = true;
-    fontThumbnailRecovery?.controller.abort();
-    audioPreviewService?.invalidate();
-    similarImages?.invalidate();
-    Promise.resolve(videoTranscodeService?.shutdown()).then(() => Promise.all([transcodeSettings?.flush(), transcodePresets?.flush()])).then(() => library?.flush()).then(() => Promise.allSettled([videoSiteAuth?.shutdown(), sketchfabAccount?.shutdown(), transcodeDevices?.shutdown?.(), videoTranscoder?.shutdown(), audioEngine?.shutdown(), modelService?.shutdown(), fontExporter?.shutdown(), fontService?.shutdown(), aeProjects?.shutdown(), aePreviewService?.shutdown()])).then(() => { mayClose = true; mainWindow.close(); }).catch(error => {
+    // Ask before shutting down services: a beforeunload veto after shutdown
+    // would otherwise leave an open editor with unusable media services.
+    mainWindow.webContents.executeJavaScript('typeof imageEditorUi === "undefined" || imageEditorUi.canCloseApp()').then(async allowed => {
+      if (!allowed) { closing = false; return; }
+      fontThumbnailRecovery?.controller.abort();
+      audioPreviewService?.invalidate();
+      similarImages?.invalidate();
+      await videoTranscodeService?.shutdown();
+      await Promise.all([transcodeSettings?.flush(), transcodePresets?.flush()]);
+      await library?.flush();
+      await Promise.allSettled([videoSiteAuth?.shutdown(), sketchfabAccount?.shutdown(), transcodeDevices?.shutdown?.(), videoTranscoder?.shutdown(), audioEngine?.shutdown(), modelService?.shutdown(), fontExporter?.shutdown(), fontService?.shutdown(), aeProjects?.shutdown(), aePreviewService?.shutdown()]);
+      mayClose = true; mainWindow.close();
+    }).catch(error => {
       closing = false;
       dialog.showErrorBox('保存未完成', error.message);
     });
@@ -911,6 +934,12 @@ else {
         { ...options, modelBundle: asset.modelBundle, modelDirectory: owner.getModelBundleDirectory(asset.id) }),
       prepareProject: (owner, id, options) => aePreviewService.prepare(owner, id, options),
       onProgress: detail => sendActionEvent('export-progress', detail),
+      onChanged: owner => { if (owner === library) sendActionEvent('library-changed'); }
+    });
+    imageEditor = createImageEditorService({
+      getLibrary: () => closing || switchingLibrary ? null : library,
+      dialog, getParentWindow: () => mainWindow,
+      tempRoot: path.join(app.getPath('userData'), 'image-editor'),
       onChanged: owner => { if (owner === library) sendActionEvent('library-changed'); }
     });
     imagePlugins=createImagePlugins({

@@ -33,6 +33,9 @@ contextBridge.exposeInMainWorld('shitu', Object.freeze({
   pluginUninstall: id => call('plugin-uninstall', id),
   pluginRun: request => call('plugin-run', request),
   pluginCancel: id => call('plugin-cancel', id),
+  readImageForEditor: (id, root) => call('image-editor-read', id, root),
+  saveEditedImage: request => call('image-editor-save', request),
+  exportEditedImage: request => call('image-editor-export', request),
   onPluginEvent: callback => {
     const listener = (_event, event) => callback(event);
     ipcRenderer.on('shitu:plugin-event', listener);

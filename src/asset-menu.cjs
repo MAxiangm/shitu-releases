@@ -18,6 +18,10 @@ function assetMenuTemplate(assets, folders, choose, transcodePresets = []) {
   const item = (id, label, enabled = true) => ({ id, label, enabled, click: () => choose(id) });
   return [
     item('preview', '预览', one),
+    ...(one && !anyTrashed && first.mediaType === 'image' ? [
+      item('image-edit', '编辑图片…'),
+      item('texture-maps', '生成材质贴图 / 无缝平铺…')
+    ] : []),
     ...(one && isSearchableImage(first) ? [item('similar-images', '查找相似图片…')] : []),
     item('font-compare', '对比所选字体…', assets.length >= 2 && !anyTrashed && assets.every(asset => asset.mediaType === 'font' || FONT.has(asset.ext))),
     item('open', '使用系统应用打开', one),

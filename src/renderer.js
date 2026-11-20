@@ -164,7 +164,14 @@ const similarImagesUi = window.ShituSimilarImages.create({
     if (asset) showAssetInOverview(asset, state.library);
   })
 });
-function featureDialogOpen() { return skinPickerUi.isOpen() || batchRenameUi.isOpen() || fontCompareUi.isOpen() || smartFoldersUi.isOpen() || folderIconsUi.isOpen() || similarImagesUi.isOpen(); }
+const imageEditorUi = window.ShituImageEditor.create({ api, assetUrl: api.assetUrl,
+  onSaved: result => {
+    if (result.snapshot?.root !== state.library.root) return;
+    applyLibrary(result.snapshot);
+    toast(result.duplicate ? '相同结果已存在于素材库' : '编辑结果已保存为新素材');
+  }
+});
+function featureDialogOpen() { return imageEditorUi.isOpen() || skinPickerUi.isOpen() || batchRenameUi.isOpen() || fontCompareUi.isOpen() || smartFoldersUi.isOpen() || folderIconsUi.isOpen() || similarImagesUi.isOpen(); }
 function activeSmartFolder() { return (state.library.smartFolders || []).find(folder => folder.id === state.smartFolder) || null; }
 async function openBatchRename(ids = [...state.selected]) {
   const root = state.library.root;
@@ -1014,6 +1021,7 @@ function applyLibrary(library, preserveSelection = true) {
   }
   if (rootChanged) {
     setHeaderMenuOpen(false);
+    imageEditorUi.close(true);
     similarImagesUi.close();
     batchRenameUi.close(true); fontCompareUi.close(); smartFoldersUi.close(); folderIconsUi.close(true); skinPickerUi.close();
     closeFolderMenu();
@@ -1782,6 +1790,11 @@ async function showAssetContextMenu(id) {
   // stale preview pointing at an item that moved out of the current view.
   if (state.previewId && ['rename', 'batch-rename', 'font-compare', 'tags', 'folder', 'favorite', 'unfavorite', 'trash', 'restore'].includes(result.action)) closePreview();
   switch (result.action) {
+    case 'image-edit':
+    case 'texture-maps':
+      closePreview();
+      await imageEditorUi.open(first, root, result.action === 'texture-maps' ? 'maps' : 'edit');
+      break;
     case 'batch-rename': await openBatchRename(ids); break;
     case 'font-compare': await openFontCompare(ids); break;
     case 'similar-images': closePreview(); similarImagesUi.open(first, root); break;
