@@ -117,6 +117,17 @@ test('negative, malformed and overprecision OCR amounts are not salvaged into po
   for (const input of ['价税合计：-100.00', '价税合计：¥-100.00', '价税合计：- ¥100.00', '价税合计：(100.00)', '价税合计：1.234', '价税合计：1,23.45', '价税合计：1e3', '总金额：10,000,000,000.00']) assert.equal(Amounts.extractInvoiceAmount(input).amount, null, input);
 });
 
+test('Unicode and trailing minus signs cannot be stripped from a negative invoice total', () => {
+  for (const minus of ['-', '−', '‐', '‑', '‒', '–', '—', '﹘', '﹣', '－']) {
+    for (const amount of [`${minus}100.00`, `${minus} ¥100.00`, `¥${minus}100.00`, `100.00${minus}`, `¥100.00 ${minus}`]) {
+      assert.equal(Amounts.parseAmount(amount), null, amount);
+      const result = Amounts.extractInvoiceAmount(`价税合计（小写）${amount}`);
+      assert.equal(result.cents, null, amount); assert.equal(result.confidence, 'none', amount);
+    }
+  }
+  assert.equal(Amounts.extractInvoiceAmount('价税合计（小写）￥100.00').cents, 10000);
+});
+
 test('unreadable stronger totals stay blank instead of falling back to weaker amounts or invoice IDs', () => {
   for (const input of ['金额合计：1000.00\n价税合计（小写）无法辨认', '价税合计：100.00\n价税合计：无法辨认', '总金额：\n电话 12345678', 'Total Amount\nInvoice number 12345678']) {
     const result = Amounts.extractInvoiceAmount(input);

@@ -223,10 +223,16 @@ function createInvoiceService({ rootDir, getLibrary, chooseFiles, chooseSavePath
   async function removeItems(ids) {
     if (closed || busy()) throw new Error('请等待当前发票任务完成');
     if (!Array.isArray(ids) || ids.length > MAX_ITEMS || new Set(ids).size !== ids.length || ids.some(id => !records.has(id))) throw new Error('发票条目无效');
-    const directories = new Set();
-    for (const id of ids) { const item = records.get(id); directories.add(item.directory); records.delete(id); await fs.rm(item.path, { force: true }); }
-    for (const directory of directories) if (![...records.values()].some(item => item.directory === directory)) await fs.rm(directory, { recursive: true, force: true });
+    const removed = ids.map(id => records.get(id)), directories = new Set(removed.map(item => item.directory));
+    // Commit the in-memory removal together before asynchronous cleanup. A
+    // temporarily locked preview must not leave a fingerprint pointing to a
+    // deleted record or prevent the same source from being added again.
+    for (const id of ids) records.delete(id);
     for (const [hash, entries] of fingerprints) if (entries.some(id => ids.includes(id))) fingerprints.delete(hash);
+    for (const item of removed) await fs.rm(item.path, { force: true }).catch(() => {});
+    // These are disposable session copies. Shutdown retries whole-session
+    // cleanup if another reader still holds one of them open on Windows.
+    for (const directory of directories) if (![...records.values()].some(item => item.directory === directory)) await fs.rm(directory, { recursive: true, force: true }).catch(() => {});
     return { removed: true };
   }
   async function revealResult(id) {

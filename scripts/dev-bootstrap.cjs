@@ -512,6 +512,25 @@ function configureUpdateSmoke() {
         Object.assign(uiResult, preservedUi);
         updateNetworkBlocked = false;
         await window.webContents.executeJavaScript(`runUpdateAction(() => api.checkUpdate())`);
+        const editorGuard = await window.webContents.executeJavaScript(`(async () => {
+          const original = imageEditorUi.canCloseApp;
+          imageEditorUi.canCloseApp = () => false;
+          let rejected = false;
+          try { await api.installUpdate(); }
+          catch (error) {
+            if (!/保存或放弃图片编辑/.test(error.message)) throw error;
+            rejected = true;
+          }
+          finally { imageEditorUi.canCloseApp = original; }
+          if (!rejected) throw new Error('Update installation ignored unsaved image-editor work');
+          const state = await api.updateState();
+          if (state.status !== 'downloaded') throw new Error('Blocked update lost its verified download');
+          return { unsavedEditorBlocksInstallation: true };
+        })()`);
+        assert.equal(installRequest, null, 'Unsaved editor must block installer launch.');
+        assert.equal(collectorClosed, false, 'Rejected installation must leave services running.');
+        assert.equal(collectorOptions.isReady(), true, 'Rejected installation must leave the library usable.');
+        Object.assign(uiResult, editorGuard);
         assert.deepEqual(failures, []);
         // Pixel capture is optional on headless CI; the UI/IPC assertions above are required.
         try {

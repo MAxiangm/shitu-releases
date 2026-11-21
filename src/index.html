@@ -63,7 +63,7 @@
     <symbol id="i-redo" viewBox="0 0 24 24"><path d="m15 5 5 5-5 5M20 10H10a6 6 0 0 0 0 12"/></symbol>
     <symbol id="i-shield" viewBox="0 0 24 24"><path d="m12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6Z"/><path d="m8 12 3 3 5-6"/></symbol>
   </defs></svg>
-  <header class="app-header">
+  <header class="app-header" inert aria-hidden="true">
     <div class="header-identity">
       <div class="brand"><div class="brand-mark" data-brand-motion="paused" aria-hidden="true"><svg class="brand-mark-static"><use href="#i-mosaic-mark"/></svg><span class="brand-mark-motion"></span></div><strong>Mosaic</strong></div>
       <button class="library-switch" id="libraryInfo" type="button" aria-label="管理素材库" title="管理素材库位置">
@@ -100,7 +100,7 @@
     <button id="windowMaximize" type="button" aria-label="最大化窗口" title="最大化窗口"><svg class="window-control-icon window-maximize-icon" viewBox="0 0 16 16" aria-hidden="true"><rect x="3.5" y="3.5" width="9" height="9"/></svg><svg class="window-control-icon window-restore-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M6 3.5h6.5V10"/><rect x="3.5" y="6" width="6.5" height="6.5"/></svg></button>
     <button id="windowClose" type="button" aria-label="关闭窗口" title="关闭窗口"><svg class="window-control-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="m4 4 8 8M12 4l-8 8"/></svg></button>
   </div>
-  <div class="app-shell details-hidden">
+  <div class="app-shell details-hidden library-pending" inert aria-hidden="true">
     <aside id="folderSidebar" class="folder-sidebar hidden" aria-label="文件夹侧栏"></aside>
     <main class="workspace">
       <section class="page-heading"><div><div class="eyebrow">YOUR VISUAL COLLECTION</div><h1 id="pageTitle">全部素材<span class="title-dot">.</span></h1><p id="pageSubtitle">收集值得留下的灵感。</p></div></section>

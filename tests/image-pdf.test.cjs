@@ -196,6 +196,22 @@ test('cancellation removes partial output and emits AbortError', async t => {
   await assert.rejects(fs.access(output), { code: 'ENOENT' });
 });
 
+test('cancellation preserves another file moved into the output path while generation is running', async t => {
+  const { dir, image, output } = await fixture(t), input = await image('input.png');
+  const moved = path.join(dir, 'displaced-partial.pdf'), controller = new AbortController();
+  const sync = require('node:fs');
+  let replaced = false;
+  await assert.rejects(writeImagePdf({ inputPaths: [input], outputPath: output, signal: controller.signal,
+    onProgress: () => {
+      if (replaced) return;
+      sync.renameSync(output, moved);
+      sync.writeFileSync(output, 'another file that must survive');
+      replaced = true; controller.abort();
+    } }), { name: 'AbortError' });
+  assert.equal(replaced, true);
+  assert.equal(await fs.readFile(output, 'utf8'), 'another file that must survive');
+});
+
 test('invalid input and multi-page image leave no incomplete document', async t => {
   const { dir, output } = await fixture(t);
   const invalid = path.join(dir, 'invalid.png');

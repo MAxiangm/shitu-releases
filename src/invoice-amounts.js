@@ -6,7 +6,7 @@
   'use strict';
 
   const MAX_AMOUNT_CENTS = 999999999999;
-  const normalize = value => value.normalize('NFKC').replace(/\r\n?/g, '\n').replace(/[\u200B-\u200D\uFEFF]/g, '').replace(/−/g, '-');
+  const normalize = value => value.normalize('NFKC').replace(/\r\n?/g, '\n').replace(/[\u200B-\u200D\uFEFF]/g, '').replace(/[−‐‑‒–—﹘﹣]/g, '-');
 
   // Strings are yuan; numeric values accepted by totalAmounts are already cents.
   // Never convert yuan through floating point, including while formatting totals.
@@ -68,13 +68,13 @@
     if (/\d[.,][ \t\n]+\d|\d[ \t\n]+[.,][ \t\n]*\d/.test(value)) return tokens;
     // Consume malformed precision and signed numbers as a whole so a fragment
     // of "-100.00" or "1.234" cannot silently become a valid positive amount.
-    const regex = /(?<![A-Za-z0-9_.,+\-])(?:[¥￥]\s*)?[+\-]?\s*(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?:[ \t]*元)?(?![A-Za-z0-9_.,])/g;
+    const regex = /(?<![A-Za-z0-9_.,+\-])(?:[¥￥]\s*)?[+\-]?\s*(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?:[ \t]*元)?(?![A-Za-z0-9_.,+\-])/g;
     for (const match of value.matchAll(regex)) {
       const raw = match[0].trim();
       const preceding = value.slice(0, match.index);
       const following = value.slice(match.index + match[0].length);
       if (/^[ \t]*(?:%|年|月|日|号|张|个)/.test(following)) continue;
-      if (/[+\-][ \t]*$/.test(preceding) || (/\([ \t]*$/.test(preceding) && /^[ \t]*\)/.test(following))) continue;
+      if (/[+\-][ \t]*$/.test(preceding) || /^[ \t]*[+\-]/.test(following) || (/\([ \t]*$/.test(preceding) && /^[ \t]*\)/.test(following))) continue;
       // Long bare numbers are usually invoice IDs, account numbers or dates.
       if (!/[¥￥.,]/.test(raw) && raw.replace(/\D/g, '').length > 8) continue;
       const cents = parseAmount(raw);

@@ -73,6 +73,17 @@ async function electronTest({ app, BrowserWindow }, options) {
     await click('#sp-run'); await settle();
     assert(await js(() => document.querySelector('#sp-job-message').textContent.includes('识别失败') && !document.querySelector('#sp-run').disabled), 'OCR error did not restore action');
     checks.push('Missing runtime and recognition error recovery');
+    await click('[data-plugin-id="convert"]'); await click('#sp-run'); await settle();
+    assert(await js(() => [...document.querySelectorAll('#sp-result-links button')].some(button => button.textContent === '打开结果')), 'Image conversion result is not openable in its source library');
+    await js(async () => { window.shituPlugins.close(); await window.shituPlugins.open({ assets: window.fixtureAssets, selectedIds: ['image-1'], pluginId: 'convert', libraryRoot: 'C:\\different-library' }); });
+    assert(await js(() => ![...document.querySelectorAll('#sp-result-links button')].some(button => button.textContent === '打开结果')), 'A different library still offers the previous library result ID');
+    checks.push('Completed image result links do not leak into another library');
+    await js(() => { window.delayNextList = true; window.pendingPluginOpen = window.shituPlugins.open({ assets: window.fixtureAssets, selectedIds: ['image-1'], pluginId: 'crop', libraryRoot: 'C:\\different-library' }); });
+    await js(async () => { window.shituPlugins.close(); await window.shituPlugins.open({ assets: window.fixtureAssets, selectedIds: ['image-2'], pluginId: 'image-to-pdf', libraryRoot: 'C:\\different-library' }); window.completePluginList(); await window.pendingPluginOpen; });
+    assert(await js(() => document.querySelector('.sp-plugin-item.is-active').dataset.pluginId === 'image-to-pdf' && document.querySelector('.sp-source.is-selected').dataset.assetId === 'image-2'), 'A stale plugin open request replaced the newer tool or source selection');
+    await js(() => { document.querySelector('#sp-close').focus(); document.querySelector('#sp-close').dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', shiftKey: true, bubbles: true, cancelable: true })); });
+    assert(await js(() => document.querySelector('#pluginCenter').contains(document.activeElement) && document.activeElement !== document.querySelector('#sp-close')), 'Plugin keyboard focus escaped the dialog');
+    checks.push('Reopening ignores stale requests and keyboard focus remains in the dialog');
     await js(() => window.shituPlugins.close());
     assert(await js(() => document.querySelector('#pluginCenter').hidden), 'Plugin center did not close');
     assert(errors.length === 0, errors.join('\n'));
@@ -94,19 +105,20 @@ function mockBridge() {
   window.fixtureAssets = [1, 2].map(n => ({ id: `image-${n}`, name: `示例图片 ${n}`, mediaType: 'image', ext: 'png', originalUrl: url }));
   let listener;
   window.shitu = {
-    pluginsList: async () => ({ plugins: ids.map(id => ({ id, installed: true, enabled: true, resourceReady: id !== 'extract-text' || window.ocrAvailable, runtime: id === 'extract-text' ? { languages: [{ tag: 'zh-Hans', name: '中文（简体）' }, { tag: 'en-US', name: 'English' }], error: window.ocrAvailable ? '' : '未安装识别语言，请在 Windows 设置中安装。' } : {} })) }),
+    pluginsList: async () => { const result = { plugins: ids.map(id => ({ id, installed: true, enabled: true, resourceReady: id !== 'extract-text' || window.ocrAvailable, runtime: id === 'extract-text' ? { languages: [{ tag: 'zh-Hans', name: '中文（简体）' }, { tag: 'en-US', name: 'English' }], error: window.ocrAvailable ? '' : '未安装识别语言，请在 Windows 设置中安装。' } : {} })) }; if (window.delayNextList) { window.delayNextList = false; return new Promise(resolve => { window.completePluginList = () => resolve(result); }); } return result; },
     onPluginEvent: callback => { listener = callback; return () => {}; },
     pluginRun: async request => {
       window.requests.push(request); const jobId = `job-${window.requests.length}`;
       const next = window.nextResult; window.nextResult = '';
       if (next === 'cancel') return { cancelled: true };
       if (next === 'error') { listener({ type: 'error', pluginId: request.pluginId, jobId, error: '识别失败，请重试。' }); return { jobId }; }
-      listener({ type: 'complete', pluginId: request.pluginId, jobId, results: request.pluginId === 'extract-text' ? [{ sourceId: 'image-1', name: '示例图片 1', text: 'Mosaic 文字提取\nA local image workflow.\n<img src=x onerror=alert(1)>', engine: 'Windows OCR' }, { sourceId: 'image-2', name: '示例图片 2', text: '第二张图片的文字', engine: 'Windows OCR' }] : [{ path: 'C:\\Exports\\document.pdf', name: 'document.pdf', pages: 2, engine: '本地 PDF' }] });
+      listener({ type: 'complete', pluginId: request.pluginId, jobId, results: request.pluginId === 'extract-text' ? [{ sourceId: 'image-1', name: '示例图片 1', text: 'Mosaic 文字提取\nA local image workflow.\n<img src=x onerror=alert(1)>', engine: 'Windows OCR' }, { sourceId: 'image-2', name: '示例图片 2', text: '第二张图片的文字', engine: 'Windows OCR' }] : request.pluginId === 'image-to-pdf' ? [{ path: 'C:\\Exports\\document.pdf', name: 'document.pdf', pages: 2, engine: '本地 PDF' }] : [{ id: 'converted-image-result', name: 'converted.png', engine: 'sharp' }] });
       return { jobId };
     },
     pluginCopyText: async id => { window.copied = id; return { copied: true }; },
     pluginSaveText: async id => { window.saved = id; return { saved: true, path: 'C:\\Exports\\text.txt' }; },
-    pluginRevealResult: async id => { window.revealed = id; return { revealed: true }; }
+    pluginRevealResult: async id => { window.revealed = id; return { revealed: true }; },
+    openAsset: async id => { window.openedImage = id; }
   };
 }
 

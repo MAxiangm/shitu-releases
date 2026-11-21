@@ -2,7 +2,7 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { createReadStream } = require('node:fs');
-const { Library } = require('./library.cjs');
+const { Library, isIndexTemporary, copyFileAtomically } = require('./library.cjs');
 const { MODEL, PROJECT } = require('./media-formats.cjs');
 const { validateModelBundle, modelBundleHash } = require('./model-bundle.cjs');
 const { validateProjectBundle, projectBundleHash } = require('./project-bundle.cjs');
@@ -106,7 +106,7 @@ class LibraryManager {
         await handle.writeFile(JSON.stringify({ version: 1, libraryRoot: root }, null, 2) + '\n', 'utf8');
         await handle.sync();
       } finally { await handle.close(); }
-      try { await fs.copyFile(this.configPath, `${this.configPath}.backup`); }
+      try { await copyFileAtomically(this.configPath, `${this.configPath}.backup`); }
       catch (error) { if (error.code !== 'ENOENT') throw error; }
       await fs.rename(temporary, this.configPath);
     } catch (error) {
@@ -167,8 +167,8 @@ class LibraryManager {
       // Copy into a newly reserved directory. No existing destination files or
       // source files are overwritten or removed, even if saving config fails.
       for (const entry of await fs.readdir(source)) {
-        if (entry.endsWith('.tmp')) continue;
-        await fs.cp(path.join(source, entry), path.join(destination, entry), { recursive: true, force: false, errorOnExist: true, dereference: false, filter: filename => !filename.endsWith('.tmp') });
+        if (isIndexTemporary(source, path.join(source, entry))) continue;
+        await fs.cp(path.join(source, entry), path.join(destination, entry), { recursive: true, force: false, errorOnExist: true, dereference: false });
       }
       const candidate = await this._existing(destination);
       for (const asset of candidate.snapshot().assets) {

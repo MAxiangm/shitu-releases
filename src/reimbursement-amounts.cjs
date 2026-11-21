@@ -9,7 +9,7 @@ const { extractInvoiceAmount } = require('./invoice-amounts.js');
 
 const MAX_BYTES = 64 * 1024 * 1024;
 // Bump when changes to PDF text extraction or amount parsing require a rescan.
-const ENGINE_VERSION = 2;
+const ENGINE_VERSION = 3;
 const abortError = () => Object.assign(new Error('金额识别已取消'), { name: 'AbortError' });
 const check = signal => { if (signal?.aborted) throw abortError(); };
 const digest = bytes => crypto.createHash('sha256').update(bytes).digest('hex');

@@ -118,7 +118,7 @@ test('same-byte cache uses the actual source hash and returns a detached summary
 
 test('old engine caches rescan automatic pages once while preserving manual and excluded decisions', async t => {
   const f = await fixture(t), sourceHash = digest(await fs.readFile(f.pdfPath));
-  for (const engineVersion of [undefined, 1]) {
+  for (const engineVersion of [undefined, 1, 2]) {
     const previous = { version: 1, ...(engineVersion === undefined ? {} : { engineVersion }), sourceHash,
       pages: [manualPage(1, 0), excludedPage(2), resultPage(3, ''), resultPage(4, high)] };
     const before = structuredClone(previous), convertCalls = [];
@@ -135,6 +135,18 @@ test('old engine caches rescan automatic pages once while preserving manual and 
     assert.equal(cachedCalls.length, 0, 'upgraded cache must not rescan on the next build');
     assert.deepEqual(cached, result);
   }
+  assert.deepEqual(await f.pendingWork(), []);
+});
+
+test('rescan removes cached positive amounts that came from Unicode or trailing negative signs', async t => {
+  const f = await fixture(t), sourceHash = digest(await fs.readFile(f.pdfPath));
+  const previous = { version: 1, engineVersion: 2, sourceHash,
+    pages: [resultPage(1, '价税合计￥100.00'), manualPage(2), excludedPage(3)] };
+  const result = await recognizeReimbursementInvoice({ asset: asset(previous), inputPath: f.pdfPath, workRoot: f.workRoot,
+    pdfReader: f.pdfReader(['价税合计（小写）—100.00', 'unused manual', 'unused excluded']) });
+  assert.equal(result.engineVersion, ENGINE_VERSION);
+  assert.equal(result.pages[0].status, 'pending'); assert.equal(result.pages[0].amountCents, null); assert.equal(result.pages[0].detectedCents, null);
+  assert.deepEqual(result.pages.slice(1), previous.pages.slice(1));
   assert.deepEqual(await f.pendingWork(), []);
 });
 

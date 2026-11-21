@@ -131,6 +131,10 @@ const now = () => new Date().toISOString();
 const PENDING_DELETE = /^\.pending-delete-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const PENDING_BUNDLE_REPAIR = /^\.pending-repair-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const PENDING_REIMBURSEMENT = /^\.pending-reimbursement-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+function isIndexTemporary(root, filename) {
+  return path.dirname(filename) === root && /^index\.json\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.tmp$/i.test(path.basename(filename));
+}
 const bundleRepairValidator = ext => PROJECT.has(ext) ? validateProjectBundle : validateModelBundle;
 
 function text(value, label, limit) {
@@ -177,6 +181,20 @@ async function replaceIndexFile(source, destination) {
       if (!['EPERM', 'EACCES', 'EBUSY'].includes(error.code) || attempt >= 5) throw error;
       await new Promise(resolve => setTimeout(resolve, 25 * (attempt + 1)));
     }
+  }
+}
+
+async function copyFileAtomically(source, destination) {
+  const temporary = `${destination}.${crypto.randomUUID()}.tmp`;
+  try {
+    await fs.copyFile(source, temporary, require('node:fs').constants.COPYFILE_EXCL);
+    const handle = await fs.open(temporary, 'r+');
+    try { await handle.sync(); } finally { await handle.close(); }
+    // Replacing the directory entry avoids following a backup file that was
+    // hard-linked or symlinked to another document and keeps crash recovery whole.
+    await replaceIndexFile(temporary, destination);
+  } finally {
+    await fs.rm(temporary, { force: true }).catch(() => {});
   }
 }
 
@@ -253,6 +271,8 @@ class Library {
     }
     await fs.mkdir(path.join(this.root, 'originals'), { recursive: true });
     await fs.mkdir(path.join(this.root, 'thumbnails'), { recursive: true });
+    await this._checkManagedParent('originals/check');
+    await this._checkManagedParent('thumbnails/check');
     await this._recoverReimbursementDocuments();
     await this._recoverBundleRepairs();
     await this._recoverPendingDeletions();
@@ -338,7 +358,7 @@ class Library {
       const handle = await fs.open(temporary, 'wx');
       try { await handle.writeFile(JSON.stringify(data, null, 2), 'utf8'); await handle.sync(); }
       finally { await handle.close(); }
-      try { await fs.copyFile(this.indexPath, path.join(this.root, 'index.backup.json')); }
+      try { await copyFileAtomically(this.indexPath, path.join(this.root, 'index.backup.json')); }
       catch (error) { if (error.code !== 'ENOENT') throw error; }
       await replaceIndexFile(temporary, this.indexPath);
       this.data = data;
@@ -560,6 +580,7 @@ class Library {
               const entryExtension = path.posix.extname(projectBundle.entry).slice(1).toLowerCase();
               let dimensions = {}, thumbnail = null;
               if (this.createThumbnail) {
+                await this._checkManagedParent(`thumbnails/${id}.jpg`);
                 thumbnailPath = path.join(this.root, 'thumbnails', `${id}.jpg`);
                 try {
                   dimensions = await this.createThumbnail(path.join(this.root, filename), thumbnailPath, { projectBundle, projectDirectory: copied }) || {};
@@ -603,6 +624,7 @@ class Library {
                 const filename = `${relativeDirectory}/${modelBundle.entry}`;
                 let dimensions = {}, thumbnail = null;
                 if (this.createThumbnail) {
+                  await this._checkManagedParent(`thumbnails/${id}.jpg`);
                   thumbnailPath = path.join(this.root, 'thumbnails', `${id}.jpg`);
                   try {
                     dimensions = await this.createThumbnail(path.join(this.root, filename), thumbnailPath, { modelBundle, modelDirectory: copied }) || {};
@@ -631,6 +653,7 @@ class Library {
             else {
               const id = crypto.randomUUID();
               const filename = `originals/${id}.${ext}`;
+              await this._checkManagedParent(filename);
               copied = path.join(this.root, filename);
               await fs.copyFile(absolute, copied, require('node:fs').constants.COPYFILE_EXCL);
               // Hash the managed copy too so a source changing during import never gets a stale identity.
@@ -640,6 +663,7 @@ class Library {
                 let dimensions = {};
                 let thumbnail = null;
                 if (this.createThumbnail) {
+                  await this._checkManagedParent(`thumbnails/${id}.jpg`);
                   thumbnailPath = path.join(this.root, 'thumbnails', `${id}.jpg`);
                   try {
                     dimensions = await this.createThumbnail(copied, thumbnailPath,
@@ -886,7 +910,7 @@ class Library {
 
   async _finishDeletion(directory, files) {
     // A recovery index must not reference originals that are about to disappear.
-    await fs.copyFile(this.indexPath, path.join(this.root, 'index.backup.json'));
+    await copyFileAtomically(this.indexPath, path.join(this.root, 'index.backup.json'));
     await this._cleanDeletion(directory, files);
   }
 
@@ -1158,7 +1182,7 @@ class Library {
         if (previousAsset.hash !== hash) {
           // An explicitly accepted edit made outside Mosaic no longer has the
           // old on-disk bytes, so keep the backup index on the accepted revision.
-          try { await fs.copyFile(this.indexPath, path.join(this.root, 'index.backup.json')); }
+          try { await copyFileAtomically(this.indexPath, path.join(this.root, 'index.backup.json')); }
           catch (error) { warning = `文档信息已保存，备份索引未更新：${error.message}`; }
         }
         return { snapshot: this.snapshot(), assetId: id, ...(warning ? { warning } : {}) };
@@ -1470,7 +1494,7 @@ class Library {
           await fs.copyFile(replacement, current, require('node:fs').constants.COPYFILE_EXCL);
         }
         // A backup index must describe the same managed document bytes.
-        await fs.copyFile(this.indexPath, path.join(this.root, 'index.backup.json'));
+        await copyFileAtomically(this.indexPath, path.join(this.root, 'index.backup.json'));
       } else {
         if (asset && (asset.hash !== oldAssetHash || asset.reimbursementGenerated?.rootId !== rootId || asset.reimbursementGenerated?.kind !== kind)) throw new Error('报销文档索引与恢复清单不一致，已保留');
         if (!asset && oldAssetHash !== null) throw new Error('报销文档旧索引已不存在，暂存文件已保留');
@@ -1532,7 +1556,7 @@ class Library {
         if (!(await fileInfo(current))) throw new Error('已修复的资源包未找到，已保留暂存文件');
         await checkBundleTree(current, newBundle.files.map(file => file.path));
         // Recovery must use the same bundle revision as the active index.
-        await fs.copyFile(this.indexPath, path.join(this.root, 'index.backup.json'));
+        await copyFileAtomically(this.indexPath, path.join(this.root, 'index.backup.json'));
       } else if (await fileInfo(previous)) {
         if (await fileInfo(current)) {
           if (await fileInfo(replacement)) throw new Error('恢复资源包时发现目录冲突，已保留暂存文件');
@@ -1863,10 +1887,10 @@ class Library {
       // A fresh child directory prevents overwriting an earlier backup or unrelated files.
       await fs.mkdir(destination, { recursive: true });
       const folder = path.join(destination, `Mosaic 备份-${now().replace(/[:.]/g, '-')}-${crypto.randomUUID().slice(0, 8)}`);
-      await fs.cp(this.root, folder, { recursive: true, errorOnExist: true, force: false, dereference: false, filter: source => !source.endsWith('.tmp') });
+      await fs.cp(this.root, folder, { recursive: true, errorOnExist: true, force: false, dereference: false, filter: source => !isIndexTemporary(this.root, source) });
       return { path: folder };
     });
   }
 }
 
-module.exports = { Library, SUPPORTED, VIDEO, AUDIO, MODEL, PROJECT, FONT, DOCUMENT };
+module.exports = { Library, SUPPORTED, VIDEO, AUDIO, MODEL, PROJECT, FONT, DOCUMENT, isIndexTemporary, copyFileAtomically };

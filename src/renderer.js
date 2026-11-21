@@ -1534,8 +1534,10 @@ function renderGallery(list) {
   renderSelectionMode();
   $('loadMore').classList.toggle('hidden', list.length <= state.limit);
   $('loadMore').textContent = `加载更多 · 还有 ${Math.max(0, list.length - state.limit).toLocaleString()} 个`;
-  $('emptyState').classList.toggle('hidden', list.length > 0 || childFolders.length > 0);
-  if (!list.length && !childFolders.length) renderEmpty();
+  const showEmpty = hasLibrary() && !list.length && !childFolders.length;
+  $('emptyState').classList.toggle('hidden', !showEmpty);
+  if (showEmpty) renderEmpty();
+  else if (!hasLibrary()) $('emptyState').replaceChildren();
 }
 function selectForAssetAction(id) {
   if (state.selected.has(id)) return;
@@ -1882,8 +1884,9 @@ async function openPluginCenter(pluginId, ids = [...state.selected]) {
 }
 function renderEmpty() {
   const box = $('emptyState');
-  const isNew = state.library.assets.length === 0;
   box.replaceChildren();
+  if (!hasLibrary()) { box.classList.add('hidden'); return; }
+  const isNew = state.library.assets.length === 0;
   if (activeSmartFolder()) {
     const glyph = el('div', 'empty-small-icon'); glyph.append(icon('search'));
     box.append(glyph, el('h2', '', '暂时没有符合条件的素材'), el('p', '', '导入新素材或修改素材信息后，这里会自动更新。'),
@@ -2242,7 +2245,12 @@ function renderLibraryState() {
   $('folderPanelPin').disabled = !ready || state.libraryChanging;
   $('libraryOnboarding').classList.toggle('hidden', ready);
   $('setupAppUpdate').classList.toggle('hidden', ready);
-  document.querySelector('.app-shell').inert = !ready || state.libraryChanging;
+  const appShell = document.querySelector('.app-shell'), appHeader = document.querySelector('.app-header');
+  appShell.classList.toggle('library-pending', !ready);
+  appShell.inert = !ready || state.libraryChanging;
+  appHeader.inert = !ready;
+  if (ready) { appShell.removeAttribute('aria-hidden'); appHeader.removeAttribute('aria-hidden'); }
+  else { appShell.setAttribute('aria-hidden', 'true'); appHeader.setAttribute('aria-hidden', 'true'); }
   $('newFolder').disabled = !ready || state.libraryChanging || Boolean(activeExport);
   $('newSmartFolder').disabled = !ready || state.libraryChanging || Boolean(activeExport);
   $('backupButton').disabled = !ready || state.libraryChanging || Boolean(activeExport);

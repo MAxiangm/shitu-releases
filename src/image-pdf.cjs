@@ -90,7 +90,7 @@ async function writeImagePdf({ inputPaths, outputPath, options = {}, signal, onP
     pages.push({ start, imageIds, contentId: nextObjectId++, pageId: nextObjectId++ });
   }
   checkAbort(signal);
-  let handle, created = false, offset = 0;
+  let handle, outputIdentity, created = false, offset = 0;
   const offsets = [0];
   const pageSizes = [];
   const write = async value => {
@@ -119,6 +119,7 @@ async function writeImagePdf({ inputPaths, outputPath, options = {}, signal, onP
   try {
     handle = await fs.open(outputPath, 'wx');
     created = true;
+    outputIdentity = await handle.stat();
     await write(Buffer.from('%PDF-1.4\n%\xe2\xe3\xcf\xd3\n', 'latin1'));
     await object(1, '<< /Type /Catalog /Pages 2 0 R >>');
     await object(2, `<< /Type /Pages /Count ${pages.length} /Kids [${pages.map(page => `${page.pageId} 0 R`).join(' ')}] >>`);
@@ -164,7 +165,10 @@ async function writeImagePdf({ inputPaths, outputPath, options = {}, signal, onP
       size: offset, engine: '本地 PDF' };
   } catch (error) {
     await handle?.close().catch(() => {});
-    if (created) await fs.rm(outputPath, { force: true }).catch(() => {});
+    if (created && outputIdentity) {
+      const current = await fs.lstat(outputPath).catch(() => null);
+      if (current?.isFile() && !current.isSymbolicLink() && current.dev === outputIdentity.dev && current.ino === outputIdentity.ino) await fs.rm(outputPath, { force: true }).catch(() => {});
+    }
     throw error;
   }
 }

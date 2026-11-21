@@ -98,6 +98,22 @@ test('removed invoices release staged records and can be added again', async t =
   const second = (await f.service.chooseFiles()).items[0]; assert.notEqual(second.id, first.id);
 });
 
+test('a locked temporary preview cannot leave removed invoices stuck in the duplicate index', async t => {
+  const f = await fixture(t), first = (await f.service.chooseFiles()).items[0];
+  const original = await fs.readFile(f.source), remove = fs.rm;
+  fs.rm = async (filename, options) => {
+    if (path.resolve(String(filename)).startsWith(path.join(f.base, 'work') + path.sep)) throw Object.assign(new Error('temporary preview is locked'), { code: 'EBUSY' });
+    return remove(filename, options);
+  };
+  try {
+    assert.deepEqual(await f.service.removeItems([first.id]), { removed: true });
+    await assert.rejects(f.service.preview(first.id), /失效/);
+    const added = await f.service.chooseFiles();
+    assert.deepEqual(added.errors, []); assert.equal(added.items.length, 1); assert.notEqual(added.items[0].id, first.id);
+    assert.deepEqual(await fs.readFile(f.source), original);
+  } finally { fs.rm = remove; }
+});
+
 test('export cannot overwrite an unselected original PDF already added to the module', async t => {
   const f = await fixture(t, { pdfReader: { convert: async ({ outputDir }) => {
     const image = path.join(outputDir, 'pdf-page.png'); await sharp({ create: { width: 50, height: 30, channels: 3, background: '#ff0000' } }).png().toFile(image);

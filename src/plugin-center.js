@@ -11,7 +11,7 @@
     { id: 'extract-text', name: '提取文字', short: '提取文字', icon: 'text', description: '识别图片中的文字，复制或保存为文本。', type: '图片工具' },
     { id: 'image-to-pdf', name: '图片转 PDF', short: '图片转 PDF', icon: 'pdf', description: '将所选图片合并为一个 PDF 文件。', type: '图片工具' }
   ];
-  const state = { open: false, plugins: [], devices: [], assets: [], selected: new Set(), libraryRoot: null, active: null, filter: 'all', job: null, installing: new Map(), cancelableInstalls: new Set(), crop: null, image: null, previousFocus: null, unsubscribe: null };
+  const state = { open: false, openRevision: 0, refreshRevision: 0, plugins: [], devices: [], assets: [], selected: new Set(), libraryRoot: null, active: null, filter: 'all', job: null, installing: new Map(), cancelableInstalls: new Set(), crop: null, image: null, previousFocus: null, unsubscribe: null };
   let root, list, panel, note, drag, cropObserver;
   const $ = id => root.querySelector(`#${id}`);
   const text = (node, value) => { node.textContent = value == null ? '' : String(value); };
@@ -62,28 +62,34 @@
     if (api.onPluginEvent) state.unsubscribe = api.onPluginEvent(handleEvent);
   }
   async function refresh() {
+    const revision = ++state.refreshRevision;
     try {
       const result = await api.pluginsList();
+      if (revision !== state.refreshRevision) return;
       state.plugins = Array.isArray(result) ? result : result.plugins || [];
       state.devices = Array.isArray(result.devices) ? result.devices : [];
       renderList(); if (state.active === 'extract-text') updateOcrLanguages(); updateActions();
-    } catch (error) { report(error.message || String(error), true); }
+    } catch (error) { if (revision === state.refreshRevision) report(error.message || String(error), true); }
   }
   async function open({ assets = [], selectedIds = [], pluginId, libraryRoot } = {}) {
-    build(); state.previousFocus = document.activeElement;
+    build(); const revision = ++state.openRevision;
+    if (!state.open) state.previousFocus = document.activeElement;
     const videos = /^(mp4|webm|m4v|mov|ogv|avi|mkv)$/i;
     state.assets = assets.filter(a => a && a.id && !a.trashedAt && a.mediaType === 'image' && !videos.test(String(a.ext || a.extension || '').replace(/^\./, '')));
     state.selected = new Set(selectedIds.filter(id => state.assets.some(a => a.id === id)));
     state.libraryRoot = libraryRoot || null;
+    if (state.job && !busy() && state.job.libraryRoot !== state.libraryRoot) state.job = null;
     state.open = true; root.hidden = false; document.body.classList.add('is-plugin-center-open');
     text($('sp-library-count'), `${state.assets.length} 张图片可用`);
     if (!state.job) report('');
     await refresh();
+    if (!state.open || revision !== state.openRevision) return;
     selectPlugin(pluginId || state.active || definitions[0].id);
     $('sp-close').focus();
   }
   function close() {
     if (!root) return;
+    state.openRevision++; state.refreshRevision++;
     endCrop(); state.open = false; root.hidden = true; document.body.classList.remove('is-plugin-center-open');
     cropObserver?.disconnect(); state.previousFocus?.focus?.();
   }
@@ -343,7 +349,7 @@
   async function run() {
     if ($('sp-run').disabled) return; report(''); endCrop();
     const processingOptions = options();
-    state.job = { status: 'starting', pluginId: state.active, progress: 0, message: '正在准备处理…' }; renderJob(); updateActions(); renderSources();
+    state.job = { status: 'starting', pluginId: state.active, libraryRoot: state.libraryRoot, progress: 0, message: '正在准备处理…' }; renderJob(); updateActions(); renderSources();
     try {
       const result = await api.pluginRun({ pluginId: state.active, assetIds: chosen().map(a => a.id), options: processingOptions, libraryRoot: state.libraryRoot });
       if (result?.cancelled) { state.job = { pluginId: state.active, status: 'cancelled', message: '已取消保存，未生成 PDF 文件。' }; renderJob(); updateActions(); renderSources(); return; }
@@ -436,7 +442,8 @@
         if (api.pluginRevealResult) resultLinks.append(button('在文件夹中显示', 'sp-text-button', async () => {
           try { await api.pluginRevealResult(j.jobId); } catch (error) { report(error.message || String(error), true); }
         }));
-      } else if (api.openAsset && j.results[0].id) resultLinks.append(button('打开结果', 'sp-text-button', async () => {
+      } else if (api.openAsset && j.results[0].id && j.libraryRoot === state.libraryRoot) resultLinks.append(button('打开结果', 'sp-text-button', async () => {
+        if (j.libraryRoot !== state.libraryRoot) { report('素材库已切换，请回到原素材库打开结果。', true); return; }
         try { await api.openAsset(j.results[0].id); } catch (error) { report(error.message || String(error), true); }
       }));
       resultLinks.hidden = false;

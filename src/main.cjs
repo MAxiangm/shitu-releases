@@ -384,6 +384,14 @@ function ensureUpdateCanInstall() {
 
 async function installDownloadedUpdate({ filePath }) {
   ensureUpdateCanInstall();
+  // Check before launching the installer or stopping services. A later
+  // beforeunload veto would otherwise leave the editor in a stopped app.
+  const canClose = await mainWindow.webContents.executeJavaScript('typeof imageEditorUi === "undefined" || imageEditorUi.canCloseApp()');
+  if (!canClose) {
+    const message = '请先保存或放弃图片编辑，再安装更新';
+    throw Object.assign(new Error(message), { publicMessage: message });
+  }
+  ensureUpdateCanInstall();
   installingUpdate = true;
   try {
     similarImages?.invalidate();
