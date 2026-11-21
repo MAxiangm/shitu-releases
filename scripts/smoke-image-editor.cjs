@@ -42,6 +42,89 @@ async function electronTest({ app, BrowserWindow, session }, options) {
     }, name, value);
     await pause(180);
   }
+  async function layerParameter(name, value) {
+    await js((name, value) => {
+      const node = document.querySelector(`[data-layer-param="${name}"]`);
+      if (!node || node.disabled) throw new Error(`Unavailable layer parameter ${name}`);
+      node.value = String(value);
+      node.dispatchEvent(new Event('input', { bubbles: true }));
+      node.dispatchEvent(new Event('change', { bubbles: true }));
+    }, name, value);
+    await pause(80);
+  }
+  const layerCount = () => js(() => document.querySelectorAll('.ie-layer-row').length);
+  const activeLayerId = () => js(() => document.querySelector('.ie-layer-row.is-active')?.dataset.layerId);
+  async function importLayer(name, color, rectangle = [96, 72, 64, 48]) {
+    const before = await layerCount();
+    await js(async (name, color, rectangle) => {
+      const canvas = document.createElement('canvas'); canvas.width = 256; canvas.height = 192;
+      const context = canvas.getContext('2d'); context.fillStyle = color; context.fillRect(...rectangle);
+      const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+      const files = new DataTransfer(); files.items.add(new File([blob], name, { type: 'image/png' }));
+      const input = document.querySelector('#imageEditorLayerFile');
+      if (!input) throw new Error('Missing image-layer import input');
+      input.files = files.files; input.dispatchEvent(new Event('change', { bubbles: true }));
+    }, name, color, rectangle);
+    const deadline = Date.now() + 10000;
+    while (Date.now() < deadline && await layerCount() !== before + 1) await pause(30);
+    assert(await layerCount() === before + 1, `Image import did not create a layer: ${name}`);
+    await pause(100);
+    return activeLayerId();
+  }
+  async function transferLayer(kind, color, rectangle) {
+    const before = await layerCount();
+    const eventResult = await js(async (kind, color, rectangle) => {
+      const canvas = document.createElement('canvas'); canvas.width = 256; canvas.height = 192;
+      const context = canvas.getContext('2d'); context.fillStyle = color; context.fillRect(...rectangle);
+      const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+      const transfer = new DataTransfer(); transfer.items.add(new File([blob], `${kind}.png`, { type: 'image/png' }));
+      const event = kind === 'drop'
+        ? new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: transfer })
+        : new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: transfer });
+      let bubbled = 0;
+      const observe = () => { bubbled++; };
+      document.addEventListener(kind, observe);
+      document.querySelector(kind === 'drop' ? '#imageEditorStage' : '#imageEditorOverlayCanvas').dispatchEvent(event);
+      document.removeEventListener(kind, observe);
+      return { prevented: event.defaultPrevented, bubbled };
+    }, kind, color, rectangle);
+    assert(eventResult.prevented && eventResult.bubbled === 0, `${kind} event escaped the editor into the asset library: ${JSON.stringify(eventResult)}`);
+    const deadline = Date.now() + 10000;
+    while (Date.now() < deadline && await layerCount() !== before + 1) await pause(30);
+    assert(await layerCount() === before + 1, `${kind} did not create an image layer`);
+    await pause(100);
+    return activeLayerId();
+  }
+  async function layerAction(id, action) { await click(`.ie-layer-row[data-layer-id="${id}"] [data-layer-action="${action}"]`); }
+  const assertPixel = (actual, expected, message, tolerance = 2) => assert(actual.every((value, channel) => Math.abs(value - expected[channel]) <= tolerance), `${message}: ${JSON.stringify(actual)}, expected ${JSON.stringify(expected)}`);
+  async function key(keyCode, modifiers = []) {
+    await js(() => document.querySelector('#imageEditorOverlayCanvas').focus());
+    window.webContents.sendInputEvent({ type: 'keyDown', keyCode, modifiers });
+    window.webContents.sendInputEvent({ type: 'keyUp', keyCode, modifiers });
+    await pause(80);
+  }
+  async function zoom(value) {
+    await js(value => {
+      const node = document.querySelector('[data-view="zoom"]');
+      node.value = String(value);
+      node.dispatchEvent(new Event('change', { bubbles: true }));
+    }, value);
+    await pause(80);
+  }
+  async function dragStage() {
+    const point = await js(() => {
+      const stage = document.querySelector('#imageEditorStage');
+      stage.scrollTop = 200; stage.scrollLeft = 100;
+      const bounds = stage.getBoundingClientRect();
+      return { x: Math.round(bounds.left + bounds.width / 2), y: Math.round(bounds.top + bounds.height / 2), top: stage.scrollTop };
+    });
+    window.webContents.sendInputEvent({ type: 'mouseMove', x: point.x, y: point.y });
+    window.webContents.sendInputEvent({ type: 'mouseDown', x: point.x, y: point.y, button: 'left', clickCount: 1 });
+    window.webContents.sendInputEvent({ type: 'mouseMove', x: point.x, y: point.y - 70, button: 'left' });
+    window.webContents.sendInputEvent({ type: 'mouseUp', x: point.x, y: point.y - 70, button: 'left', clickCount: 1 });
+    await pause(80);
+    return { before: point.top, after: await js(() => document.querySelector('#imageEditorStage').scrollTop) };
+  }
   async function mouse(kind, x, y, modifiers = []) {
     const point = await js((x, y) => {
       const canvas = document.querySelector('#imageEditorOverlayCanvas');
@@ -105,6 +188,119 @@ async function electronTest({ app, BrowserWindow, session }, options) {
     }, options.fixture);
     await waitFor(() => !document.querySelector('[data-action="save"]').disabled && document.querySelector('#imageEditorCanvas').width === 256, 'Editor did not become ready');
     assert((await js(() => document.querySelector('#imageEditorCanvas').width)) === 256, 'Editor changed source resolution');
+
+    const layout = await js(() => {
+      const bounds = selector => {
+        const r = document.querySelector(selector).getBoundingClientRect();
+        return { left: r.left, right: r.right, width: r.width, height: r.height };
+      };
+      const tools = [...document.querySelectorAll('.ie-toolrail [data-tool]')];
+      return {
+        rail: bounds('.ie-toolrail'), main: bounds('.ie-main'), sidebar: bounds('.ie-sidebar'), options: bounds('.ie-options'),
+        tools: tools.map(node => ({ name: node.dataset.tool, icon: Boolean(node.querySelector('svg')), label: node.getAttribute('aria-label'), title: node.title, tooltip: node.dataset.tooltip })),
+        active: tools.filter(node => node.getAttribute('aria-pressed') === 'true').map(node => node.dataset.tool)
+      };
+    });
+    assert(layout.tools.length === 11 && layout.tools.every(tool => tool.icon && tool.label && tool.title && tool.tooltip), 'Every editor tool must have a real icon, accessible name and tooltip');
+    assert(layout.active.length === 1 && layout.active[0] === 'brush', 'Tool rail must mark exactly the current tool as pressed');
+    assert(layout.rail.width <= 104 && layout.rail.right <= layout.main.left + 1 && layout.main.right <= layout.sidebar.left + 1, 'Expected a narrow left tool rail, center canvas and right property panel');
+    assert(layout.options.width > 0 && layout.options.height > 0, 'Current-tool options are not visible');
+    await fs.writeFile(path.join(options.directory, 'edit-layout.png'), (await window.webContents.capturePage()).toPNG());
+    window.setSize(900, 650);
+    await pause(140);
+    const compact = await js(() => {
+      const stage = document.querySelector('#imageEditorStage').getBoundingClientRect();
+      const save = document.querySelector('[data-action="save"]').getBoundingClientRect();
+      return { stageWidth: stage.width, stageHeight: stage.height, saveRight: save.right, saveBottom: save.bottom, width: innerWidth, height: innerHeight, overflow: document.documentElement.scrollWidth > innerWidth };
+    });
+    assert(compact.stageWidth >= 200 && compact.stageHeight >= 160 && compact.saveRight <= compact.width && compact.saveBottom <= compact.height && !compact.overflow, `Compact editor clips its canvas or save action: ${JSON.stringify(compact)}`);
+    await fs.writeFile(path.join(options.directory, 'edit-compact.png'), (await window.webContents.capturePage()).toPNG());
+    window.setSize(1460, 950);
+    await pause(140);
+    checks.push('accessible icon toolbar, left/canvas/right layout and compact 900 x 650 workspace');
+
+    for (const [keyCode, modifiers, expected] of [['I', [], 'eyedropper'], ['H', [], 'hand'], ['Z', [], 'zoom'], ['M', [], 'rect'], ['M', ['shift'], 'ellipse'], ['B', [], 'brush'], ['E', [], 'eraser'], ['S', [], 'clone'], ['P', [], 'pen'], ['L', [], 'lasso'], ['V', [], 'move']]) {
+      await key(keyCode, modifiers);
+      const active = await js(() => document.querySelector('.ie-toolrail [aria-pressed="true"]')?.dataset.tool);
+      assert(active === expected, `${modifiers.join('+')}+${keyCode} selected ${active}, expected ${expected}`);
+    }
+    checks.push('all eleven tools switch through their keyboard shortcuts, including Shift+M ellipse and V move');
+
+    await key('I');
+    const sampled = await js(() => {
+      const canvas = document.querySelector('#imageEditorOverlayCanvas'), bounds = canvas.getBoundingClientRect();
+      const screenX = Math.round(bounds.left + 180.5 / canvas.width * bounds.width);
+      const screenY = Math.round(bounds.top + 120.5 / canvas.height * bounds.height);
+      const x = Math.floor((screenX - bounds.left) * canvas.width / bounds.width);
+      const y = Math.floor((screenY - bounds.top) * canvas.height / bounds.height);
+      return Array.from(document.querySelector('#imageEditorCanvas').getContext('2d').getImageData(x, y, 1, 1).data);
+    });
+    await stroke([[180.5, 120.5]]);
+    const expectedColor = '#' + sampled.slice(0, 3).map(value => value.toString(16).padStart(2, '0')).join('');
+    const pickedColor = await js(() => document.querySelector('[data-param="color"]').value);
+    assert(pickedColor === expectedColor, `Eyedropper did not update foreground color from source pixels: ${pickedColor}, expected ${expectedColor}`);
+    await key('B');
+    await parameter('size', 24); await parameter('opacity', 100); await parameter('hardness', 100);
+    await stroke([[55, 120]]);
+    const sampledPaint = await pixel(55, 120);
+    assert(sampled.every((channel, index) => Math.abs(channel - sampledPaint[index]) <= 1), 'Brush did not paint the picked foreground color');
+    await click('[data-action="undo"]');
+    checks.push('eyedropper samples source RGB and the brush paints with that foreground color');
+
+    await click('[data-action="zoom-actual"]');
+    const actualWidth = await js(() => document.querySelector('#imageEditorOverlayCanvas').getBoundingClientRect().width);
+    assert(Math.abs(actualWidth - 256) <= 1, `Actual-size zoom is not 100%: ${actualWidth}`);
+    await click('[data-action="zoom-in"]');
+    const largerWidth = await js(() => document.querySelector('#imageEditorOverlayCanvas').getBoundingClientRect().width);
+    assert(largerWidth > actualWidth, 'Zoom-in button did not increase canvas display size');
+    await click('[data-action="zoom-out"]');
+    assert(Math.abs(await js(() => document.querySelector('#imageEditorOverlayCanvas').getBoundingClientRect().width) - actualWidth) <= 1, 'Zoom-out button did not restore display size');
+    await key('Z'); await stroke([[100, 80]]);
+    assert(await js(() => document.querySelector('#imageEditorOverlayCanvas').getBoundingClientRect().width) > actualWidth, 'Zoom tool click did not zoom in');
+    await stroke([[100, 80]], ['alt']);
+    assert(Math.abs(await js(() => document.querySelector('#imageEditorOverlayCanvas').getBoundingClientRect().width) - actualWidth) <= 1, 'Alt-click zoom did not zoom out');
+    await key('0', ['control']);
+    assert(await js(() => document.querySelector('[data-view="zoom"]').value) === 'fit', 'Ctrl+0 did not fit the image');
+    await key('1', ['control']);
+    assert(await js(() => document.querySelector('[data-view="zoom"]').value) === '1', 'Ctrl+1 did not use actual size');
+    checks.push('zoom buttons, canvas click / Alt-click, fit and actual-size shortcuts');
+
+    await zoom(8);
+    const imageHash = () => js(() => {
+      const canvas = document.querySelector('#imageEditorCanvas');
+      return canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data.reduce((hash, value) => (hash * 31 + value) | 0, 0);
+    });
+    const beforePan = await imageHash();
+    await key('H');
+    const pan = await dragStage();
+    assert(pan.after > pan.before + 20, `Hand tool did not pan the zoomed canvas: ${JSON.stringify(pan)}`);
+    await key('B');
+    window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Space' });
+    const temporaryPan = await dragStage();
+    window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Space' });
+    await pause(80);
+    assert(temporaryPan.after > temporaryPan.before + 20, 'Holding Space did not temporarily pan the canvas');
+    assert(await js(() => document.querySelector('.ie-toolrail [aria-pressed="true"]')?.dataset.tool) === 'brush', 'Releasing Space did not restore the brush');
+    assert(await imageHash() === beforePan, 'Pan or temporary hand interaction modified image pixels');
+    checks.push('hand and temporary Space panning preserve image pixels and restore the active tool');
+
+    await js(() => document.querySelector('[data-view="original"]').focus());
+    window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Space' });
+    window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Space' });
+    await pause(80);
+    assert(await js(() => document.querySelector('[data-view="original"]').checked), 'Space did not activate the focused original-reference checkbox');
+    window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Space' });
+    window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Space' });
+    await pause(80);
+    assert(!(await js(() => document.querySelector('[data-view="original"]').checked)), 'Space did not restore the focused original-reference checkbox');
+    await js(() => document.querySelector('[data-tool="eraser"]').focus());
+    window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Space' });
+    window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Space' });
+    await pause(80);
+    assert(await js(() => document.querySelector('[data-tool="eraser"]').getAttribute('aria-pressed')) === 'true', 'Space did not activate the focused eraser button');
+    checks.push('Space keeps native checkbox toggles and tool-button keyboard activation');
+    await reopen();
+
     const originalCenter = await pixel(70, 60);
     await parameter('size', 28);
     await parameter('opacity', 100);
@@ -234,6 +430,142 @@ async function electronTest({ app, BrowserWindow, session }, options) {
     assert((await pixel(80, 80))[0] > 245 && (await pixel(80, 80))[1] < 10, 'Content-aware fill did not support undo');
     checks.push('content-aware fill replaces a selected object, preserves outside and supports undo');
 
+    await reopen();
+    assert(await layerCount() === 1, 'Opening an image should create one source layer');
+    const baseCenter = await pixel(128, 96), baseOutside = await pixel(20, 20);
+    const overlayId = await importLayer('叠加色块.png', '#c86432');
+    const overlayColor = [200, 100, 50, 255];
+    assertPixel(await pixel(128, 96), overlayColor, 'Imported PNG did not composite above the source');
+    assertPixel(await pixel(20, 20), baseOutside, 'Transparent imported pixels covered the source');
+    await layerParameter('opacity', 50);
+    assertPixel(await pixel(128, 96), baseCenter.map((value, channel) => channel === 3 ? 255 : (value + overlayColor[channel]) / 2), 'Layer opacity did not blend with the source');
+    await layerParameter('opacity', 100);
+    for (const blend of ['multiply', 'screen', 'overlay']) {
+      await layerParameter('blend', blend);
+      const expected = baseCenter.map((backdrop, channel) => {
+        if (channel === 3) return 255;
+        const source = overlayColor[channel];
+        if (blend === 'multiply') return backdrop * source / 255;
+        if (blend === 'screen') return 255 - (255 - backdrop) * (255 - source) / 255;
+        return backdrop <= 127.5 ? 2 * backdrop * source / 255 : 255 - 2 * (255 - backdrop) * (255 - source) / 255;
+      });
+      assertPixel(await pixel(128, 96), expected, `${blend} produced incorrect composite pixels`);
+    }
+    await layerParameter('blend', 'source-over');
+    checks.push('transparent PNG import, independent layer opacity and multiply/screen/overlay pixel formulas');
+
+    await layerAction(overlayId, 'visible');
+    assertPixel(await pixel(128, 96), baseCenter, 'Hiding the layer did not reveal the source');
+    await parameter('color', '#000000'); await parameter('size', 12); await parameter('hardness', 100);
+    await key('B'); await stroke([[128, 96]]);
+    await layerAction(overlayId, 'visible');
+    assertPixel(await pixel(128, 96), overlayColor, 'Painting modified a hidden layer');
+    await layerAction(overlayId, 'locked');
+    await stroke([[128, 96]]);
+    assertPixel(await pixel(128, 96), overlayColor, 'Painting modified a locked layer');
+    const lockControls = await js(() => ({
+      blend: document.querySelector('[data-layer-param="blend"]').disabled,
+      opacity: document.querySelector('[data-layer-param="opacity"]').disabled,
+      name: document.querySelector('[data-layer-param="name"]').disabled
+    }));
+    assert(lockControls.blend && lockControls.opacity && !lockControls.name, 'A locked layer must prevent blend/opacity edits while allowing its name to change');
+    await click('[data-mode="maps"]');
+    assert(await js(() => document.querySelector('[data-action="apply-map"]').disabled), 'Apply-map remained enabled with a locked layer');
+    await js(() => document.querySelector('[data-action="apply-map"]').click());
+    assert(await layerCount() === 2, 'Applying a map flattened locked layers');
+    await click('[data-mode="edit"]');
+    await layerAction(overlayId, 'locked');
+    await stroke([[128, 96]]);
+    assertPixel(await pixel(128, 96), [0, 0, 0, 255], 'Brush did not modify the active layer');
+    await click('[data-action="undo"]');
+    assertPixel(await pixel(128, 96), overlayColor, 'Undo did not restore active layer pixels');
+    await click('[data-action="redo"]');
+    assertPixel(await pixel(128, 96), [0, 0, 0, 255], 'Redo did not restore active layer painting');
+    await layerAction(overlayId, 'visible');
+    assertPixel(await pixel(128, 96), baseCenter, 'Painting one layer changed the underlying source layer');
+    await layerAction(overlayId, 'visible');
+    checks.push('hidden and locked layers reject paint; brush, undo and redo affect only the active layer');
+    checks.push('layer locks protect compositing controls and prevent destructive map application');
+
+    await reopen();
+    const movingId = await importLayer('可移动色块.png', '#c86432');
+    await layerParameter('x', 30); await layerParameter('y', -20);
+    await layerParameter('scale', 50); await layerParameter('rotation', 90);
+    assertPixel(await pixel(158, 76), overlayColor, 'Layer transform did not place its center correctly');
+    assertPixel(await pixel(128, 96), baseCenter, 'Transform left pixels at the old layer location');
+    await key('V'); await stroke([[158, 76], [168, 86]]);
+    const moved = await js(() => ({ x: Number(document.querySelector('[data-layer-param="x"]').value), y: Number(document.querySelector('[data-layer-param="y"]').value) }));
+    assert(Math.abs(moved.x - 40) <= 1 && Math.abs(moved.y + 10) <= 1, `Move tool did not translate the active layer: ${JSON.stringify(moved)}`);
+    await click('[data-action="undo"]');
+    assert(await js(() => Number(document.querySelector('[data-layer-param="x"]').value)) === 30, 'Undo did not restore the layer transform');
+    assert(await activeLayerId() === movingId, 'Transform undo changed the active layer');
+    await key('B'); await parameter('color', '#000000'); await parameter('size', 8); await parameter('hardness', 100);
+    await stroke([[158, 76]]);
+    assertPixel(await pixel(158, 76), [0, 0, 0, 255], 'Brush did not paint the transformed layer at the pointer');
+    await layerParameter('x', 0); await layerParameter('y', 0); await layerParameter('scale', 100); await layerParameter('rotation', 0);
+    assertPixel(await pixel(128, 96), [0, 0, 0, 255], 'Painting was not mapped into the transformed layer coordinate system');
+    checks.push('layer position, scale, rotation, V drag and transformed-layer paint coordinates');
+
+    await reopen();
+    const lowerId = await importLayer('下层.png', '#c86432');
+    const upperId = await importLayer('上层.png', '#3264c8');
+    const upperColor = [50, 100, 200, 255];
+    assertPixel(await pixel(128, 96), upperColor, 'Last imported layer was not placed on top');
+    await click('[data-action="layer-down"]');
+    assertPixel(await pixel(128, 96), overlayColor, 'Moving layer down did not change stacking order');
+    await click('[data-action="layer-up"]');
+    assertPixel(await pixel(128, 96), upperColor, 'Moving layer up did not restore stacking order');
+    await layerParameter('name', '<img src=x onerror="window.__layerNameInjected=true">');
+    assert(!(await js(() => window.__layerNameInjected || document.querySelector('.ie-layer-title img'))), 'Layer name was interpreted as HTML');
+    await layerParameter('name', '上层');
+    await click('[data-action="layer-duplicate"]');
+    assert(await layerCount() === 4 && await activeLayerId() !== upperId, 'Duplicate did not create and select a separate layer');
+    await click('[data-action="layer-delete"]');
+    assert(await layerCount() === 3, 'Delete did not remove the active layer');
+    await click('[data-action="undo"]');
+    assert(await layerCount() === 4, 'Undo did not restore the deleted layer');
+    await click('[data-action="redo"]');
+    assert(await layerCount() === 3, 'Redo did not remove the restored layer');
+    await click(`[data-layer-select="${lowerId}"]`);
+    assert(await activeLayerId() === lowerId, 'Clicking a layer row did not select that layer');
+    await click(`[data-layer-select="${upperId}"]`);
+    await fs.writeFile(path.join(options.directory, 'layers-layout.png'), (await window.webContents.capturePage()).toPNG());
+    await click('[data-action="layer-flatten"]');
+    assert(await layerCount() === 1, 'Flatten did not merge visible layers into one');
+    assertPixel(await pixel(128, 96), upperColor, 'Flatten changed composite pixels');
+    await click('[data-action="undo"]');
+    assert(await layerCount() === 3, 'Undo did not restore the layer stack after flatten');
+    await save('layers');
+    assert(await layerCount() === 3, 'Saving a composite PNG discarded editable layers');
+    checks.push('layer selection, stacking, rename safety, duplicate/delete/flatten undo and composite PNG export');
+
+    await click('[data-action="layer-add"]');
+    assert(await layerCount() === 4, 'New-layer action did not create a blank layer');
+    assertPixel(await pixel(128, 96), upperColor, 'A new blank layer changed the image');
+    await click('[data-action="layer-delete"]');
+    for (let count = 3; count < 12; count++) await click('[data-action="layer-add"]');
+    assert(await layerCount() === 12, 'New-layer actions did not reach the documented layer limit');
+    assert(await js(() => document.querySelector('[data-action="layer-add"]').disabled && document.querySelector('[data-action="layer-duplicate"]').disabled), 'Layer creation controls did not honor the layer limit');
+    await click('[data-action="undo"]');
+    assert(await layerCount() === 11 && !(await js(() => document.querySelector('[data-action="layer-add"]').disabled)), 'Undo from the layer limit did not restore creation controls');
+    checks.push('blank-layer creation preserves pixels and layer limit recovers after undo');
+
+    await reopen();
+    const baseDropPixel = await pixel(30, 30), basePastePixel = await pixel(175, 135), untouched = await pixel(10, 10);
+    const droppedId = await transferLayer('drop', '#e04020', [20, 20, 32, 32]);
+    assertPixel(await pixel(30, 30), [224, 64, 32, 255], 'Dropped PNG did not appear as a layer');
+    assertPixel(await pixel(10, 10), untouched, 'Drop changed pixels outside the added image');
+    const pastedId = await transferLayer('paste', '#2080e0', [160, 120, 40, 40]);
+    assertPixel(await pixel(175, 135), [32, 128, 224, 255], 'Pasted PNG did not appear as a layer');
+    assertPixel(await pixel(30, 30), [224, 64, 32, 255], 'Paste changed the earlier dropped layer');
+    await layerAction(droppedId, 'visible');
+    assertPixel(await pixel(30, 30), baseDropPixel, 'Drop modified the original source layer');
+    await layerAction(pastedId, 'visible');
+    assertPixel(await pixel(175, 135), basePastePixel, 'Paste modified the original source layer');
+    await layerAction(droppedId, 'visible'); await layerAction(pastedId, 'visible');
+    await fs.writeFile(path.join(options.directory, 'layers-imports.png'), (await window.webContents.capturePage()).toPNG());
+    checks.push('image drop and clipboard paste create independent layers without leaking events to the asset library');
+
     await reopen('maps');
     for (const type of ['displacement', 'normal', 'roughness', 'specular']) {
       await parameter('type', type);
@@ -274,25 +606,26 @@ async function main() {
   const { pathToFileURL } = require('node:url');
   const fileUrl = name => pathToFileURL(path.join(root, 'src', name)).href;
   const html = path.join(directory, 'index.html');
-  await fs.writeFile(html, `<!doctype html><html lang="zh-CN"><head><meta charset="UTF-8"><link rel="stylesheet" href="${fileUrl('styles.css')}"><link rel="stylesheet" href="${fileUrl('image-editor.css')}"></head><body><script src="${fileUrl('texture-maps.js')}"></script><script src="${fileUrl('content-aware-fill.js')}"></script><script src="${fileUrl('image-editor.js')}"></script></body></html>`);
+  await fs.writeFile(html, `<!doctype html><html lang="zh-CN"><head><meta charset="UTF-8"><link rel="stylesheet" href="${fileUrl('styles.css')}"><link rel="stylesheet" href="${fileUrl('image-editor.css')}"></head><body><script src="${fileUrl('texture-maps.js')}"></script><script src="${fileUrl('content-aware-fill.js')}"></script><script src="${fileUrl('image-layers.js')}"></script><script src="${fileUrl('image-editor.js')}"></script></body></html>`);
   const options = { directory, html, fixture: fixture.toString('base64') };
-  await fs.writeFile(path.join(directory, 'main.cjs'), `'use strict';\nconst electron=require('electron');\nconst path=require('node:path');\nelectron.app.setName('Mosaic image editor isolated smoke');\nelectron.app.setPath('userData',path.join(__dirname,'profile'));\nelectron.app.setPath('sessionData',path.join(__dirname,'sessions'));\n(${electronTest.toString()})(electron,${JSON.stringify(options)});\nsetTimeout(()=>electron.app.exit(2),90000).unref();\n`);
+  await fs.writeFile(path.join(directory, 'main.cjs'), `'use strict';\nconst electron=require('electron');\nconst path=require('node:path');\nelectron.app.setName('Mosaic image editor isolated smoke');\nelectron.app.setPath('userData',path.join(__dirname,'profile'));\nelectron.app.setPath('sessionData',path.join(__dirname,'sessions'));\n(${electronTest.toString()})(electron,${JSON.stringify(options)});\nsetTimeout(()=>electron.app.exit(2),150000).unref();\n`);
   await fs.writeFile(path.join(directory, 'package.json'), JSON.stringify({ name: 'mosaic-image-editor-smoke', main: 'main.cjs' }));
   const env = { ...process.env };
   delete env.ELECTRON_RUN_AS_NODE;
   const exitCode = await new Promise((resolve, reject) => {
     const child = spawn(electronPath(), [directory], { cwd: root, env, windowsHide: true, stdio: 'inherit' });
-    const timer = setTimeout(() => { child.kill(); reject(new Error(`Image editor smoke timed out: ${directory}`)); }, 100000);
+    const timer = setTimeout(() => { child.kill(); reject(new Error(`Image editor smoke timed out: ${directory}`)); }, 160000);
     child.once('error', error => { clearTimeout(timer); reject(error); });
     child.once('exit', code => { clearTimeout(timer); resolve(code); });
   });
   const result = JSON.parse(await fs.readFile(path.join(directory, 'result.json'), 'utf8'));
   result.reportDirectory = directory;
   if (exitCode === 0 && result.ok) {
-    for (const name of ['brush', 'eraser', 'selection', 'clone', 'compound-selection', 'feather', 'pen', 'custom-brush', 'smart-fill', 'displacement', 'normal', 'roughness', 'specular', 'seamless']) {
+    for (const name of ['brush', 'eraser', 'selection', 'clone', 'compound-selection', 'feather', 'pen', 'custom-brush', 'smart-fill', 'layers', 'displacement', 'normal', 'roughness', 'specular', 'seamless']) {
       const { data, info } = await sharp(path.join(directory, `${name}.png`)).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
       assert.equal(info.width, 256, `${name}: wrong export width`);
       assert.equal(info.height, 192, `${name}: wrong export height`);
+      if (name === 'layers') assert.deepEqual([...data.subarray((96 * info.width + 128) * 4, (96 * info.width + 128) * 4 + 4)], [50, 100, 200, 255], 'Exported PNG does not contain the top layer composite');
       if (name === 'normal') assert.ok(data.some((value, index) => index % 4 === 2 && value > 200), 'Normal map lacks blue normal vectors');
       if (['displacement', 'roughness', 'specular'].includes(name)) for (let i = 0; i < data.length; i += 4) assert.ok(data[i] === data[i + 1] && data[i] === data[i + 2], `${name}: expected grayscale pixels`);
       if (name === 'seamless') {
