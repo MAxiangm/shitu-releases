@@ -41,7 +41,7 @@ function findGitHubCli() {
 }
 
 function command(cli, args, { allowMissing = false } = {}) {
-  const result = spawnSync(cli, args, { cwd: root, encoding: 'utf8', windowsHide: true });
+  const result = spawnSync(cli, args, { cwd: root, encoding: 'utf8', windowsHide: true, maxBuffer: 16 * 1024 * 1024 });
   if (result.error) throw result.error;
   if (result.status !== 0) {
     if (allowMissing && /HTTP 404/.test(result.stderr || '')) return null;
