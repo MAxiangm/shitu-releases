@@ -38,6 +38,8 @@ function assetMenuTemplate(assets, folders, choose, transcodePresets = []) {
         { id: 'plugin-crop', label: one ? '裁切图片' : '裁切图片（逐张设置）', enabled: one, click: () => choose('plugin', { pluginId: 'crop' }) },
         { id: 'plugin-compress', label: one ? '压缩图片' : '批量压缩图片', click: () => choose('plugin', { pluginId: 'compress' }) },
         { id: 'plugin-convert', label: one ? '转换格式' : '批量转换格式', click: () => choose('plugin', { pluginId: 'convert' }) },
+        { id: 'plugin-extract-text', label: one ? '提取文字' : '批量提取文字', click: () => choose('plugin', { pluginId: 'extract-text' }) },
+        { id: 'plugin-image-to-pdf', label: '图片转 PDF', click: () => choose('plugin', { pluginId: 'image-to-pdf' }) },
         { type: 'separator' },
         { id: 'plugin-center', label: '打开插件中心…', click: () => choose('plugin') }
       ]

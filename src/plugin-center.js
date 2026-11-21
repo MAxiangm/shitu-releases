@@ -7,7 +7,9 @@
     { id: 'ai-cutout', name: 'AI 自动抠图', short: 'AI 抠图', icon: 'cutout', description: '识别主体，导出透明背景图片。', type: 'AI 工具' },
     { id: 'crop', name: '裁切图片', short: '裁切', icon: 'crop', description: '拖动选择画面，按像素精确裁切。', type: '图片工具' },
     { id: 'compress', name: '压缩图片', short: '压缩', icon: 'compress', description: '调整质量与尺寸，减小图片文件。', type: '图片工具' },
-    { id: 'convert', name: '转换格式', short: '转格式', icon: 'convert', description: '批量转换常用图片格式。', type: '图片工具' }
+    { id: 'convert', name: '转换格式', short: '转格式', icon: 'convert', description: '批量转换常用图片格式。', type: '图片工具' },
+    { id: 'extract-text', name: '提取文字', short: '提取文字', icon: 'text', description: '识别图片中的文字，复制或保存为文本。', type: '图片工具' },
+    { id: 'image-to-pdf', name: '图片转 PDF', short: '图片转 PDF', icon: 'pdf', description: '将所选图片合并为一个 PDF 文件。', type: '图片工具' }
   ];
   const state = { open: false, plugins: [], devices: [], assets: [], selected: new Set(), libraryRoot: null, active: null, filter: 'all', job: null, installing: new Map(), cancelableInstalls: new Set(), crop: null, image: null, previousFocus: null, unsubscribe: null };
   let root, list, panel, note, drag, cropObserver;
@@ -25,6 +27,8 @@
       crop: 'M7 3v14h14M3 7h14v14M10 7h7v7',
       compress: 'M4 4l6 6M4 9V4h5M20 20l-6-6m6 1v5h-5M20 4l-6 6m1-6h5v5M4 20l6-6m-6 1v5h5',
       convert: 'M4 8h15l-4-4M20 16H5l4 4M19 8v4M5 16v-4',
+      text: 'M10 20H4V4h16v6M4 15l5-5 4 4M8 8h.01M14 13h8M18 13v8M15 21h6',
+      pdf: 'M12 20H4V4h13l3 3v5M4 16l5-5 4 4M8 8h.01M15 15h6v6h-6ZM17 4v4h3',
       close: 'M6 6l12 12M18 6L6 18', arrow: 'M5 12h14m-5-5 5 5-5 5', back: 'M19 12H5m5-5-5 5 5 5', check: 'M5 12l4 4L19 6', image: 'M4 4h16v16H4ZM4 16l5-5 5 5 3-3 3 3M8 8h.01'
     };
     const p = document.createElementNS(svg.namespaceURI, 'path'); p.setAttribute('d', paths[type] || paths.image); svg.append(p); return svg;
@@ -47,7 +51,7 @@
       if (!state.open) return;
       if (e.key === 'Escape') { e.preventDefault(); if (drag) endCrop(); else close(); }
       if (e.key === 'Tab') {
-        const focusable = [...root.querySelectorAll('button:not(:disabled),input:not(:disabled),select:not(:disabled),[tabindex="0"]')].filter(n => n.getClientRects().length);
+        const focusable = [...root.querySelectorAll('button:not(:disabled),input:not(:disabled),select:not(:disabled),textarea:not(:disabled),[tabindex="0"]')].filter(n => n.getClientRects().length);
         const first = focusable[0], last = focusable.at(-1);
         if (e.shiftKey && (document.activeElement === first || !root.contains(document.activeElement))) { e.preventDefault(); last?.focus(); }
         else if (!e.shiftKey && (document.activeElement === last || !root.contains(document.activeElement))) { e.preventDefault(); first?.focus(); }
@@ -62,7 +66,7 @@
       const result = await api.pluginsList();
       state.plugins = Array.isArray(result) ? result : result.plugins || [];
       state.devices = Array.isArray(result.devices) ? result.devices : [];
-      renderList(); updateActions();
+      renderList(); if (state.active === 'extract-text') updateOcrLanguages(); updateActions();
     } catch (error) { report(error.message || String(error), true); }
   }
   async function open({ assets = [], selectedIds = [], pluginId, libraryRoot } = {}) {
@@ -91,7 +95,7 @@
       const b = button('', `sp-plugin-item${state.active === p.id ? ' is-active' : ''}`, () => selectPlugin(p.id));
       b.dataset.pluginId = p.id; b.setAttribute('aria-pressed', String(state.active === p.id));
       const icon = node('span', 'sp-plugin-icon'); icon.append(glyph(p.icon));
-      const info = node('span', 'sp-plugin-info'); info.append(node('strong', '', p.short), node('small', '', state.installing.has(p.id) ? '安装中…' : !p.installed ? '未安装' : p.resourceReady === false ? '需要修复' : p.enabled === false ? '已停用' : '已安装'));
+      const info = node('span', 'sp-plugin-info'); info.append(node('strong', '', p.short), node('small', '', state.installing.has(p.id) ? '安装中…' : !p.installed ? '未安装' : p.resourceReady === false ? p.id === 'extract-text' ? '语言不可用' : '需要修复' : p.enabled === false ? '已停用' : '已安装'));
       b.append(icon, info); if (p.installed && p.enabled !== false) b.append(node('span', 'sp-status-dot')); list.append(b);
     }
   }
@@ -104,6 +108,7 @@
     const work = node('div', 'sp-work');
     const media = node('div', 'sp-media'); media.innerHTML = '<div class="sp-source-heading"><span>选择图片</span><div class="sp-source-actions"><button type="button" id="sp-select-all">全选</button><button type="button" id="sp-select-clear">清空</button><span id="sp-selected-count"></span></div></div><div id="sp-sources" class="sp-sources" aria-label="待处理图片"></div><div id="sp-preview" class="sp-preview"><div id="sp-image-wrap" class="sp-image-wrap"><img id="sp-image" alt="待处理图片" draggable="false"><div id="sp-crop-box" class="sp-crop-box" hidden><span class="sp-crop-grid"></span><button type="button" data-corner="nw" aria-label="裁切左上角"></button><button type="button" data-corner="ne" aria-label="裁切右上角"></button><button type="button" data-corner="sw" aria-label="裁切左下角"></button><button type="button" data-corner="se" aria-label="裁切右下角"></button></div></div><div id="sp-preview-empty" class="sp-preview-empty"></div><span id="sp-image-meta" class="sp-image-meta"></span></div>';
     const settings = node('div', 'sp-settings'); settings.id = 'sp-settings'; work.append(media, settings); panel.append(work);
+    const textResults = node('div', 'sp-text-results'); textResults.id = 'sp-text-results'; textResults.hidden = true; textResults.setAttribute('aria-label', '文字识别结果'); media.append(textResults);
     const footer = node('div', 'sp-footer'); footer.innerHTML = '<div class="sp-progress-content"><div class="sp-progress-label"><strong id="sp-job-title">结果保存为新素材</strong><span id="sp-job-percent"></span></div><p id="sp-job-message">保留原图，处理后自动加入当前素材库。</p><p id="sp-job-warning" class="sp-job-warning" hidden></p><div id="sp-result-links" class="sp-result-links" hidden></div><progress id="sp-job-progress" max="100" value="0" hidden></progress></div><button type="button" id="sp-cancel" class="sp-secondary" hidden>取消任务</button><button type="button" id="sp-run" class="sp-primary">开始处理</button>'; panel.append(footer);
     $('sp-select-all').addEventListener('click', () => { state.selected = new Set(state.active === 'crop' ? state.assets.slice(0, 1).map(a => a.id) : state.assets.map(a => a.id)); renderSources(); renderPreview(); updateActions(); });
     $('sp-select-clear').addEventListener('click', () => { state.selected.clear(); renderSources(); renderPreview(); updateActions(); });
@@ -125,6 +130,15 @@
       settings.append(field('计算设备', select('sp-device', p.id === 'ai-upscale' ? [['auto', '自动 · Vulkan GPU'], ['gpu', '仅 GPU']] : [['auto', '自动 · 优先 GPU'], ['gpu', '仅 GPU'], ['cpu', '仅 CPU']])));
       settings.append(node('p', 'sp-setting-note', p.id === 'ai-cutout' ? '输出透明 PNG。复杂背景、发丝和透明物体可能需要再次修整。' : '大图会分块处理，以控制显存占用。'));
       const engine = node('p', 'sp-engine-info'); engine.id = 'sp-engine-info'; settings.append(engine);
+    } else if (p.id === 'extract-text') {
+      settings.append(field('识别语言', select('sp-ocr-language', [['auto', '跟随系统']]), '使用本机已安装的 Windows 识别语言。'));
+      settings.append(node('p', 'sp-setting-note', '识别后可在左侧查看文字、复制全部或保存 TXT。清晰、端正的图片通常识别得更准确。'));
+      const engine = node('p', 'sp-engine-info'); engine.id = 'sp-ocr-info'; settings.append(engine); updateOcrLanguages();
+    } else if (p.id === 'image-to-pdf') {
+      settings.append(field('页面尺寸', select('sp-pdf-page', [['image', '适合图片'], ['a4', 'A4']])));
+      settings.append(field('页面方向', select('sp-pdf-orientation', [['auto', '自动'], ['portrait', '纵向'], ['landscape', '横向']])));
+      settings.append(field('页边距（磅）', number('sp-pdf-margin', 0, 0, 100), '1 磅约为 0.35 毫米。'));
+      settings.append(node('p', 'sp-setting-note', '按上方图片从左到右的顺序合并，每张图片一页。完整保留画面，透明区域使用白色背景。开始后选择 PDF 保存位置。'));
     } else if (p.id === 'crop') {
       settings.append(field('裁切比例', select('sp-ratio', [['free', '自由'], ['1', '1 : 1'], [String(4 / 3), '4 : 3'], [String(3 / 4), '3 : 4'], [String(16 / 9), '16 : 9'], [String(9 / 16), '9 : 16']])));
       const coords = node('div', 'sp-crop-coords');
@@ -142,6 +156,16 @@
       settings.append(node('p', 'sp-setting-note', '透明图片转 JPG 时使用白色背景。暂不处理动图和多页图片。'));
     }
   }
+  function updateOcrLanguages() {
+    const input = $('sp-ocr-language'); if (!input) return;
+    const p = descriptor('extract-text'), selected = input.value;
+    input.replaceChildren();
+    for (const [tag, name] of [['auto', '跟随系统'], ...(p.runtime?.languages || []).map(language => [language.tag, language.name || language.tag])]) {
+      const option = node('option', '', name); option.value = tag; input.append(option);
+    }
+    if ([...input.options].some(option => option.value === selected)) input.value = selected;
+    text($('sp-ocr-info'), p.runtime?.error || (p.resourceReady === false ? '未找到可用的 Windows 文字识别语言。请在 Windows 设置中安装语言的光学字符识别功能后重新检测。' : 'Windows 文字识别 · 本地处理\n图片不会上传。'));
+  }
   function renderSources() {
     const sources = $('sp-sources'); if (!sources) return; sources.replaceChildren();
     text($('sp-selected-count'), `已选 ${chosen().length} 张`);
@@ -154,7 +178,9 @@
         renderSources(); renderPreview(); updateActions();
       });
       b.dataset.assetId = a.id; b.title = a.name; b.setAttribute('aria-label', `${state.selected.has(a.id) ? '取消选择' : '选择'} ${a.name}`); b.setAttribute('aria-pressed', String(state.selected.has(a.id))); b.disabled = busy();
-      const img = node('img'); img.alt = ''; img.loading = 'lazy'; img.src = thumbUrl(a); const check = node('span', 'sp-source-check'); check.append(glyph('check')); b.append(img, check); sources.append(b);
+      const img = node('img'); img.alt = ''; img.loading = 'lazy'; img.src = thumbUrl(a); const check = node('span', 'sp-source-check'); check.append(glyph('check')); b.append(img, check);
+      if (state.active === 'image-to-pdf' && state.selected.has(a.id)) b.append(node('span', 'sp-page-number', chosen().findIndex(item => item.id === a.id) + 1));
+      sources.append(b);
     }
   }
   function renderPreview() {
@@ -265,7 +291,7 @@
     const pending = state.installing.has(p.id);
     if (!p.installed) controls.append(button(pending ? '正在安装…' : '安装插件', 'sp-secondary', () => manage('install', p.id)));
     else {
-      if (p.resourceReady === false) controls.append(button(pending ? '正在修复…' : '修复组件', 'sp-secondary', () => manage('install', p.id)));
+      if (p.resourceReady === false) controls.append(button(pending ? '正在检测…' : p.id === 'extract-text' ? '重新检测' : '修复组件', 'sp-secondary', () => manage('install', p.id)));
       controls.append(button(p.enabled === false ? '启用' : '停用', 'sp-text-button', () => manage('enable', p.id, p.enabled === false)), button('卸载', 'sp-text-button', () => manage('uninstall', p.id)));
     }
     controls.querySelectorAll('button').forEach(b => b.disabled = pending || busy());
@@ -282,7 +308,8 @@
     }
     const run = $('sp-run'), count = chosen().length;
     run.disabled = busy() || pending || !p.installed || p.resourceReady === false || p.enabled === false || !count || (p.id === 'crop' && (count !== 1 || !state.crop));
-    text(run, busy() ? state.job.pluginId === state.active ? '正在处理…' : '任务进行中' : !p.installed ? '请先安装插件' : p.resourceReady === false ? '请先修复组件' : p.enabled === false ? '插件已停用' : count > 1 && p.id !== 'crop' ? `处理 ${count} 张图片` : '开始处理');
+    const runLabel = p.id === 'extract-text' ? count > 1 ? `提取 ${count} 张图片` : '提取文字' : p.id === 'image-to-pdf' ? `导出 PDF${count ? `（${count} 页）` : ''}` : count > 1 && p.id !== 'crop' ? `处理 ${count} 张图片` : '开始处理';
+    text(run, busy() ? state.job.pluginId === state.active ? '正在处理…' : '任务进行中' : !p.installed ? '请先安装插件' : p.resourceReady === false ? p.id === 'extract-text' ? '识别语言不可用' : '请先修复组件' : p.enabled === false ? '插件已停用' : runLabel);
     $('sp-select-all').disabled = busy(); $('sp-select-clear').disabled = busy();
     $('sp-settings').querySelectorAll('input,select,button').forEach(n => n.disabled = busy());
     if (p.id === 'crop' && count > 1) text($('sp-job-message'), '裁切每次处理一张，请在上方选择一张图片。');
@@ -304,6 +331,8 @@
     const value = id => $(id)?.value;
     if (state.active === 'ai-upscale') return { scale: Number(value('sp-scale')), device: value('sp-device') };
     if (state.active === 'ai-cutout') return { device: value('sp-device') };
+    if (state.active === 'extract-text') return { language: value('sp-ocr-language') };
+    if (state.active === 'image-to-pdf') return { pageSize: value('sp-pdf-page'), orientation: value('sp-pdf-orientation'), margin: Number(value('sp-pdf-margin')) };
     if (state.active === 'crop') {
       const values = Object.fromEntries(['left', 'top', 'width', 'height'].map(key => [key, Number(value('sp-crop-' + key))]));
       return { ...normalizeCrop(Object.values(values).every(Number.isFinite) ? values : state.crop), format: value('sp-format') };
@@ -317,6 +346,7 @@
     state.job = { status: 'starting', pluginId: state.active, progress: 0, message: '正在准备处理…' }; renderJob(); updateActions(); renderSources();
     try {
       const result = await api.pluginRun({ pluginId: state.active, assetIds: chosen().map(a => a.id), options: processingOptions, libraryRoot: state.libraryRoot });
+      if (result?.cancelled) { state.job = { pluginId: state.active, status: 'cancelled', message: '已取消保存，未生成 PDF 文件。' }; renderJob(); updateActions(); renderSources(); return; }
       // Early events can arrive before invoke resolves; don't revert completed jobs.
       if (state.job && !state.job.jobId) state.job.jobId = typeof result === 'string' ? result : result.jobId;
       if (state.job && state.job.status === 'starting') state.job.status = 'running';
@@ -339,10 +369,11 @@
     if (!state.job || (state.job.jobId && event.jobId && state.job.jobId !== event.jobId)) return;
     if (event.jobId) state.job.jobId = event.jobId;
     if (event.type === 'complete') {
-      const count = event.results?.length ?? event.count ?? chosen().length;
+      const count = event.pluginId === 'image-to-pdf' ? event.results?.reduce((total, result) => total + (result.pages || 0), 0) || 0 : event.results?.length ?? event.count ?? chosen().length;
       const failures = event.errors?.length || 0;
       const duplicates = event.results?.filter(r => r.duplicate).length || 0;
-      state.job = { ...state.job, ...event, status: event.cancelled ? 'cancelled' : failures && !count ? 'error' : 'complete', progress: 100, message: event.message || `已完成 ${count} 张图片${duplicates ? `（${duplicates} 个结果已在素材库中）` : ''}${failures ? `，${failures} 张处理失败` : ''}${event.cancelled ? '，任务已取消' : ''}。` };
+      const completed = event.pluginId === 'image-to-pdf' ? `已导出 PDF，共 ${count} 页。` : `已完成 ${count} 张图片${duplicates ? `（${duplicates} 个结果已在素材库中）` : ''}${failures ? `，${failures} 张处理失败` : ''}。`;
+      state.job = { ...state.job, ...event, status: event.cancelled ? 'cancelled' : failures && !count ? 'error' : 'complete', progress: 100, message: event.message || (event.cancelled ? `任务已取消${count ? '，已完成的结果保留' : ''}。` : completed) };
       if (failures) report(event.errors.slice(0, 3).map(e => typeof e === 'string' ? e : `${e.name || e.sourceId || '图片'}：${e.message || e.error || '处理失败'}`).join('\n'), true);
     }
     else if (event.type === 'error') state.job = { ...state.job, ...event, status: 'error', message: event.error?.message || event.error || event.message || '处理失败，请重试。' };
@@ -355,7 +386,12 @@
     const j = state.job, progress = $('sp-job-progress'), cancel = $('sp-cancel');
     const warning = $('sp-job-warning'); warning.hidden = true; text(warning, '');
     const resultLinks = $('sp-result-links'); resultLinks.replaceChildren(); resultLinks.hidden = true;
-    if (!j) { progress.hidden = true; cancel.hidden = true; return; }
+    const textResults = $('sp-text-results'); textResults.replaceChildren(); textResults.hidden = true; $('sp-preview').hidden = false;
+    if (!j) {
+      text($('sp-job-title'), state.active === 'extract-text' ? '识别图片中的文字' : state.active === 'image-to-pdf' ? '合并导出 PDF' : '结果保存为新素材');
+      text($('sp-job-message'), state.active === 'extract-text' ? '识别结果可复制或保存为 TXT。' : state.active === 'image-to-pdf' ? '每张图片一页，保存到你选择的位置。' : '保留原图，处理后自动加入当前素材库。');
+      progress.hidden = true; cancel.hidden = true; return;
+    }
     const n = Number(j.progress), percent = Math.max(0, Math.min(100, n <= 1 && n > 0 && j.status !== 'complete' ? n * 100 : n || 0));
     text($('sp-job-title'), j.status === 'complete' ? '处理完成' : j.status === 'error' ? '处理失败' : j.status === 'cancelled' ? '已取消' : descriptor(j.pluginId).name);
     text($('sp-job-message'), j.message || '正在处理…'); $('sp-job-message').classList.toggle('sp-error', j.status === 'error');
@@ -374,7 +410,33 @@
       }
       const engines = [...new Set(j.results.map(r => [r.engine, r.provider || (r.accelerator === 'gpu' ? 'GPU' : '')].filter(Boolean).join(' · ')).filter(Boolean))];
       if (engines.length) resultLinks.append(node('span', 'sp-result-engine', engines.join(' / ')));
-      if (api.openAsset) resultLinks.append(button('打开结果', 'sp-text-button', async () => {
+      if (j.pluginId === 'extract-text') {
+        if (state.active === 'extract-text') {
+          $('sp-preview').hidden = true; textResults.hidden = false;
+          for (const result of j.results) {
+            const card = node('section', 'sp-text-result'); card.append(node('h4', '', result.name || '识别结果'));
+            const value = node('textarea', 'sp-text-output'); value.readOnly = true; value.value = result.text || ''; value.placeholder = '此图片中未识别到文字'; value.setAttribute('aria-label', `${result.name || '图片'}的识别结果`); card.append(value); textResults.append(card);
+          }
+        }
+        const hasText = j.results.some(result => typeof result.text === 'string' && result.text.trim());
+        for (const [label, method] of [['复制全部文字', 'pluginCopyText'], ['保存 TXT…', 'pluginSaveText']]) {
+          const action = button(label, 'sp-text-button', async event => {
+            event.currentTarget.disabled = true;
+            try {
+              const result = await api[method](j.jobId);
+              if (result?.copied) report('文字已复制。');
+              else if (result?.saved) report(`文字已保存：${result.path || ''}`);
+              else if (result?.cancelled) report('已取消保存。');
+            } catch (error) { report(error.message || String(error), true); }
+            finally { action.disabled = !hasText; }
+          }); action.disabled = !hasText || typeof api[method] !== 'function'; resultLinks.append(action);
+        }
+      } else if (j.pluginId === 'image-to-pdf') {
+        text($('sp-job-message'), `${j.message || 'PDF 已保存。'}${j.results[0].path ? `\n${j.results[0].path}` : ''}`);
+        if (api.pluginRevealResult) resultLinks.append(button('在文件夹中显示', 'sp-text-button', async () => {
+          try { await api.pluginRevealResult(j.jobId); } catch (error) { report(error.message || String(error), true); }
+        }));
+      } else if (api.openAsset && j.results[0].id) resultLinks.append(button('打开结果', 'sp-text-button', async () => {
         try { await api.openAsset(j.results[0].id); } catch (error) { report(error.message || String(error), true); }
       }));
       resultLinks.hidden = false;

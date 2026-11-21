@@ -52,6 +52,29 @@ async function electronTest({ app, BrowserWindow, session }, options) {
     }, name, value);
     await pause(80);
   }
+  async function editorOption(attribute, name, value) {
+    await js((attribute, name, value) => {
+      const node = document.querySelector(`[${attribute}="${name}"]`);
+      if (!node || node.disabled) throw new Error(`Unavailable editor option ${attribute}=${name}`);
+      if (node.type === 'checkbox') node.checked = value;
+      else node.value = String(value);
+      node.dispatchEvent(new Event('input', { bubbles: true }));
+      node.dispatchEvent(new Event('change', { bubbles: true }));
+    }, attribute, name, value);
+    await pause(80);
+  }
+  const documentSize = () => js(() => {
+    const canvas = document.querySelector('#imageEditorCanvas'); return { width: canvas.width, height: canvas.height };
+  });
+  const dragBounds = (first, last) => js((first, last) => {
+    const canvas = document.querySelector('#imageEditorOverlayCanvas'), bounds = canvas.getBoundingClientRect();
+    const point = ([x, y]) => ({
+      x: (Math.round(bounds.left + x / canvas.width * bounds.width) - bounds.left) * canvas.width / bounds.width,
+      y: (Math.round(bounds.top + y / canvas.height * bounds.height) - bounds.top) * canvas.height / bounds.height
+    });
+    const p = point(first), q = point(last), left = Math.floor(Math.min(p.x, q.x)), top = Math.floor(Math.min(p.y, q.y));
+    return { left, top, width: Math.ceil(Math.max(p.x, q.x)) - left, height: Math.ceil(Math.max(p.y, q.y)) - top };
+  }, first, last);
   const layerCount = () => js(() => document.querySelectorAll('.ie-layer-row').length);
   const activeLayerId = () => js(() => document.querySelector('.ie-layer-row.is-active')?.dataset.layerId);
   async function importLayer(name, color, rectangle = [96, 72, 64, 48]) {
@@ -97,11 +120,14 @@ async function electronTest({ app, BrowserWindow, session }, options) {
   }
   async function layerAction(id, action) { await click(`.ie-layer-row[data-layer-id="${id}"] [data-layer-action="${action}"]`); }
   const assertPixel = (actual, expected, message, tolerance = 2) => assert(actual.every((value, channel) => Math.abs(value - expected[channel]) <= tolerance), `${message}: ${JSON.stringify(actual)}, expected ${JSON.stringify(expected)}`);
-  async function key(keyCode, modifiers = []) {
-    await js(() => document.querySelector('#imageEditorOverlayCanvas').focus());
+  async function pressKey(keyCode, modifiers = []) {
     window.webContents.sendInputEvent({ type: 'keyDown', keyCode, modifiers });
     window.webContents.sendInputEvent({ type: 'keyUp', keyCode, modifiers });
     await pause(80);
+  }
+  async function key(keyCode, modifiers = []) {
+    await js(() => document.querySelector('#imageEditorOverlayCanvas').focus());
+    await pressKey(keyCode, modifiers);
   }
   async function zoom(value) {
     await js(value => {
@@ -142,6 +168,13 @@ async function electronTest({ app, BrowserWindow, session }, options) {
     await js(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
     await pause(100);
   }
+  const selectionOverlay = () => js(() => {
+    const canvas = document.querySelector('#imageEditorOverlayCanvas');
+    const data = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data;
+    let hash = 0, pixels = 0;
+    for (let at = 3; at < data.length; at += 4) { hash = (hash * 31 + data[at]) | 0; if (data[at]) pixels++; }
+    return { hash, pixels };
+  });
   const pixel = (x, y) => js(async (x, y) => {
     await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
     return Array.from(document.querySelector('#imageEditorCanvas').getContext('2d').getImageData(x, y, 1, 1).data);
@@ -176,12 +209,14 @@ async function electronTest({ app, BrowserWindow, session }, options) {
     await window.loadFile(options.html);
     await js(async fixture => {
       window.__saves = [];
+      window.__psds = [];
       window.addEventListener('error', event => { window.__browserError = event.message; });
       window.__asset = { id: 'image-editor-fixture', name: '编辑器测试图', mediaType: 'image', width: 256, height: 192, ext: 'png', folderId: null };
       const api = {
         readImageForEditor: async () => ({ bytes: Uint8Array.from(atob(fixture), value => value.charCodeAt(0)), width: 256, height: 192 }),
         saveEditedImage: async request => { window.__saves.push({ ...request, bytes: Array.from(request.bytes) }); return { id: `saved-${window.__saves.length}`, snapshot: { root: '/isolated-image-editor-library', assets: [window.__asset], folders: [] }, duplicate: false }; },
-        exportEditedImage: async request => { window.__exports = request; return { canceled: false, path: '/isolated-export.png' }; }
+        exportEditedImage: async request => { window.__exports = request; return { canceled: false, path: '/isolated-export.png' }; },
+        exportEditedPsd: async request => { window.__psds.push(request); return { canceled: false, path: '/isolated-export.psd' }; }
       };
       window.__editor = window.ShituImageEditor.create({ api, assetUrl: () => '', onSaved: () => {} });
       await window.__editor.open(window.__asset, '/isolated-image-editor-library', 'edit');
@@ -201,7 +236,7 @@ async function electronTest({ app, BrowserWindow, session }, options) {
         active: tools.filter(node => node.getAttribute('aria-pressed') === 'true').map(node => node.dataset.tool)
       };
     });
-    assert(layout.tools.length === 11 && layout.tools.every(tool => tool.icon && tool.label && tool.title && tool.tooltip), 'Every editor tool must have a real icon, accessible name and tooltip');
+    assert(layout.tools.length === 14 && layout.tools.every(tool => tool.icon && tool.label && tool.title && tool.tooltip), 'Every editor tool must have a real icon, accessible name and tooltip');
     assert(layout.active.length === 1 && layout.active[0] === 'brush', 'Tool rail must mark exactly the current tool as pressed');
     assert(layout.rail.width <= 104 && layout.rail.right <= layout.main.left + 1 && layout.main.right <= layout.sidebar.left + 1, 'Expected a narrow left tool rail, center canvas and right property panel');
     assert(layout.options.width > 0 && layout.options.height > 0, 'Current-tool options are not visible');
@@ -219,12 +254,12 @@ async function electronTest({ app, BrowserWindow, session }, options) {
     await pause(140);
     checks.push('accessible icon toolbar, left/canvas/right layout and compact 900 x 650 workspace');
 
-    for (const [keyCode, modifiers, expected] of [['I', [], 'eyedropper'], ['H', [], 'hand'], ['Z', [], 'zoom'], ['M', [], 'rect'], ['M', ['shift'], 'ellipse'], ['B', [], 'brush'], ['E', [], 'eraser'], ['S', [], 'clone'], ['P', [], 'pen'], ['L', [], 'lasso'], ['V', [], 'move']]) {
+    for (const [keyCode, modifiers, expected] of [['I', [], 'eyedropper'], ['H', [], 'hand'], ['Z', [], 'zoom'], ['M', [], 'rect'], ['M', ['shift'], 'ellipse'], ['B', [], 'brush'], ['E', [], 'eraser'], ['S', [], 'clone'], ['P', [], 'pen'], ['L', [], 'lasso'], ['C', [], 'crop'], ['T', [], 'text'], ['U', [], 'shape'], ['V', [], 'move']]) {
       await key(keyCode, modifiers);
       const active = await js(() => document.querySelector('.ie-toolrail [aria-pressed="true"]')?.dataset.tool);
       assert(active === expected, `${modifiers.join('+')}+${keyCode} selected ${active}, expected ${expected}`);
     }
-    checks.push('all eleven tools switch through their keyboard shortcuts, including Shift+M ellipse and V move');
+    checks.push('all fourteen tools switch through their keyboard shortcuts, including marquee cycling, crop, text and shapes');
 
     await key('I');
     const sampled = await js(() => {
@@ -301,6 +336,184 @@ async function electronTest({ app, BrowserWindow, session }, options) {
     checks.push('Space keeps native checkbox toggles and tool-button keyboard activation');
     await reopen();
 
+    await key('M'); await key('M', ['shift']);
+    await key('M');
+    assert(await js(() => document.querySelector('[data-tool="ellipse"]').getAttribute('aria-pressed')) === 'true', 'M did not retain the current marquee tool');
+    await key('M', ['shift']);
+    assert(await js(() => document.querySelector('[data-tool="rect"]').getAttribute('aria-pressed')) === 'true', 'Shift+M did not cycle back to the rectangular marquee');
+    await stroke([[20, 20], [70, 70]]);
+    const shortcutSelection = await selectionOverlay();
+    await key('D', ['control']);
+    assert((await selectionOverlay()).pixels === 0, 'Ctrl+D did not deselect');
+    await key('D', ['control', 'shift']);
+    assert(JSON.stringify(await selectionOverlay()) === JSON.stringify(shortcutSelection), 'Ctrl+Shift+D did not restore the last selection');
+    await key('I', ['control', 'shift']);
+    assert((await selectionOverlay()).pixels > shortcutSelection.pixels * 2, 'Ctrl+Shift+I did not invert the selected area');
+    await key('Z', ['control']);
+    assert(JSON.stringify(await selectionOverlay()) === JSON.stringify(shortcutSelection), 'Ctrl+Z did not undo selection inversion');
+    await key('A', ['control']);
+    assert((await selectionOverlay()).pixels > 256 * 192 * .9, 'Ctrl+A did not select the complete canvas');
+    await key('D', ['control']);
+    checks.push('marquee cycling and Photoshop selection shortcuts select, deselect, reselect and invert');
+
+    await reopen();
+    const copiedSource = await pixel(35, 35), baseLayerId = await activeLayerId();
+    await key('M'); await stroke([[20, 20], [70, 70]]);
+    await key('J', ['control']);
+    assert(await layerCount() === 2 && await activeLayerId() !== baseLayerId, 'Ctrl+J did not copy the selection to a new layer');
+    await key('D', ['control']);
+    await layerAction(baseLayerId, 'visible');
+    assertPixel(await pixel(35, 35), copiedSource, 'Layer via copy lost the selected pixels');
+    assert((await pixel(110, 110))[3] === 0, 'Layer via copy included pixels outside the selection');
+    await key('J', ['control']);
+    assert(await layerCount() === 3, 'Ctrl+J without a selection did not duplicate the layer');
+    await key('N', ['control', 'shift']);
+    assert(await layerCount() === 4, 'Ctrl+Shift+N did not create a transparent layer');
+    assert(await js(() => document.activeElement === document.querySelector('[data-layer-param="name"]')), 'New-layer shortcut did not focus its name');
+    assertPixel(await pixel(35, 35), copiedSource, 'Creating a transparent layer changed visible image pixels');
+    checks.push('Ctrl+J copies only selected pixels or duplicates a complete layer; Ctrl+Shift+N creates a transparent named layer');
+
+    await reopen();
+    const cutPixel = await pixel(35, 35), cutOutside = await pixel(110, 110);
+    await key('M'); await stroke([[20, 20], [70, 70]]); await key('J', ['control', 'shift']);
+    assert(await layerCount() === 2, 'Ctrl+Shift+J did not create a layer from the cut selection');
+    const cutLayerId = await activeLayerId();
+    await key('D', ['control']); await layerAction(cutLayerId, 'visible');
+    assert((await pixel(35, 35))[3] === 0, 'Layer via cut left selected pixels on the original layer');
+    assertPixel(await pixel(110, 110), cutOutside, 'Layer via cut removed pixels outside the selection');
+    await layerAction(cutLayerId, 'visible');
+    assertPixel(await pixel(35, 35), cutPixel, 'Layer via cut changed the visible selection pixels');
+    checks.push('Ctrl+Shift+J cuts selected pixels to an independent layer while preserving the surrounding image');
+
+    await reopen();
+    const shortcutLowerId = await importLayer('快捷键下层.png', '#c86432');
+    const shortcutUpperId = await importLayer('快捷键上层.png', '#3264c8');
+    await key('[', ['control']);
+    assertPixel(await pixel(128, 96), [200, 100, 50, 255], 'Ctrl+[ did not send the current layer backward');
+    await key(']', ['control']);
+    assertPixel(await pixel(128, 96), [50, 100, 200, 255], 'Ctrl+] did not bring the current layer forward');
+    await key('[', ['control', 'shift']);
+    assert(await js(id => [...document.querySelectorAll('.ie-layer-row')].at(-1)?.dataset.layerId === id, shortcutUpperId), 'Ctrl+Shift+[ did not send the layer to the back');
+    await key(']', ['control', 'shift']);
+    assert(await js(id => document.querySelector('.ie-layer-row')?.dataset.layerId === id, shortcutUpperId), 'Ctrl+Shift+] did not bring the layer to the front');
+    await key('[', ['alt']);
+    assert(await activeLayerId() === shortcutLowerId, 'Alt+[ did not select the next lower layer');
+    await key(']', ['alt']);
+    assert(await activeLayerId() === shortcutUpperId, 'Alt+] did not select the next higher layer');
+    await key('V'); await key('Right'); await key('Right', ['shift']); await key('Down', ['shift']);
+    const nudged = await js(() => ({ x: Number(document.querySelector('[data-layer-param="x"]').value), y: Number(document.querySelector('[data-layer-param="y"]').value) }));
+    assert(nudged.x === 11 && nudged.y === 10, `Move-tool arrow shortcuts used incorrect distances: ${JSON.stringify(nudged)}`);
+    assertPixel(await pixel(100, 90), [200, 100, 50, 255], 'Keyboard layer movement did not change its rendered position');
+    await key('T', ['control']);
+    assert(await js(() => document.querySelector('.ie-layer-details').open && document.activeElement === document.querySelector('[data-layer-param="scale"]')), 'Ctrl+T did not open and focus the layer transform controls');
+    await pressKey('Escape');
+    assert(!(await js(() => document.querySelector('#imageEditorOverlay').hidden)), 'Escape from a transform input closed the image editor');
+    checks.push('layer ordering, layer selection, arrow-key movement and transform focus follow Photoshop shortcuts');
+
+    await reopen();
+    await key('B'); await key('5');
+    assert(await js(() => Number(document.querySelector('[data-param="opacity"]').value)) === 50, 'A single number key did not change brush opacity by tens');
+    await pause(700); await key('2'); await key('5');
+    assert(await js(() => Number(document.querySelector('[data-param="opacity"]').value)) === 25, 'Fast numeric keys did not set exact brush opacity');
+    assert(await js(() => Number(document.querySelector('[data-layer-param="opacity"]').value)) === 100, 'Brush opacity keys changed layer opacity');
+    await key('V'); await key('4');
+    assert(await js(() => Number(document.querySelector('[data-layer-param="opacity"]').value)) === 40, 'Number keys outside paint tools did not set layer opacity');
+    assert(await js(() => Number(document.querySelector('[data-param="opacity"]').value)) === 25, 'Layer opacity keys changed brush opacity');
+    await pause(700); await key('0');
+    assert(await js(() => Number(document.querySelector('[data-layer-param="opacity"]').value)) === 100, 'Zero did not restore full layer opacity');
+    await key('B'); await parameter('size', 20); await parameter('hardness', 50);
+    await key(']');
+    assert(await js(() => Number(document.querySelector('[data-param="size"]').value)) > 20, 'Right bracket did not enlarge the brush');
+    await key('[');
+    assert(await js(() => Number(document.querySelector('[data-param="size"]').value)) === 20, 'Left bracket did not restore the brush size');
+    await key(']', ['shift']);
+    assert(await js(() => Number(document.querySelector('[data-param="hardness"]').value)) === 75, 'Shift+] did not increase brush hardness');
+    await key('[', ['shift']);
+    assert(await js(() => Number(document.querySelector('[data-param="hardness"]').value)) === 50, 'Shift+[ did not decrease brush hardness');
+    checks.push('number keys target brush or layer opacity and bracket shortcuts adjust brush size and hardness');
+
+    await reopen();
+    await key('D');
+    assert(await js(() => document.querySelector('[data-param="color"]').value === '#000000' && document.querySelector('[data-background-color]').value === '#ffffff'), 'D did not restore black foreground and white background');
+    await key('X');
+    assert(await js(() => document.querySelector('[data-param="color"]').value === '#ffffff' && document.querySelector('[data-background-color]').value === '#000000'), 'X did not swap foreground and background colors');
+    await key('Backspace', ['alt']);
+    assertPixel(await pixel(100, 100), [255, 255, 255, 255], 'Alt+Backspace did not fill with foreground color');
+    await key('Backspace', ['control']);
+    assertPixel(await pixel(100, 100), [0, 0, 0, 255], 'Ctrl+Backspace did not fill with background color');
+    await key('Z', ['control']);
+    assertPixel(await pixel(100, 100), [255, 255, 255, 255], 'Ctrl+Z did not undo the fill');
+    await key('Z', ['control', 'shift']);
+    assertPixel(await pixel(100, 100), [0, 0, 0, 255], 'Ctrl+Shift+Z did not redo the fill');
+    await key('Z', ['control', 'alt']);
+    assertPixel(await pixel(100, 100), [255, 255, 255, 255], 'Ctrl+Alt+Z did not step backward');
+    const shortcutSaveCount = await js(() => window.__saves.length);
+    await key('S', ['control']);
+    await waitFor(() => window.__saves.length > 0 && !document.querySelector('[data-action="save"]').disabled, 'Ctrl+S did not complete image saving');
+    assert(await js(() => window.__saves.length) === shortcutSaveCount + 1, 'Ctrl+S did not save exactly one copy');
+    await js(() => { window.__exports = null; });
+    await key('S', ['control', 'shift']);
+    await waitFor(() => Boolean(window.__exports?.bytes?.length) && !document.querySelector('[data-action="export"]').disabled, 'Ctrl+Shift+S did not export the PNG');
+    checks.push('foreground/background color shortcuts fill pixels and undo/redo/save/export operate through real editor actions');
+
+    await reopen();
+    await key('V'); await key('N', ['control', 'shift']);
+    const inputLayerCount = await layerCount();
+    await js(() => {
+      const input = document.querySelector('[data-layer-param="name"]');
+      input.value = 'Layer'; input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.focus(); input.setSelectionRange(input.value.length, input.value.length);
+      window.__typingKey = null;
+      input.addEventListener('keydown', event => { window.__typingKey = { prevented: event.defaultPrevented, focused: document.activeElement === input }; }, { once: true });
+    });
+    window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'B' });
+    window.webContents.sendInputEvent({ type: 'char', keyCode: 'b' });
+    window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'B' });
+    await pause(80);
+    assert(await js(() => document.querySelector('[data-layer-param="name"]').value.toLowerCase() === 'layerb'), 'Text input did not receive ordinary typing');
+    assert(await js(() => window.__typingKey?.focused && window.__typingKey.prevented === false), 'Canvas shortcuts prevented native text-key handling or stole input focus');
+    assert(await js(() => document.querySelector('[data-tool="move"]').getAttribute('aria-pressed')) === 'true', 'Typing B in a layer name switched canvas tools');
+    await pressKey('J', ['control']);
+    assert(await layerCount() === inputLayerCount, 'Ctrl+J in a text input duplicated a canvas layer');
+    await pressKey('Escape');
+    assert(!(await js(() => document.querySelector('#imageEditorOverlay').hidden)), 'Escape while editing a name closed the editor');
+    await js(() => {
+      const input = document.querySelector('[data-layer-param="x"]');
+      document.querySelector('.ie-layer-details').open = true; input.focus();
+    });
+    await pressKey('Right', ['shift']);
+    assert(await js(() => Number(document.querySelector('[data-layer-param="x"]').value)) === 0, 'A numeric input arrow moved the canvas layer');
+    await js(() => {
+      const editable = document.createElement('div'); editable.id = 'shortcutEditable'; editable.contentEditable = 'true'; editable.tabIndex = 0;
+      document.querySelector('#imageEditorOverlay').append(editable); editable.focus();
+    });
+    await pressKey('B');
+    assert(await js(() => document.querySelector('[data-tool="move"]').getAttribute('aria-pressed')) === 'true', 'Contenteditable typing switched canvas tools');
+    await js(() => document.querySelector('#shortcutEditable').remove());
+    await js(() => {
+      const canvas = document.querySelector('#imageEditorOverlayCanvas'); canvas.focus();
+      canvas.dispatchEvent(new KeyboardEvent('keydown', { key: 'b', code: 'KeyB', bubbles: true, cancelable: true, isComposing: true }));
+      canvas.dispatchEvent(new KeyboardEvent('keydown', { key: 'e', code: 'KeyE', bubbles: true, cancelable: true, keyCode: 229 }));
+    });
+    assert(await js(() => document.querySelector('[data-tool="move"]').getAttribute('aria-pressed')) === 'true', 'IME composition events switched canvas tools');
+    checks.push('text, numeric and contenteditable inputs retain native keys and IME events never trigger canvas shortcuts');
+
+    await key('F7');
+    assert(await js(() => document.querySelector('#imageEditorOverlay').classList.contains('ie-layers-hidden')), 'F7 did not hide the layer panel');
+    await key('F7');
+    assert(!(await js(() => document.querySelector('#imageEditorOverlay').classList.contains('ie-layers-hidden'))), 'F7 did not restore the layer panel');
+    await key('Tab');
+    assert(await js(() => document.querySelector('#imageEditorOverlay').classList.contains('ie-panels-hidden')), 'Tab from the canvas did not hide editor panels');
+    await key('Tab');
+    assert(!(await js(() => document.querySelector('#imageEditorOverlay').classList.contains('ie-panels-hidden'))), 'Tab from the canvas did not restore editor panels');
+    await key('K', ['control', 'alt', 'shift']);
+    assert(!(await js(() => document.querySelector('.ie-shortcuts').hidden)), 'Shortcut reference did not open from Ctrl+Alt+Shift+K');
+    await fs.writeFile(path.join(options.directory, 'shortcuts-help.png'), (await window.webContents.capturePage()).toPNG());
+    await pressKey('Escape');
+    assert(await js(() => document.querySelector('.ie-shortcuts').hidden && !document.querySelector('#imageEditorOverlay').hidden), 'Escape did not close only the shortcut reference');
+    checks.push('panel visibility shortcuts and the keyboard reference are reversible without closing the editor');
+    await reopen();
+
     const originalCenter = await pixel(70, 60);
     await parameter('size', 28);
     await parameter('opacity', 100);
@@ -338,6 +551,77 @@ async function electronTest({ app, BrowserWindow, session }, options) {
     assert(JSON.stringify(await pixel(85, 35)) === JSON.stringify(outside), 'Painting escaped the rectangular selection');
     checks.push('selection constrains brush');
     await save('selection');
+
+    await reopen();
+    await parameter('feather', 0); await parameter('selectionMode', 'replace');
+    await click('[data-tool="rect"]'); await stroke([[20, 20], [70, 70]]);
+    const initialSelection = await selectionOverlay();
+    assert(initialSelection.pixels > 100, 'Deselect checks require an existing selection');
+    for (const selectionTool of ['rect', 'ellipse', 'lasso']) {
+      await click(`[data-tool="${selectionTool}"]`);
+      await stroke([[40, 40]]);
+      assert(JSON.stringify(await selectionOverlay()) === JSON.stringify(initialSelection), `${selectionTool} click inside the selection changed it`);
+      for (const modifiers of [['shift'], ['alt']]) {
+        await stroke([[180, 140]], modifiers);
+        assert(JSON.stringify(await selectionOverlay()) === JSON.stringify(initialSelection), `${selectionTool} modifier click discarded the selection`);
+      }
+      for (const mode of ['add', 'subtract']) {
+        await parameter('selectionMode', mode); await stroke([[180, 140]]);
+        assert(JSON.stringify(await selectionOverlay()) === JSON.stringify(initialSelection), `${selectionTool} ${mode} mode click discarded the selection`);
+      }
+      await parameter('selectionMode', 'replace');
+      await stroke([[180, 140]]);
+      assert((await selectionOverlay()).pixels === 0, `${selectionTool} click outside did not remove the selection`);
+      await click('[data-action="undo"]');
+      assert(JSON.stringify(await selectionOverlay()) === JSON.stringify(initialSelection), `${selectionTool} deselection did not support undo`);
+    }
+    checks.push('rectangle, ellipse and lasso outside clicks deselect with undo; inside and add/subtract clicks preserve the selection');
+
+    await click('[data-tool="rect"]');
+    await stroke([[100, 20], [145, 70]]);
+    const replacementSelection = await selectionOverlay();
+    assert(replacementSelection.pixels > 100 && replacementSelection.hash !== initialSelection.hash, 'Dragging did not replace the selection');
+    await click('[data-action="undo"]');
+    assert(JSON.stringify(await selectionOverlay()) === JSON.stringify(initialSelection), 'Replacing a selection inserted an extra deselect undo step');
+    const outsideScreen = await js(() => {
+      const canvas = document.querySelector('#imageEditorOverlayCanvas').getBoundingClientRect();
+      return { x: Math.round(canvas.left + canvas.width * .8), y: Math.round(canvas.top + canvas.height * .8) };
+    });
+    window.webContents.sendInputEvent({ type: 'mouseDown', ...outsideScreen, button: 'right', clickCount: 1 });
+    window.webContents.sendInputEvent({ type: 'mouseUp', ...outsideScreen, button: 'right', clickCount: 1 });
+    await pause(80);
+    assert(JSON.stringify(await selectionOverlay()) === JSON.stringify(initialSelection), 'Right click discarded the selection');
+    const blankScreen = await js(() => {
+      const stage = document.querySelector('#imageEditorStage').getBoundingClientRect();
+      const canvas = document.querySelector('#imageEditorOverlayCanvas').getBoundingClientRect();
+      const point = { x: Math.round(stage.left + 8), y: Math.round(stage.top + 8) };
+      if (point.x >= canvas.left && point.x <= canvas.right && point.y >= canvas.top && point.y <= canvas.bottom) throw new Error('Blank click fixture overlaps the image');
+      return point;
+    });
+    window.webContents.sendInputEvent({ type: 'mouseMove', ...blankScreen });
+    window.webContents.sendInputEvent({ type: 'mouseDown', ...blankScreen, button: 'left', clickCount: 1 });
+    window.webContents.sendInputEvent({ type: 'mouseUp', ...blankScreen, button: 'left', clickCount: 1 });
+    await pause(100);
+    assert((await selectionOverlay()).pixels === 0, 'Clicking empty stage outside the image did not deselect');
+    await click('[data-action="undo"]');
+    assert(JSON.stringify(await selectionOverlay()) === JSON.stringify(initialSelection), 'Blank-stage deselection did not support undo');
+    checks.push('selection replacement stays one undo step; right click preserves and blank-stage click cancels selection');
+
+    await click('[data-tool="lasso"]');
+    await stroke([[180, 140], [181, 140], [181, 141], [180, 141]]);
+    assert((await selectionOverlay()).pixels === 0, 'Lasso click jitter left a selection');
+    await parameter('size', 12); await parameter('hardness', 100); await parameter('color', '#ff0000');
+    await click('[data-tool="brush"]'); await stroke([[180, 140]]);
+    assertPixel(await pixel(180, 140), [255, 0, 0, 255], 'Lasso click jitter created an empty mask that blocks painting');
+    await click('[data-action="undo"]'); await click('[data-action="undo"]');
+    assert(JSON.stringify(await selectionOverlay()) === JSON.stringify(initialSelection), 'Jitter deselection did not restore the old selection through undo');
+    await parameter('feather', 6); await click('[data-tool="rect"]'); await stroke([[50, 50], [100, 100]]);
+    const featheredClickSelection = await selectionOverlay();
+    await stroke([[200, 150]]);
+    assert((await selectionOverlay()).pixels === 0, 'Outside click did not cancel a feathered selection');
+    await click('[data-action="undo"]');
+    assert(JSON.stringify(await selectionOverlay()) === JSON.stringify(featheredClickSelection), 'Undo did not restore feathered selection exactly');
+    checks.push('lasso click jitter cancels rather than making an empty mask; feathered deselection restores exactly');
 
     await reopen();
     await parameter('size', 24);
@@ -566,6 +850,136 @@ async function electronTest({ app, BrowserWindow, session }, options) {
     await fs.writeFile(path.join(options.directory, 'layers-imports.png'), (await window.webContents.capturePage()).toPNG());
     checks.push('image drop and clipboard paste create independent layers without leaking events to the asset library');
 
+    await reopen();
+    const geometryHash = await imageHash(), geometryPixel = await pixel(40, 50);
+    await click('[data-action="rotate-right"]');
+    assert(JSON.stringify(await documentSize()) === JSON.stringify({ width: 192, height: 256 }), 'Clockwise rotation did not exchange image dimensions');
+    assertPixel(await pixel(141, 40), geometryPixel, 'Clockwise rotation moved a source pixel to the wrong position');
+    await key('Z', ['control']);
+    assert(JSON.stringify(await documentSize()) === JSON.stringify({ width: 256, height: 192 }) && await imageHash() === geometryHash, 'Undo did not restore the original dimensions and pixels after rotation');
+    await click('[data-action="flip-horizontal"]');
+    assertPixel(await pixel(215, 50), geometryPixel, 'Horizontal flip did not mirror a source pixel');
+    await key('Z', ['control']);
+    assert(await imageHash() === geometryHash, 'Undo did not restore flipped pixels exactly');
+    await editorOption('data-basic-param', 'lockRatio', false);
+    await editorOption('data-basic-param', 'width', 128); await editorOption('data-basic-param', 'height', 80);
+    await click('[data-action="resize-apply"]');
+    assert(JSON.stringify(await documentSize()) === JSON.stringify({ width: 128, height: 80 }), 'Image-size controls did not resize the actual document');
+    await save('resized');
+    await key('Z', ['control']);
+    assert(JSON.stringify(await documentSize()) === JSON.stringify({ width: 256, height: 192 }) && await imageHash() === geometryHash, 'Resize undo did not restore the original image');
+    checks.push('rotate, horizontal flip and resize change document pixels and dimensions, support undo and export the resized PNG');
+
+    await reopen();
+    const selectionCropBounds = await dragBounds([20, 30], [80, 90]);
+    const selectionCropPixel = await pixel(selectionCropBounds.left + 10, selectionCropBounds.top + 10);
+    await key('M'); await stroke([[20, 30], [80, 90]]); await click('[data-action="crop-selection"]');
+    assert(JSON.stringify(await documentSize()) === JSON.stringify({ width: selectionCropBounds.width, height: selectionCropBounds.height }), 'Crop-to-selection used incorrect image bounds');
+    assertPixel(await pixel(10, 10), selectionCropPixel, 'Crop-to-selection did not retain the selected source pixels');
+    await key('Z', ['control']);
+    assert(JSON.stringify(await documentSize()) === JSON.stringify({ width: 256, height: 192 }) && await imageHash() === geometryHash, 'Crop-to-selection undo did not restore the original image');
+    await key('D', ['control']); await key('C');
+    const dragCropBounds = await dragBounds([30, 40], [130, 120]);
+    const dragCropPixel = await pixel(dragCropBounds.left + 10, dragCropBounds.top + 10);
+    await stroke([[30, 40], [130, 120]]);
+    assert(!(await js(() => document.querySelector('[data-action="crop-apply"]').disabled)), 'Dragging with the crop tool did not create a crop region');
+    await click('[data-action="crop-apply"]');
+    assert(JSON.stringify(await documentSize()) === JSON.stringify({ width: dragCropBounds.width, height: dragCropBounds.height }), 'Crop tool did not apply its drawn bounds');
+    assertPixel(await pixel(10, 10), dragCropPixel, 'Crop tool changed retained source pixels');
+    await key('Z', ['control']);
+    assert(JSON.stringify(await documentSize()) === JSON.stringify({ width: 256, height: 192 }) && await imageHash() === geometryHash, 'Crop tool undo did not restore the image');
+    checks.push('selection crop and the C crop tool retain the correct source region and restore dimensions through undo');
+
+    await reopen();
+    const adjustmentPixel = await pixel(90, 70);
+    await editorOption('data-adjust-param', 'brightness', 20); await click('[data-action="adjust-apply"]');
+    const brighter = await pixel(90, 70);
+    assert(brighter.slice(0, 3).every((channel, index) => channel > adjustmentPixel[index]) && brighter[3] === adjustmentPixel[3], 'Brightness did not raise RGB while preserving alpha');
+    await key('Z', ['control']);
+    await editorOption('data-adjust-param', 'contrast', 30); await click('[data-action="adjust-apply"]');
+    const contrast = await pixel(90, 70);
+    assert(contrast[0] < adjustmentPixel[0] && contrast[2] > adjustmentPixel[2], 'Contrast did not expand pixel values away from the midpoint');
+    await key('Z', ['control']);
+    await editorOption('data-adjust-param', 'saturation', -100); await click('[data-action="adjust-apply"]');
+    const desaturated = await pixel(90, 70);
+    assert(desaturated[0] === desaturated[1] && desaturated[1] === desaturated[2], 'Saturation controls did not remove color');
+    await key('Z', ['control']);
+    assertPixel(await pixel(90, 70), adjustmentPixel, 'Adjustment undo did not restore original RGB');
+    const adjustmentBaseId = await activeLayerId();
+    await importLayer('半透明调色.png', 'rgba(100,150,200,0.4)'); await layerAction(adjustmentBaseId, 'visible');
+    const translucent = await pixel(128, 96);
+    assert(translucent[3] > 0 && translucent[3] < 255, 'Transparency fixture is not translucent');
+    await click('[data-action="grayscale"]');
+    const grayscale = await pixel(128, 96);
+    assert(grayscale[0] === grayscale[1] && grayscale[1] === grayscale[2] && grayscale[3] === translucent[3], 'Grayscale did not preserve layer transparency');
+    await key('Z', ['control']); await click('[data-action="invert-image"]');
+    assertPixel(await pixel(128, 96), translucent.map((channel, index) => index === 3 ? channel : 255 - channel), 'Image inversion did not invert RGB while preserving alpha', 3);
+    checks.push('brightness, contrast, saturation, grayscale and inversion edit RGB independently of alpha and support undo');
+
+    await reopen();
+    await key('T'); await editorOption('data-text-param', 'text', 'Mosaic'); await editorOption('data-text-param', 'fontFamily', 'Arial'); await editorOption('data-text-param', 'fontSize', 24);
+    await parameter('color', '#ffffff');
+    const beforeText = await imageHash(); await stroke([[30, 40]]);
+    assert(await layerCount() === 2 && await imageHash() !== beforeText, 'Text tool did not create visible text on an independent layer');
+    const initialText = await imageHash();
+    await editorOption('data-text-param', 'text', 'Edit'); await click('[data-action="text-update"]');
+    assert(await layerCount() === 2 && await imageHash() !== initialText, 'Updating text created a duplicate layer or failed to redraw the text');
+    await key('Z', ['control']);
+    assert(await imageHash() === initialText, 'Text undo did not restore the previous content');
+    await editorOption('data-text-param', 'text', 'Mosaic'); await editorOption('data-text-param', 'fontSize', 20);
+    await click('[data-action="watermark"]');
+    assert(await layerCount() === 3 && Number(await js(() => document.querySelector('[data-layer-param="opacity"]').value)) === 35, 'Watermark was not created as a translucent independent layer');
+    assert(await imageHash() !== initialText, 'Watermark did not appear in the image');
+    await fs.writeFile(path.join(options.directory, 'text-watermark.png'), (await window.webContents.capturePage()).toPNG());
+    checks.push('text placement, text updates, undo and a translucent watermark remain independent editable layers');
+
+    await reopen();
+    await key('U'); await parameter('color', '#ff0000'); await editorOption('data-shape-param', 'strokeWidth', 4);
+    const shapeOutside = await pixel(20, 20);
+    await editorOption('data-shape-param', 'type', 'rect'); await stroke([[30, 30], [70, 70]]);
+    assert(await layerCount() === 2, 'Rectangle shape did not create its own layer');
+    assertPixel(await pixel(50, 50), [255, 0, 0, 255], 'Rectangle shape did not fill its interior');
+    assertPixel(await pixel(20, 20), shapeOutside, 'Rectangle shape changed pixels outside its bounds');
+    await editorOption('data-shape-param', 'type', 'ellipse'); await stroke([[100, 40], [150, 90]]);
+    assert(await layerCount() === 3, 'Ellipse shape did not create its own layer');
+    assertPixel(await pixel(125, 65), [255, 0, 0, 255], 'Ellipse shape did not fill its center');
+    const beforeLine = await pixel(195, 75);
+    await editorOption('data-shape-param', 'type', 'line'); await stroke([[170, 50], [220, 100]]);
+    assert(await layerCount() === 4, 'Line shape did not create its own layer');
+    assertPixel(await pixel(195, 75), [255, 0, 0, 255], 'Line shape did not stroke the dragged path');
+    await key('Z', ['control']);
+    assert(await layerCount() === 3, 'Undo did not remove the last shape layer');
+    assertPixel(await pixel(195, 75), beforeLine, 'Undo did not restore pixels under the shape');
+    checks.push('rectangle, ellipse and line shapes produce independent visible layers and support undo');
+
+    await reopen();
+    const psdHiddenId = await importLayer('PSD隐藏层.png', '#c86432');
+    await layerAction(psdHiddenId, 'visible');
+    const psdUpperId = await importLayer('PSD叠加层.png', '#3264c8');
+    await layerParameter('opacity', 45); await layerParameter('blend', 'multiply'); await layerParameter('x', 170); await layerParameter('scale', 50);
+    const psdComposite = await pixel(128, 96);
+    await click('[data-action="export-psd"]');
+    await waitFor(() => window.__psds.length === 1 && !document.querySelector('[data-action="export-psd"]').disabled, 'PSD export did not reach the persistence API');
+    const psd = await js(() => {
+      const request = window.__psds[0];
+      const sample = (image, x, y) => x < 0 || y < 0 || x >= image.width || y >= image.height ? null : Array.from(image.data.slice((y * image.width + x) * 4, (y * image.width + x) * 4 + 4));
+      return {
+        width: request.width, height: request.height, assetId: request.assetId, hasPngBytes: Object.hasOwn(request, 'bytes'),
+        imageBytes: request.imageData.data.byteLength, composite: sample(request.imageData, 128, 96),
+        layers: request.layers.map(layer => ({ name: layer.name, visible: layer.visible, opacity: layer.opacity, blend: layer.blend, left: layer.left, top: layer.top, width: layer.imageData.width, height: layer.imageData.height, bytes: layer.imageData.data.byteLength, pixel: sample(layer.imageData, 298 - (layer.left || 0), 96 - (layer.top || 0)) }))
+      };
+    });
+    assert(psd.width === 256 && psd.height === 192 && psd.assetId === 'image-editor-fixture' && !psd.hasPngBytes, 'PSD export reused a flattened PNG request instead of layer data');
+    assert(psd.layers.length === 3 && psd.imageBytes === 256 * 192 * 4 && psd.layers.every(layer => layer.width > 0 && layer.height > 0 && layer.bytes === layer.width * layer.height * 4), 'PSD export omitted document dimensions or independent RGBA layers');
+    assert(psd.layers.some(layer => layer.name === 'PSD隐藏层' && layer.visible === false), 'PSD export lost hidden layers');
+    const psdUpper = psd.layers.find(layer => layer.name === 'PSD叠加层');
+    assert(psdUpper?.opacity === 45 && psdUpper.blend === 'multiply' && psdUpper.visible, 'PSD export lost opacity or blend mode');
+    assert(psdUpper.left > 128 && psdUpper.width === 128 && psdUpper.height === 96, 'PSD export cropped away or lost the transformed off-canvas layer bounds');
+    assertPixel(psdUpper.pixel, [50, 100, 200, 255], 'PSD export did not rasterize the transformed layer independently of its opacity');
+    assertPixel(psd.composite, psdComposite, 'PSD composite preview differs from the editor');
+    assert(await layerCount() === 3 && await activeLayerId() === psdUpperId, 'PSD export discarded the editing layer stack');
+    checks.push('PSD export passes independent RGBA layers, hidden state, opacity, blend modes and the matching composite to persistence');
+
     await reopen('maps');
     for (const type of ['displacement', 'normal', 'roughness', 'specular']) {
       await parameter('type', type);
@@ -606,25 +1020,25 @@ async function main() {
   const { pathToFileURL } = require('node:url');
   const fileUrl = name => pathToFileURL(path.join(root, 'src', name)).href;
   const html = path.join(directory, 'index.html');
-  await fs.writeFile(html, `<!doctype html><html lang="zh-CN"><head><meta charset="UTF-8"><link rel="stylesheet" href="${fileUrl('styles.css')}"><link rel="stylesheet" href="${fileUrl('image-editor.css')}"></head><body><script src="${fileUrl('texture-maps.js')}"></script><script src="${fileUrl('content-aware-fill.js')}"></script><script src="${fileUrl('image-layers.js')}"></script><script src="${fileUrl('image-editor.js')}"></script></body></html>`);
+  await fs.writeFile(html, `<!doctype html><html lang="zh-CN"><head><meta charset="UTF-8"><link rel="stylesheet" href="${fileUrl('styles.css')}"><link rel="stylesheet" href="${fileUrl('image-editor.css')}"></head><body><script src="${fileUrl('texture-maps.js')}"></script><script src="${fileUrl('content-aware-fill.js')}"></script><script src="${fileUrl('image-layers.js')}"></script><script src="${fileUrl('image-basics.js')}"></script><script src="${fileUrl('image-editor.js')}"></script></body></html>`);
   const options = { directory, html, fixture: fixture.toString('base64') };
-  await fs.writeFile(path.join(directory, 'main.cjs'), `'use strict';\nconst electron=require('electron');\nconst path=require('node:path');\nelectron.app.setName('Mosaic image editor isolated smoke');\nelectron.app.setPath('userData',path.join(__dirname,'profile'));\nelectron.app.setPath('sessionData',path.join(__dirname,'sessions'));\n(${electronTest.toString()})(electron,${JSON.stringify(options)});\nsetTimeout(()=>electron.app.exit(2),150000).unref();\n`);
+  await fs.writeFile(path.join(directory, 'main.cjs'), `'use strict';\nconst electron=require('electron');\nconst path=require('node:path');\nelectron.app.setName('Mosaic image editor isolated smoke');\nelectron.app.setPath('userData',path.join(__dirname,'profile'));\nelectron.app.setPath('sessionData',path.join(__dirname,'sessions'));\n(${electronTest.toString()})(electron,${JSON.stringify(options)});\nsetTimeout(()=>electron.app.exit(2),210000).unref();\n`);
   await fs.writeFile(path.join(directory, 'package.json'), JSON.stringify({ name: 'mosaic-image-editor-smoke', main: 'main.cjs' }));
   const env = { ...process.env };
   delete env.ELECTRON_RUN_AS_NODE;
   const exitCode = await new Promise((resolve, reject) => {
     const child = spawn(electronPath(), [directory], { cwd: root, env, windowsHide: true, stdio: 'inherit' });
-    const timer = setTimeout(() => { child.kill(); reject(new Error(`Image editor smoke timed out: ${directory}`)); }, 160000);
+    const timer = setTimeout(() => { child.kill(); reject(new Error(`Image editor smoke timed out: ${directory}`)); }, 220000);
     child.once('error', error => { clearTimeout(timer); reject(error); });
     child.once('exit', code => { clearTimeout(timer); resolve(code); });
   });
   const result = JSON.parse(await fs.readFile(path.join(directory, 'result.json'), 'utf8'));
   result.reportDirectory = directory;
   if (exitCode === 0 && result.ok) {
-    for (const name of ['brush', 'eraser', 'selection', 'clone', 'compound-selection', 'feather', 'pen', 'custom-brush', 'smart-fill', 'layers', 'displacement', 'normal', 'roughness', 'specular', 'seamless']) {
+    for (const name of ['brush', 'eraser', 'selection', 'clone', 'compound-selection', 'feather', 'pen', 'custom-brush', 'smart-fill', 'layers', 'resized', 'displacement', 'normal', 'roughness', 'specular', 'seamless']) {
       const { data, info } = await sharp(path.join(directory, `${name}.png`)).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
-      assert.equal(info.width, 256, `${name}: wrong export width`);
-      assert.equal(info.height, 192, `${name}: wrong export height`);
+      assert.equal(info.width, name === 'resized' ? 128 : 256, `${name}: wrong export width`);
+      assert.equal(info.height, name === 'resized' ? 80 : 192, `${name}: wrong export height`);
       if (name === 'layers') assert.deepEqual([...data.subarray((96 * info.width + 128) * 4, (96 * info.width + 128) * 4 + 4)], [50, 100, 200, 255], 'Exported PNG does not contain the top layer composite');
       if (name === 'normal') assert.ok(data.some((value, index) => index % 4 === 2 && value > 200), 'Normal map lacks blue normal vectors');
       if (['displacement', 'roughness', 'specular'].includes(name)) for (let i = 0; i < data.length; i += 4) assert.ok(data[i] === data[i + 1] && data[i] === data[i + 2], `${name}: expected grayscale pixels`);

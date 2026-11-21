@@ -4,6 +4,7 @@ const os = require('node:os');
 const path = require('node:path');
 const sharp = require('sharp');
 const crypto = require('node:crypto');
+const { createPsdBuffer } = require('./psd-export.cjs');
 
 const MAX_PIXELS = 16_777_216;
 const MAX_BYTES = 80 * 1024 * 1024;
@@ -70,9 +71,10 @@ function createImageEditorService({ getLibrary, dialog, getParentWindow = () => 
   async function prepare(request) {
     if (!request || typeof request !== 'object' || Array.isArray(request)) throw new Error('图片保存参数无效');
     const owner = source(request.assetId, request.libraryRoot), input = validateBytes(request.bytes);
-    const size = await dimensions(owner);
+    await dimensions(owner);
     const metadata = await sharp(input, { limitInputPixels: MAX_PIXELS }).metadata();
-    if (metadata.format !== 'png' || (metadata.pages || 1) > 1 || metadata.width !== size.width || metadata.height !== size.height) throw new Error('编辑结果尺寸与原图不一致，请重新打开图片');
+    if (metadata.format !== 'png' || (metadata.pages || 1) > 1 || !metadata.width || !metadata.height || metadata.width * metadata.height > MAX_PIXELS) throw new Error('编辑结果必须是 1677 万像素以内的静态 PNG');
+    const size = { width: metadata.width, height: metadata.height };
     const bytes = await sharp(input, { limitInputPixels: MAX_PIXELS }).toColourspace('srgb').ensureAlpha().png().toBuffer();
     current(owner);
     return { owner, bytes, size, suffix: outputSuffix(request.suffix) };
@@ -100,19 +102,18 @@ function createImageEditorService({ getLibrary, dialog, getParentWindow = () => 
       } finally { await fs.unlink(temporary).catch(error => { if (error.code !== 'ENOENT') throw error; }); }
     });
   }
-  function exportImage(request) {
-    return run(async () => {
-      const { owner, bytes, size, suffix } = await prepare(request);
+  async function writeExport(owner, bytes, size, suffix, extension) {
       const name = owner.asset.name.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').replace(/[. ]+$/g, '').slice(0, 120) || '图片';
-      const options = { title: '导出编辑结果', defaultPath: `${name}-${suffix}.png`, buttonLabel: '导出 PNG', filters: [{ name: 'PNG 图片', extensions: ['png'] }] };
+      const label = extension.toUpperCase();
+      const options = { title: extension === 'psd' ? '导出分层 PSD' : '导出编辑结果', defaultPath: `${name}-${suffix}.${extension}`, buttonLabel: `导出 ${label}`, filters: [{ name: extension === 'psd' ? 'Photoshop 分层文档' : 'PNG 图片', extensions: [extension] }] };
       const parent = getParentWindow();
       const chosen = await (parent ? dialog.showSaveDialog(parent, options) : dialog.showSaveDialog(options));
       current(owner);
       if (!chosen || chosen.canceled || !chosen.filePath) return { canceled: true };
       if (typeof chosen.filePath !== 'string' || !path.isAbsolute(chosen.filePath)) throw new Error('请选择有效的保存位置');
       let destination = chosen.filePath;
-      if (!path.extname(destination)) destination += '.png';
-      if (path.extname(destination).toLowerCase() !== '.png') throw new Error('请保存为 .png 文件');
+      if (!path.extname(destination)) destination += `.${extension}`;
+      if (path.extname(destination).toLowerCase() !== `.${extension}`) throw new Error(`请保存为 .${extension} 文件`);
       const directory = await fs.realpath(path.dirname(destination));
       const libraryRoot = await fs.realpath(owner.library.root);
       destination = path.join(directory, path.basename(destination));
@@ -126,9 +127,24 @@ function createImageEditorService({ getLibrary, dialog, getParentWindow = () => 
         await fs.rename(temporary, destination);
       } finally { await fs.unlink(temporary).catch(error => { if (error.code !== 'ENOENT') throw error; }); }
       return { canceled: false, path: destination, ...size };
+  }
+  function exportImage(request) {
+    return run(async () => {
+      const { owner, bytes, size, suffix } = await prepare(request);
+      return writeExport(owner, bytes, size, suffix, 'png');
     });
   }
-  return { read, save, exportImage, busy: () => operations > 0 };
+  function exportPsd(request) {
+    return run(async () => {
+      if (!request || typeof request !== 'object' || Array.isArray(request)) throw new Error('PSD 导出参数无效');
+      const owner = source(request.assetId, request.libraryRoot);
+      await dimensions(owner);
+      const output = createPsdBuffer(request);
+      current(owner);
+      return writeExport(owner, output.bytes, { width: output.width, height: output.height, layerCount: output.layerCount }, '分层编辑', 'psd');
+    });
+  }
+  return { read, save, exportImage, exportPsd, busy: () => operations > 0 };
 }
 
 module.exports = { createImageEditorService, MAX_PIXELS, MAX_BYTES, validateBytes, outputSuffix };

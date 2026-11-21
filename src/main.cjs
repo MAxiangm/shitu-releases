@@ -18,6 +18,10 @@ const { resolveAssetFiles, createDragIcon } = require('./asset-actions.cjs');
 const { assetMenuTemplate } = require('./asset-menu.cjs');
 const sharp = require('sharp');
 const { createImagePlugins } = require('./image-plugins.cjs');
+const { createInvoiceService } = require('./invoice-service.cjs');
+const { createReimbursementService } = require('./reimbursement-service.cjs');
+const { categoryForFolder: reimbursementCategoryForFolder } = require('./reimbursement-folders.cjs');
+const { createInvoicePdfReader } = require('./invoice-pdf-reader.cjs');
 const { createImageEditorService } = require('./image-editor-service.cjs');
 const { createAppUpdater } = require('./app-updater.cjs');
 const { createUpdateTransport } = require('./update-transport.cjs');
@@ -42,7 +46,7 @@ const { createAEProjectCollector } = require('./ae-projects.cjs');
 const { createBundleRepair } = require('./bundle-repair.cjs');
 const { createAEPreviewEngine } = require('./ae-preview.cjs');
 const { createAEPreviewService } = require('./ae-preview-service.cjs');
-const { AUDIO, VIDEO, MODEL, PROJECT, FONT, SUPPORTED } = require('./media-formats.cjs');
+const { AUDIO, VIDEO, MODEL, PROJECT, FONT, DOCUMENT, SUPPORTED } = require('./media-formats.cjs');
 const crypto = require('node:crypto');
 const { spawn } = require('node:child_process');
 const updateConfig = require('../update-config.json');
@@ -74,6 +78,8 @@ let switchingLibrary=false;
 let draggingAssets=false;
 let movingAssets=0;
 let imagePlugins;
+let invoices;
+let reimbursements;
 let imageEditor;
 let videoEngine;
 let audioEngine;
@@ -137,11 +143,12 @@ async function saveUserMetadata(method, args, { recordHistory = false, expectedR
   try {
     const snapshot = await save;
     if (library !== current) throw new Error('素材库已切换，请重新选择素材');
+    if (method === 'setTrash' || method === 'moveAssetsToFolder') sendActionEvent('library-changed');
     return withHistory(snapshot, current);
   } finally { metadataSaves.delete(save); sendHistory(); }
 }
 function ensureHistoryAvailable() {
-  if (closing || switchingLibrary || importing || draggingAssets || installingUpdate || assetExporter?.busy() || videoTranscodeService?.busy() || imagePlugins?.busy() || imageEditor?.busy() || collector?.activeCount())
+  if (closing || switchingLibrary || importing || draggingAssets || installingUpdate || assetExporter?.busy() || videoTranscodeService?.busy() || (imagePlugins?.busy() || (invoices?.busy() || reimbursements?.busy())) || imageEditor?.busy() || collector?.activeCount())
     throw new Error('请等待当前导入、转码、处理或拖放完成后再撤销或重做');
 }
 async function replayHistory(direction, expectedRoot, expectedId) {
@@ -231,9 +238,10 @@ function forwardVideoProgress(event, owner) {
     state: event.state, progress: Number.isFinite(event.progress) ? Math.max(0, Math.min(100, event.progress)) : undefined });
 }
 async function switchLibrary(mode) {
-  if(switchingLibrary || importing || draggingAssets || movingAssets || historyBusy || metadataSaves.size || assetExporter?.busy() || fontExporter?.busy() || videoTranscodeService?.busy() || imagePlugins?.busy() || imageEditor?.busy() || collector?.activeCount() || bundleRepairBusy)throw new Error('请等待当前素材操作完成后再切换素材库');
+  if(switchingLibrary || importing || draggingAssets || movingAssets || historyBusy || metadataSaves.size || assetExporter?.busy() || fontExporter?.busy() || videoTranscodeService?.busy() || (imagePlugins?.busy() || (invoices?.busy() || reimbursements?.busy())) || imageEditor?.busy() || collector?.activeCount() || bundleRepairBusy)throw new Error('请等待当前素材操作完成后再切换素材库');
   if(mode==='migrate')requireLibrary();
   switchingLibrary=true;
+  reimbursements?.synchronizeLibrary();
   try {
   let selected;
   if(mode==='legacy') {
@@ -261,10 +269,16 @@ async function switchLibrary(mode) {
     mainWindow.webContents.send('shitu:library-changed');
     sendHistory();
     return {snapshot};
-  } finally {switchingLibrary=false;}
+  } finally {switchingLibrary=false; reimbursements?.synchronizeLibrary();}
 }
 
 async function createThumbnail(source, destination, options) {
+  if (DOCUMENT.has(path.extname(source).slice(1).toLowerCase())) {
+    const extension = path.extname(source).slice(1).toUpperCase().replace(/[^A-Z0-9]/g, '');
+    const art = `<svg xmlns="http://www.w3.org/2000/svg" width="480" height="640"><rect width="480" height="640" fill="#202632"/><path d="M105 75h200l70 70v420H105z" fill="#edf0f5"/><path d="M305 75v75h70" fill="#bac7d9"/><rect x="137" y="305" width="205" height="80" rx="10" fill="#496789"/><text x="240" y="360" text-anchor="middle" fill="white" font-family="sans-serif" font-size="43">${extension}</text><path d="M145 435h190M145 465h190M145 495h125" stroke="#bec7d4" stroke-width="12"/></svg>`;
+    await sharp(Buffer.from(art)).jpeg({ quality: 86 }).toFile(destination);
+    return { mediaType: 'document', width: 0, height: 0 };
+  }
   if (PROJECT.has(path.extname(source).slice(1).toLowerCase())) return {};
   if (MODEL.has(path.extname(source).slice(1).toLowerCase())) return modelService.thumbnail(source, destination, options);
   if (FONT.has(path.extname(source).slice(1).toLowerCase())) return fontService.thumbnail(source, destination, options);
@@ -363,7 +377,7 @@ function windowCommand(action) {
 
 function ensureUpdateCanInstall() {
   if (!app.isPackaged || process.platform !== 'win32') throw new Error('开发模式不安装更新，请使用正式安装版');
-  if (installingUpdate || closing || activeOperations || switchingLibrary || importing || draggingAssets || videoTranscodeService?.busy() || imagePlugins?.busy() || collector?.activeCount()) {
+  if (installingUpdate || closing || activeOperations || switchingLibrary || importing || draggingAssets || videoTranscodeService?.busy() || (imagePlugins?.busy() || (invoices?.busy() || reimbursements?.busy())) || collector?.activeCount()) {
     throw new Error('请等待导入、采集、图片处理和保存完成后再安装更新');
   }
 }
@@ -504,23 +518,25 @@ async function importPaths(paths, folderId = null) {
     const report = await tasks.runImport(owner, { paths, folderId, retry: async (filename, folder) => {
       await importPaths([filename], folder);
       sendActionEvent('library-changed');
-    } }, reportProgress => owner.importPaths(paths, { folderId: folderId || null, onProgress: progress => {
+    } }, reportProgress => owner.importPaths(paths, { folderId: folderId || null,
+      restoreTrashed: Boolean(reimbursementCategoryForFolder(owner.snapshot().folders, folderId)), onProgress: progress => {
       reportProgress(progress);
       sendActionEvent('import-progress', progress);
     } }));
     aePreviewService?.scheduleLibrary(owner);
     scheduleFontThumbnailRecovery(owner);
+    if (owner === library && (report.imported || report.restored)) sendActionEvent('library-changed');
     return { snapshot: owner.snapshot(), report };
   } finally { importing = false; }
 }
 
 async function startVideoTranscode(request) {
-  if (closing || switchingLibrary || importing || draggingAssets || historyBusy || imagePlugins?.busy()) throw new Error('请等待当前素材操作完成后再转码');
+  if (closing || switchingLibrary || importing || draggingAssets || historyBusy || (imagePlugins?.busy() || (invoices?.busy() || reimbursements?.busy()))) throw new Error('请等待当前素材操作完成后再转码');
   const settings = await transcodeSettings.get();
   const devices = request?.format === 'dxv' || settings.mode === 'cpu'
     ? { cpu: { name: os.cpus()[0]?.model || 'CPU', logicalProcessors: Math.max(1, Math.min(128, os.availableParallelism?.() || os.cpus().length || 1)) }, gpus: [] }
     : await transcodeDevices.discover();
-  if (closing || switchingLibrary || importing || draggingAssets || historyBusy || imagePlugins?.busy()) throw new Error('当前无法开始转码，请稍后重试');
+  if (closing || switchingLibrary || importing || draggingAssets || historyBusy || (imagePlugins?.busy() || (invoices?.busy() || reimbursements?.busy()))) throw new Error('当前无法开始转码，请稍后重试');
   const plan = executionPlan(settings, devices, { format: request?.format, total: request?.ids?.length || 0 });
   return videoTranscodeService.start({ ...request, executionPlan: plan });
 }
@@ -640,6 +656,34 @@ function bindHandlers() {
     return imagePlugins.run(request);
   });
   checkedHandler('plugin-cancel', id => imagePlugins.cancel(id));
+  checkedHandler('plugin-copy-text', id => imagePlugins.copyText(id));
+  checkedHandler('plugin-save-text', id => {
+    if (closing || switchingLibrary) throw new Error('请等待当前素材操作完成后再保存');
+    return imagePlugins.saveText(id);
+  });
+  checkedHandler('plugin-reveal-result', id => imagePlugins.revealResult(id));
+  checkedHandler('invoice-status', () => invoices.status());
+  checkedHandler('invoice-choose-files', () => invoices.chooseFiles());
+  checkedHandler('invoice-add-assets', request => invoices.addAssets(request));
+  checkedHandler('invoice-run', request => invoices.run(request));
+  checkedHandler('invoice-cancel', id => invoices.cancel(id));
+  checkedHandler('invoice-reveal-result', id => invoices.revealResult(id));
+  checkedHandler('invoice-preview', id => invoices.preview(id));
+  checkedHandler('invoice-remove-items', ids => invoices.removeItems(ids));
+  checkedHandler('reimbursement-profile', () => reimbursements.getProfile());
+  checkedHandler('reimbursement-save-profile', profile => reimbursements.saveProfile(profile));
+  checkedHandler('reimbursement-create', request => reimbursements.create(request));
+  checkedHandler('reimbursement-get', request => reimbursements.get(request));
+  checkedHandler('reimbursement-refresh', request => reimbursements.refresh(request));
+  checkedHandler('reimbursement-save-categories', request => reimbursements.saveCategories(request));
+  checkedHandler('reimbursement-merge-invoices', request => reimbursements.mergeInvoices(request));
+  checkedHandler('reimbursement-set-amount', request => reimbursements.setAmount(request));
+  checkedHandler('reimbursement-cancel', request => reimbursements.cancel(request));
+  checkedHandler('reimbursement-import', request => reimbursements.importFiles(request));
+  checkedHandler('reimbursement-remove-file', request => reimbursements.removeFile(request));
+  checkedHandler('reimbursement-choose-import', request => reimbursements.chooseImport(request));
+  checkedHandler('reimbursement-open', request => reimbursements.openArtifact(request));
+  checkedHandler('reimbursement-export', request => reimbursements.exportArtifact(request));
   checkedHandler('image-editor-read', (id, root) => {
     if (closing || switchingLibrary) throw new Error('请等待当前素材操作完成后再编辑');
     return imageEditor.read(id, root);
@@ -651,6 +695,10 @@ function bindHandlers() {
   checkedHandler('image-editor-export', request => {
     if (closing || switchingLibrary || imageEditor.busy()) throw new Error('请等待当前素材操作完成后再导出');
     return imageEditor.exportImage(request);
+  });
+  checkedHandler('image-editor-export-psd', request => {
+    if (closing || switchingLibrary || imageEditor.busy()) throw new Error('请等待当前素材操作完成后再导出');
+    return imageEditor.exportPsd(request);
   });
   ipcMain.on('shitu:start-drag', (event, ids, expectedRoot) => {
     try { assertTrustedSender(event); } catch { return; }
@@ -706,7 +754,7 @@ function bindHandlers() {
   checkedHandler('import-files', async folderId => {
     requireLibrary();
     if (historyBusy || closing) throw new Error('正在保存撤销或重做，请稍后再导入');
-    const result = await dialog.showOpenDialog(mainWindow, { title: '导入图片、视频、音乐、模型、字体或 AE 工程', properties: ['openFile', 'multiSelections'], filters: [{ name: '支持的素材', extensions: [...SUPPORTED] }, { name: '音乐与音频', extensions: [...AUDIO] }, { name: '字体', extensions: [...FONT] }, { name: 'AE 工程', extensions: [...PROJECT] }, { name: '3D 模型', extensions: [...MODEL] }] });
+    const result = await dialog.showOpenDialog(mainWindow, { title: '导入图片、文档、音视频、模型、字体或 AE 工程', properties: ['openFile', 'multiSelections'], filters: [{ name: '支持的素材', extensions: [...SUPPORTED] }, { name: '文档（PDF、Word 等）', extensions: [...DOCUMENT] }, { name: '音乐与音频', extensions: [...AUDIO] }, { name: '字体', extensions: [...FONT] }, { name: 'AE 工程', extensions: [...PROJECT] }, { name: '3D 模型', extensions: [...MODEL] }] });
     return result.canceled ? { snapshot: library.snapshot(), cancelled: true } : importPaths(result.filePaths, folderId);
   });
   checkedHandler('import-folder', async folderId => {
@@ -837,7 +885,7 @@ async function createWindow() {
   mainWindow.on('close', event => {
     if (mayClose) { mayClose=false; closing=false; return; }
     event.preventDefault();
-    if (switchingLibrary || importing || draggingAssets || historyBusy || metadataSaves.size || assetExporter?.busy() || fontExporter?.busy() || imagePlugins?.busy() || imageEditor?.busy() || collector?.activeCount() || bundleRepairBusy) {
+    if (switchingLibrary || importing || draggingAssets || historyBusy || metadataSaves.size || assetExporter?.busy() || fontExporter?.busy() || (imagePlugins?.busy() || (invoices?.busy() || reimbursements?.busy())) || imageEditor?.busy() || collector?.activeCount() || bundleRepairBusy) {
       dialog.showMessageBox(mainWindow, { type: 'info', title: '素材操作进行中', message: '请等待素材操作完成后再关闭 Mosaic。图片处理任务可在插件中心取消。', buttons: ['知道了'] });
       return;
     }
@@ -854,6 +902,8 @@ async function createWindow() {
       await Promise.all([transcodeSettings?.flush(), transcodePresets?.flush()]);
       await library?.flush();
       await Promise.allSettled([videoSiteAuth?.shutdown(), sketchfabAccount?.shutdown(), transcodeDevices?.shutdown?.(), videoTranscoder?.shutdown(), audioEngine?.shutdown(), modelService?.shutdown(), fontExporter?.shutdown(), fontService?.shutdown(), aeProjects?.shutdown(), aePreviewService?.shutdown()]);
+      await reimbursements?.shutdown();
+      await invoices?.shutdown();
       mayClose = true; mainWindow.close();
     }).catch(error => {
       closing = false;
@@ -945,11 +995,34 @@ else {
     imagePlugins=createImagePlugins({
       rootDir:path.join(process.env.SHITU_PLUGIN_ROOT || app.getPath('userData'),'plugins'),
       getLibrary:requireLibrary,
+      chooseSavePath: options => dialog.showSaveDialog(mainWindow, options),
+      copyText: text => clipboard.writeText(text),
+      revealFile: filename => shell.showItemInFolder(filename),
       onEvent:event=>{
         sendActionEvent('plugin-event', event);
-        if(event.type==='complete' || (event.type==='error' && event.results?.length)) sendActionEvent('library-changed');
+        if(!['extract-text','image-to-pdf'].includes(event.pluginId) && (event.type==='complete' || (event.type==='error' && event.results?.length))) sendActionEvent('library-changed');
       }
     });
+    invoices = createInvoiceService({
+      rootDir: path.join(app.getPath('userData'), 'invoice-work'), getLibrary: () => library,
+      chooseFiles: options => dialog.showOpenDialog(mainWindow, options),
+      chooseSavePath: options => dialog.showSaveDialog(mainWindow, options),
+      pdfReader: createInvoicePdfReader({ BrowserWindow, ipcMain }),
+      revealFile: filename => shell.showItemInFolder(filename),
+      onEvent: event => sendActionEvent('invoice-event', event)
+    });
+    reimbursements = createReimbursementService({
+      rootDir: path.join(app.getPath('userData'), 'reimbursement-work'),
+      profilePath: path.join(app.getPath('userData'), 'reimbursement-profile.json'),
+      pdfReader: createInvoicePdfReader({ BrowserWindow, ipcMain }),
+      getLibrary: () => closing || switchingLibrary ? null : library,
+      chooseFiles: options => dialog.showOpenDialog(mainWindow, options),
+      chooseSavePath: options => dialog.showSaveDialog(mainWindow, options),
+      openFile: filename => shell.openPath(filename),
+      onChanged: owner => { if (owner === library) sendActionEvent('library-changed'); },
+      onEvent: event => sendActionEvent('reimbursement-event', event)
+    });
+    reimbursements.synchronizeLibrary();
     videoSiteAuth = createVideoSiteAuth({ directory: path.join(app.getPath('userData'), 'video-site-auth'),
       onState: value => sendActionEvent('video-auth', value) });
     sketchfabAccount = createSketchfabAccount({ filePath: path.join(app.getPath('userData'), 'sketchfab-account.bin'), safeStorage });
@@ -1048,6 +1121,6 @@ else {
     audioPreviewService?.invalidate();
     videoTranscodeService?.shutdown().catch(()=>{}); videoTranscoder?.shutdown().catch(()=>{});
     Promise.resolve(transcodeDevices?.shutdown?.()).catch(()=>{});
-    imagePlugins?.shutdown().catch(()=>{}); collector?.close().catch(()=>{}); videoSiteAuth?.shutdown().catch(()=>{}); sketchfabAccount?.shutdown().catch(()=>{}); videoEngine?.shutdown().catch(()=>{}); Promise.resolve(audioEngine?.shutdown()).catch(()=>{}); modelService?.shutdown().catch(()=>{}); fontExporter?.shutdown().catch(()=>{}); fontService?.shutdown().catch(()=>{}); aeProjects?.shutdown().catch(()=>{}); aePreviewService?.shutdown().catch(()=>{});
+    reimbursements?.shutdown().catch(()=>{}); invoices?.shutdown().catch(()=>{}); imagePlugins?.shutdown().catch(()=>{}); collector?.close().catch(()=>{}); videoSiteAuth?.shutdown().catch(()=>{}); sketchfabAccount?.shutdown().catch(()=>{}); videoEngine?.shutdown().catch(()=>{}); Promise.resolve(audioEngine?.shutdown()).catch(()=>{}); modelService?.shutdown().catch(()=>{}); fontExporter?.shutdown().catch(()=>{}); fontService?.shutdown().catch(()=>{}); aeProjects?.shutdown().catch(()=>{}); aePreviewService?.shutdown().catch(()=>{});
   });
 }

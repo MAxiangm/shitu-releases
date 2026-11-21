@@ -4,7 +4,7 @@ const crypto = require('node:crypto');
 const { createReadStream } = require('node:fs');
 const sharp = require('sharp');
 
-const { VIDEO, AUDIO, MODEL, MODEL_NATIVE, PROJECT, FONT, SUPPORTED } = require('./media-formats.cjs');
+const { IMAGE, VIDEO, AUDIO, MODEL, MODEL_NATIVE, PROJECT, FONT, DOCUMENT, SUPPORTED } = require('./media-formats.cjs');
 const { collectModelBundle, copyModelBundle, validateModelBundle, isSafeBundlePath } = require('./model-bundle.cjs');
 const { validateProjectBundle, copyProjectBundle } = require('./project-bundle.cjs');
 const FolderTree = require('./folder-tree.js');
@@ -14,10 +14,11 @@ const FolderIconFiles = require('./folder-icons.cjs');
 const AssetExport = require('./asset-export.cjs');
 const { MetadataHistory, sameField } = require('./metadata-history.cjs');
 const SmartFolders = require('./smart-folders.js');
+const ReimbursementFolders = require('./reimbursement-folders.cjs');
 const { recheckStoredBundle } = require('./bundle-diagnostics.cjs');
 const mediaType = (ext, stored) => PROJECT.has(ext) ? 'project' : MODEL.has(ext) ? 'model'
   : (AUDIO.has(ext) && (!VIDEO.has(ext) || stored === 'audio')) ? 'audio'
-    : VIDEO.has(ext) ? 'video' : FONT.has(ext) ? 'font' : 'image';
+    : VIDEO.has(ext) ? 'video' : FONT.has(ext) ? 'font' : DOCUMENT.has(ext) ? 'document' : 'image';
 const bundleRelative = (id, ext) => `originals/${id}.${PROJECT.has(ext) ? 'project' : 'model'}`;
 const isBundle = ext => MODEL.has(ext) || PROJECT.has(ext);
 const assetBundle = asset => PROJECT.has(asset.ext) ? asset.projectBundle : asset.modelBundle;
@@ -129,6 +130,7 @@ const clone = value => structuredClone(value);
 const now = () => new Date().toISOString();
 const PENDING_DELETE = /^\.pending-delete-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const PENDING_BUNDLE_REPAIR = /^\.pending-repair-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const PENDING_REIMBURSEMENT = /^\.pending-reimbursement-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const bundleRepairValidator = ext => PROJECT.has(ext) ? validateProjectBundle : validateModelBundle;
 
 function text(value, label, limit) {
@@ -229,6 +231,7 @@ class Library {
     this.data = null;
     this._queue = Promise.resolve();
     this._history = new MetadataHistory();
+    this._reimbursementRecoveryPending = false;
   }
 
   async init() {
@@ -243,13 +246,14 @@ class Library {
       const originalFiles = await fs.readdir(path.join(this.root, 'originals')).catch(failure => { if (failure.code === 'ENOENT') return []; throw failure; });
       const thumbnailFiles = await fs.readdir(path.join(this.root, 'thumbnails')).catch(failure => { if (failure.code === 'ENOENT') return []; throw failure; });
       const folderIconFiles = await fs.readdir(path.join(this.root, 'folder-icons')).catch(failure => { if (failure.code === 'ENOENT') return []; throw failure; });
-      const pendingDeletion = (await fs.readdir(this.root)).some(name => PENDING_DELETE.test(name) || PENDING_BUNDLE_REPAIR.test(name));
+      const pendingDeletion = (await fs.readdir(this.root)).some(name => PENDING_DELETE.test(name) || PENDING_BUNDLE_REPAIR.test(name) || PENDING_REIMBURSEMENT.test(name));
       if (backupExists || originalFiles.length || thumbnailFiles.length || folderIconFiles.length || pendingDeletion) throw new Error('素材库索引缺失，但发现已有素材或备份，已保留原文件。请恢复 index.json 后重新打开。');
       const data = { version: 1, assets: [], folders: [] };
       await this._persist(data);
     }
     await fs.mkdir(path.join(this.root, 'originals'), { recursive: true });
     await fs.mkdir(path.join(this.root, 'thumbnails'), { recursive: true });
+    await this._recoverReimbursementDocuments();
     await this._recoverBundleRepairs();
     await this._recoverPendingDeletions();
     return this.snapshot();
@@ -311,6 +315,12 @@ class Library {
       if ('pageUrl' in asset) webUrl(asset.pageUrl, '来源网页');
       assetIds.add(asset.id);
     }
+    if (data.folders.some(folder => ReimbursementFolders.isRoot(folder) || 'reimbursement' in folder || 'reimbursementRootId' in folder || 'reimbursementCategory' in folder) ||
+        data.assets.some(asset => 'reimbursementGenerated' in asset || 'reimbursementSupplementInvoice' in asset || 'reimbursementAmounts' in asset)) {
+      ReimbursementFolders.validate(data.folders, data.assets);
+      const categories = ReimbursementFolders.categoryMap(data.folders);
+      for (const asset of data.assets) if (!IMAGE.has(asset.ext) && asset.ext !== 'pdf' && categories.get(asset.folderId) === 'supplement') throw new Error('补票分类只接受图片或 PDF');
+    }
   }
 
   _ready() { if (!this.data) throw new Error('素材库尚未初始化'); }
@@ -339,7 +349,11 @@ class Library {
   }
 
   _mutate(work) {
-    const result = this._queue.then(() => { this._ready(); return work(); });
+    const result = this._queue.then(async () => {
+      this._ready();
+      if (this._reimbursementRecoveryPending) await this._recoverReimbursementDocuments();
+      return work();
+    });
     this._queue = result.catch(() => {});
     return result;
   }
@@ -414,22 +428,30 @@ class Library {
     return this._importPaths([entryPath], { folderId, onProgress, metadata }, { root, files: [...files] });
   }
 
-  _importPaths(paths, { folderId = null, onProgress, metadata = {} } = {}, modelPackage) {
+  _importPaths(paths, { folderId = null, onProgress, metadata = {}, restoreTrashed = false } = {}, modelPackage) {
     return this._mutate(async () => {
       if (!Array.isArray(paths)) throw new Error('导入路径必须是数组');
+      if (typeof restoreTrashed !== 'boolean') throw new Error('回收站恢复选项无效');
       const sourceMetadata = importMetadata(metadata);
       this._folder(folderId);
-      const report = { imported: 0, duplicates: 0, unsupported: [], errors: [], assetIds: [], warnings: [] };
+      const targetCategory = ReimbursementFolders.categoryForFolder(this.data.folders, folderId);
+      if (restoreTrashed && !targetCategory) throw new Error('仅能在有效的报销分类中恢复重复文件');
+      const report = { imported: 0, restored: 0, duplicates: 0, unsupported: [], errors: [], assetIds: [], restoredAssetIds: [], warnings: [] };
       if (modelPackage) report.existingAssets = [];
       const projectPreparations = [];
       try {
       let candidates = [];
       const seen = new Set();
+      const seenFiles = new Map();
       const explicitFiles = new Set(paths.map(entry => importPathKey(String(entry))));
       const allowedRoots = modelPackage ? [modelPackage.root] : [];
       const walk = async (entry, explicit = false) => {
         const absolute = path.resolve(String(entry));
-        if (seen.has(absolute)) return;
+        if (seen.has(absolute)) {
+          const prior = seenFiles.get(absolute), ext = path.extname(absolute).slice(1).toLowerCase();
+          if (restoreTrashed && explicit && prior && (IMAGE.has(ext) || DOCUMENT.has(ext))) candidates.push(prior);
+          return;
+        }
         seen.add(absolute);
         try {
           if (isWithin(this.root, absolute)) { report.errors.push({ path: absolute, message: '不能将素材库自身再次导入' }); return; }
@@ -440,7 +462,9 @@ class Library {
             const children = await fs.readdir(absolute);
             for (const child of children) await walk(path.join(absolute, child));
           } else if (info.isFile()) {
-            if (SUPPORTED.has(path.extname(absolute).slice(1).toLowerCase())) candidates.push({ absolute, info });
+            if (SUPPORTED.has(path.extname(absolute).slice(1).toLowerCase())) {
+              const candidate = { absolute, info }; candidates.push(candidate); seenFiles.set(absolute, candidate);
+            }
             else report.unsupported.push(absolute);
           }
         } catch (error) { report.errors.push({ path: absolute, message: error.message }); }
@@ -493,6 +517,24 @@ class Library {
       const draft = clone(this.data);
       const hashes = new Set(draft.assets.map(asset => asset.hash));
       const created = [];
+      const duplicate = async (hash, ext) => {
+        if (restoreTrashed && (IMAGE.has(ext) || DOCUMENT.has(ext))) {
+          const matches = draft.assets.filter(asset => asset.hash === hash);
+          const active = matches.find(asset => !asset.trashedAt && asset.folderId === folderId) || matches.find(asset => !asset.trashedAt);
+          const asset = !active && matches.find(asset => asset.trashedAt && !asset.reimbursementGenerated && (IMAGE.has(asset.ext) || DOCUMENT.has(asset.ext)));
+          if (asset) {
+            if (targetCategory === 'supplement' && !IMAGE.has(asset.ext) && asset.ext !== 'pdf') throw new Error('补票分类只接受图片或 PDF');
+            await this._checkManagedParent(asset.filename);
+            const original = path.join(this.root, asset.filename);
+            const info = await fs.lstat(original).catch(error => { if (error.code === 'ENOENT') return null; throw error; });
+            if (!info || !info.isFile() || info.isSymbolicLink() || await hashFile(original) !== hash) throw new Error('回收站原件缺失或已变化，无法恢复，请先检查原文件');
+            Object.assign(asset, { folderId, trashedAt: null, updatedAt: now() });
+            report.restored++; report.restoredAssetIds.push(asset.id);
+            return;
+          }
+        }
+        report.duplicates++;
+      };
       for (let index = 0; index < candidates.length; index++) {
         const { absolute, info } = candidates[index];
         let copied = null;
@@ -501,6 +543,7 @@ class Library {
         let projectPlan = null;
         try {
           const ext = path.extname(absolute).slice(1).toLowerCase();
+          if (!IMAGE.has(ext) && ext !== 'pdf' && ReimbursementFolders.categoryForFolder(draft.folders, folderId) === 'supplement') throw new Error('补票分类只接受图片或 PDF');
           if (PROJECT.has(ext)) {
             projectPlan = projectPlans.get(absolute);
             const manifest = projectPlan.manifest;
@@ -584,7 +627,7 @@ class Library {
             }
           } else {
             const hash = await hashFile(absolute);
-            if (hashes.has(hash)) report.duplicates++;
+            if (hashes.has(hash)) await duplicate(hash, ext);
             else {
               const id = crypto.randomUUID();
               const filename = `originals/${id}.${ext}`;
@@ -592,7 +635,7 @@ class Library {
               await fs.copyFile(absolute, copied, require('node:fs').constants.COPYFILE_EXCL);
               // Hash the managed copy too so a source changing during import never gets a stale identity.
               const copyHash = await hashFile(copied);
-              if (hashes.has(copyHash)) { await fs.rm(copied); copied = null; report.duplicates++; }
+              if (hashes.has(copyHash)) { await fs.rm(copied); copied = null; await duplicate(copyHash, ext); }
               else {
                 let dimensions = {};
                 let thumbnail = null;
@@ -600,18 +643,29 @@ class Library {
                   thumbnailPath = path.join(this.root, 'thumbnails', `${id}.jpg`);
                   try {
                     dimensions = await this.createThumbnail(copied, thumbnailPath,
-                      FONT.has(ext) ? { originalName: path.basename(absolute, path.extname(absolute)) } : undefined) || {};
+                      DOCUMENT.has(ext) ? { mediaType: 'document', extension: ext, originalName: path.basename(absolute, path.extname(absolute)) }
+                        : FONT.has(ext) ? { originalName: path.basename(absolute, path.extname(absolute)) } : undefined) || {};
                     await fs.access(thumbnailPath);
+                    if (DOCUMENT.has(ext)) {
+                      // A document card is a real JPEG, never arbitrary bytes with
+                      // an image extension. It does not describe document pages.
+                      const preview = sharp(thumbnailPath, { limitInputPixels: 16_777_216 });
+                      const metadata = await preview.metadata();
+                      if (metadata.format !== 'jpeg' || !metadata.width || !metadata.height) throw new Error('文档封面不是有效的 JPEG 图片');
+                      await preview.raw().toBuffer();
+                    }
                     thumbnail = `thumbnails/${id}.jpg`;
                   } catch (error) {
                     await fs.rm(thumbnailPath, { force: true }).catch(() => {}); thumbnailPath = null;
                     if (FONT.has(ext)) report.warnings.push({ path: absolute, message: `字体已收录，暂时无法生成预览：${String(error?.message || '字体无法解码').slice(0, 600)}` });
+                    if (DOCUMENT.has(ext)) report.warnings.push({ path: absolute, message: `文档已收录，暂时无法生成封面：${String(error?.message || '文档封面不可用').slice(0, 600)}` });
                   }
                 }
                 const timestamp = now();
                 const copyInfo = await fs.stat(copied);
                 const font = FONT.has(ext) ? fontMetadata(dimensions.font) : undefined;
                 const type = mediaType(ext, dimensions.mediaType);
+                if (type === 'document') dimensions = { width: 0, height: 0 };
                 draft.assets.push({ id, name: path.basename(absolute, path.extname(absolute)), ext, mediaType: type, size: copyInfo.size, width: Number(dimensions.width) || 0, height: Number(dimensions.height) || 0, ...mediaMetadata(dimensions, type === 'video', type === 'audio'), ...(font ? { font } : {}), hash: copyHash, createdAt: timestamp, updatedAt: timestamp, tags: [], folderId, rating: 0, notes: '', trashedAt: null, filename, thumbnail, ...sourceMetadata });
                 hashes.add(copyHash);
                 created.push({ path: copied });
@@ -630,9 +684,9 @@ class Library {
           if (thumbnailPath) await fs.rm(thumbnailPath, { force: true }).catch(() => {});
           report.errors.push({ path: absolute, message: error.message });
         }
-        if (typeof onProgress === 'function') { try { onProgress({ current: index + 1, total: candidates.length, path: absolute, imported: report.imported, duplicates: report.duplicates }); } catch {} }
+        if (typeof onProgress === 'function') { try { onProgress({ current: index + 1, total: candidates.length, path: absolute, imported: report.imported, restored: report.restored, duplicates: report.duplicates }); } catch {} }
       }
-      if (report.imported) {
+      if (report.imported || report.restored) {
         try { await this._persist(draft); }
         catch (error) {
           for (const file of created) {
@@ -929,12 +983,266 @@ class Library {
     });
   }
 
+  createReimbursementFolder(name, parentId = null) {
+    return this._mutate(async () => {
+      name = text(name, '文件夹名称', 100);
+      this._folder(parentId);
+      if (this.data.folders.some(folder => FolderTree.parentId(folder) === parentId && folder.name === name)) throw new Error('同级文件夹中已存在此名称');
+      const draft = clone(this.data), timestamp = now(), folderId = crypto.randomUUID();
+      const siblings = FolderTree.children(draft.folders, parentId);
+      const ordered = siblings.some(folder => folder.sortOrder !== undefined);
+      const sortOrder = ordered ? siblings.reduce((maximum, folder, index) => Math.max(maximum, folder.sortOrder ?? index), -1) + 1 : undefined;
+      if (ordered && !Number.isSafeInteger(sortOrder)) throw new Error('文件夹排序超出范围，请先调整同级顺序');
+      const categoryIds = Object.fromEntries(ReimbursementFolders.CATEGORIES.map(category => [category.key, crypto.randomUUID()]));
+      draft.folders.push({ id: folderId, name, parentId, createdAt: timestamp, kind: 'reimbursement',
+        ...(ordered ? { sortOrder } : {}), reimbursement: { version: 1, categoryIds, formAssetId: null, supplementPdfAssetId: null, invoicePdfAssetId: null, supplementInvoicePdfAssetId: null } });
+      for (const [index, category] of ReimbursementFolders.CATEGORIES.entries()) draft.folders.push({
+        id: categoryIds[category.key], name: category.name, parentId: folderId, createdAt: timestamp, sortOrder: index,
+        reimbursementRootId: folderId, reimbursementCategory: category.key
+      });
+      await this._persist(draft);
+      return { snapshot: this.snapshot(), folderId };
+    });
+  }
+
+  updateReimbursementCategories(rootId, categories) {
+    return this._mutate(async () => {
+      const root = this.data.folders.find(folder => folder.id === rootId);
+      if (!ReimbursementFolders.isRoot(root)) throw new Error('报销文件夹已不存在');
+      const values = ReimbursementFolders.normalizeCategories(categories);
+      const oldIds = root.reimbursement.categoryIds, keys = new Set(values.map(category => category.key));
+      const removed = new Set(Object.entries(oldIds).filter(([key]) => !keys.has(key)).map(([, id]) => id));
+      const draft = clone(this.data), timestamp = now();
+      // Deleting a classification preserves its direct contents. Nested folders
+      // keep their descendants and IDs when promoted to the reimbursement root.
+      for (const asset of draft.assets) if (removed.has(asset.folderId)) Object.assign(asset, { folderId: rootId, updatedAt: timestamp });
+      for (const folder of draft.folders) if (removed.has(FolderTree.parentId(folder))) Object.assign(folder, { parentId: rootId, updatedAt: timestamp });
+      draft.folders = draft.folders.filter(folder => !removed.has(folder.id));
+      const byId = new Map(draft.folders.map(folder => [folder.id, folder])), nextIds = {};
+      for (const [index, category] of values.entries()) {
+        const id = Object.hasOwn(oldIds, category.key) ? oldIds[category.key] : crypto.randomUUID();
+        nextIds[category.key] = id;
+        const folder = byId.get(id);
+        if (folder) {
+          if (folder.name !== category.name || folder.sortOrder !== index) Object.assign(folder, { name: category.name, sortOrder: index, updatedAt: timestamp });
+        } else {
+          const added = { id, name: category.name, parentId: rootId, sortOrder: index, createdAt: timestamp,
+            reimbursementRootId: rootId, reimbursementCategory: category.key };
+          draft.folders.push(added); byId.set(id, added);
+        }
+      }
+      const changedRoot = byId.get(rootId);
+      changedRoot.reimbursement.categoryIds = nextIds;
+      // Validate final sibling names before persisting; collisions caused by
+      // promoted subfolders reject the entire update without changing files.
+      const categoryIds = new Set(Object.values(nextIds));
+      const others = FolderTree.children(draft.folders, rootId).filter(folder => !categoryIds.has(folder.id));
+      for (const [index, folder] of others.entries()) if (folder.sortOrder !== values.length + index) Object.assign(folder, { sortOrder: values.length + index, updatedAt: timestamp });
+      if (JSON.stringify(draft) === JSON.stringify(this.data)) return this.snapshot();
+      changedRoot.updatedAt = timestamp;
+      await this._persist(draft);
+      return this.snapshot();
+    });
+  }
+
+  setReimbursementSupplementInvoice(ids, enabled) {
+    return this._mutate(async () => {
+      if (typeof enabled !== 'boolean') throw new Error('补票发票标记无效');
+      const selected = this._ids(ids);
+      if (!selected.size) throw new Error('请选择补票素材');
+      const categories = ReimbursementFolders.categoryMap(this.data.folders);
+      for (const asset of this.data.assets) if (selected.has(asset.id)) {
+        if (categories.get(asset.folderId) !== 'supplement' || !IMAGE.has(asset.ext) && asset.ext !== 'pdf') throw new Error('只能修改补票分类中的图片或 PDF');
+        if (asset.ext === 'pdf' && !enabled) throw new Error('PDF 补票始终作为发票，不能改为说明截图');
+      }
+      const draft = clone(this.data), timestamp = now();
+      let changed = false;
+      for (const asset of draft.assets) if (selected.has(asset.id) && IMAGE.has(asset.ext) && (asset.reimbursementSupplementInvoice === true) !== enabled) {
+        if (enabled) asset.reimbursementSupplementInvoice = true;
+        else delete asset.reimbursementSupplementInvoice;
+        asset.updatedAt = timestamp; changed = true;
+      }
+      if (changed) await this._persist(draft);
+      return this.snapshot();
+    });
+  }
+
+  setReimbursementAmounts(assetId, value) {
+    return this._mutate(async () => {
+      const asset = this.data.assets.find(item => item.id === assetId);
+      if (!asset) throw new Error('素材不存在');
+      if (!IMAGE.has(asset.ext) && asset.ext !== 'pdf') throw new Error('只能记录图片或 PDF 的报销金额');
+      const summary = ReimbursementFolders.reimbursementAmounts(value);
+      await this._checkManagedParent(asset.filename);
+      const filename = path.join(this.root, asset.filename), info = await fs.lstat(filename);
+      if (!info.isFile() || info.isSymbolicLink() || await hashFile(filename) !== summary.sourceHash) throw new Error('发票原件已变化，请重新识别后再保存金额');
+      const next = { ...asset, reimbursementAmounts: summary };
+      if (sameField(asset, next, 'reimbursementAmounts')) return this.snapshot();
+      const draft = clone(this.data);
+      Object.assign(draft.assets.find(item => item.id === assetId), { reimbursementAmounts: summary, updatedAt: now() });
+      await this._persist(draft);
+      return this.snapshot();
+    });
+  }
+
+  setReimbursementInvoiceOptions(rootId, options, scope = 'regular') {
+    return this._mutate(async () => {
+      const root = this.data.folders.find(folder => folder.id === rootId);
+      if (!ReimbursementFolders.isRoot(root)) throw new Error('报销文件夹已不存在');
+      if (options === undefined) throw new Error('发票 PDF 排版参数无效');
+      const fields = ReimbursementFolders.invoicePdfFields(scope);
+      const value = ReimbursementFolders.invoicePdfOptions(options);
+      if (root.reimbursement[fields.options]?.imagesPerPage === value.imagesPerPage) return this.snapshot();
+      const draft = clone(this.data), changedRoot = draft.folders.find(folder => folder.id === rootId);
+      changedRoot.reimbursement[fields.options] = value;
+      changedRoot.updatedAt = now();
+      await this._persist(draft);
+      return this.snapshot();
+    });
+  }
+
+  setReimbursementInvoiceSignature(rootId, signature, scope = 'regular') {
+    return this._mutate(async () => {
+      const root = this.data.folders.find(folder => folder.id === rootId);
+      if (!ReimbursementFolders.isRoot(root)) throw new Error('报销文件夹已不存在');
+      const fields = ReimbursementFolders.invoicePdfFields(scope);
+      const value = ReimbursementFolders.invoicePdfSignature(signature);
+      if ((root.reimbursement[fields.signature] ?? null) === value) return this.snapshot();
+      const draft = clone(this.data), changedRoot = draft.folders.find(folder => folder.id === rootId);
+      changedRoot.reimbursement[fields.signature] = value;
+      changedRoot.updatedAt = now();
+      await this._persist(draft);
+      return this.snapshot();
+    });
+  }
+
+  upsertReimbursementDocument(rootId, kind, sourcePath, name, options = {}) {
+    return this._mutate(async () => {
+      if (!options || typeof options !== 'object' || Array.isArray(options) || Object.keys(options).some(key => key !== 'expectedExistingHash') ||
+          (options.expectedExistingHash !== undefined && (typeof options.expectedExistingHash !== 'string' || !/^[a-f0-9]{64}$/.test(options.expectedExistingHash)))) throw new Error('生成文档更新参数无效');
+      const { extension, pointer } = ReimbursementFolders.documentKind(kind);
+      const root = this.data.folders.find(folder => folder.id === rootId);
+      if (!ReimbursementFolders.isRoot(root)) throw new Error('报销文件夹已不存在');
+      name = text(name, '文档名称', 240);
+      if (typeof sourcePath !== 'string' || !path.isAbsolute(sourcePath) || sourcePath.includes('\0')) throw new Error('生成文档路径无效');
+      const sourceInfo = await fs.lstat(sourcePath);
+      if (!sourceInfo.isFile() || sourceInfo.isSymbolicLink() || !sourceInfo.size || sourceInfo.size > 256 * 1024 * 1024) throw new Error('生成文档无效或超过 256 MB');
+      const bytes = await fs.readFile(sourcePath);
+      if (bytes.length !== sourceInfo.size || bytes.length > 256 * 1024 * 1024) throw new Error('生成文档在读取时发生变化');
+      if (extension === 'pdf' ? !bytes.subarray(0, 1024).includes(Buffer.from('%PDF-')) : !bytes.subarray(0, 4).equals(Buffer.from([80, 75, 3, 4]))) throw new Error(`生成文档不是有效的 ${extension.toUpperCase()} 文件`);
+      const previousAsset = this.data.assets.find(asset => asset.id === root.reimbursement[pointer]) ||
+        this.data.assets.find(asset => asset.reimbursementGenerated?.rootId === rootId && asset.reimbursementGenerated?.kind === kind);
+      if (previousAsset && (previousAsset.ext !== extension || previousAsset.reimbursementGenerated?.rootId !== rootId || previousAsset.reimbursementGenerated?.kind !== kind)) throw new Error('生成文档引用已变化，不能覆盖其他素材');
+      const id = previousAsset?.id || crypto.randomUUID(), relative = `originals/${id}.${extension}`;
+      await this._checkManagedParent(relative);
+      await this._recoverReimbursementDocuments();
+      const destination = path.join(this.root, relative), previous = await fileInfo(destination);
+      if (previous && (!previousAsset || !previous.isFile() || previous.isSymbolicLink())) throw new Error('原文档已变化，不能覆盖，请先恢复或移走冲突文件');
+      const previousFileHash = previous ? await hashFile(destination) : null;
+      if ((previous && previousFileHash !== (options.expectedExistingHash ?? previousAsset.hash)) || (options.expectedExistingHash !== undefined && !previous)) throw new Error('原文档已变化，不能覆盖，请重新读取后再更新');
+      const hash = crypto.createHash('sha256').update(bytes).digest('hex');
+      if (previousAsset && previous && previousFileHash === hash) {
+        // Reopening/refreshing an unchanged workbook must not rename the file:
+        // Excel and WPS can permit reads while holding an exclusive rename lock.
+        const values = { name, ext: extension, mediaType: 'document', size: bytes.length, width: 0, height: 0, hash,
+          filename: relative, folderId: rootId, trashedAt: null, reimbursementGenerated: { rootId, kind } };
+        const next = { ...previousAsset, ...values };
+        const changed = Object.keys(values).some(key => !sameField(previousAsset, next, key));
+        if (!changed && root.reimbursement[pointer] === id) return { snapshot: this.snapshot(), assetId: id };
+        const draft = clone(this.data), timestamp = now();
+        Object.assign(draft.assets.find(asset => asset.id === id), values, { updatedAt: timestamp });
+        const targetRoot = draft.folders.find(folder => folder.id === rootId);
+        targetRoot.reimbursement[pointer] = id; targetRoot.updatedAt = timestamp;
+        await this._persist(draft);
+        let warning;
+        if (previousAsset.hash !== hash) {
+          // An explicitly accepted edit made outside Mosaic no longer has the
+          // old on-disk bytes, so keep the backup index on the accepted revision.
+          try { await fs.copyFile(this.indexPath, path.join(this.root, 'index.backup.json')); }
+          catch (error) { warning = `文档信息已保存，备份索引未更新：${error.message}`; }
+        }
+        return { snapshot: this.snapshot(), assetId: id, ...(warning ? { warning } : {}) };
+      }
+      const directory = path.join(this.root, `.pending-reimbursement-${crypto.randomUUID()}`);
+      await fs.mkdir(directory);
+      let thumbnail = null, newThumbnailHash = null;
+      const thumbnailRelative = `thumbnails/${id}.jpg`, thumbnailPath = path.join(this.root, thumbnailRelative);
+      try {
+        await fs.writeFile(path.join(directory, `replacement.${extension}`), bytes, { flag: 'wx' });
+        if (previousAsset?.thumbnail) {
+          try {
+            await this._checkManagedParent(thumbnailRelative);
+            const info = await fs.lstat(thumbnailPath);
+            if (!info.isFile() || info.isSymbolicLink() || info.size > 32 * 1024 * 1024) throw new Error('文档封面无效');
+            const preview = sharp(thumbnailPath, { limitInputPixels: 16_777_216 });
+            const metadata = await preview.metadata();
+            if (metadata.format !== 'jpeg' || !metadata.width || !metadata.height) throw new Error('文档封面无效');
+            await preview.raw().toBuffer(); thumbnail = thumbnailRelative;
+          } catch { /* An invalid old cover is not necessary to keep the document. */ }
+        }
+        if (!thumbnail && this.createThumbnail && !(await fileInfo(thumbnailPath))) {
+          const stagedThumbnail = path.join(directory, 'thumbnail.jpg');
+          try {
+            await this.createThumbnail(path.join(directory, `replacement.${extension}`), stagedThumbnail, { mediaType: 'document', extension, originalName: name });
+            const preview = sharp(stagedThumbnail, { limitInputPixels: 16_777_216 });
+            const metadata = await preview.metadata();
+            if (metadata.format !== 'jpeg' || !metadata.width || !metadata.height) throw new Error('文档封面不是 JPEG');
+            await preview.raw().toBuffer();
+            newThumbnailHash = await hashFile(stagedThumbnail); thumbnail = thumbnailRelative;
+          } catch { await fs.rm(stagedThumbnail, { force: true }).catch(() => {}); }
+        }
+        const journal = { version: 1, id, rootId, kind, extension, newHash: hash, oldHash: previousFileHash, oldAssetHash: previousAsset?.hash || null, hadOriginal: Boolean(previous), newThumbnailHash };
+        const handle = await fs.open(path.join(directory, 'manifest.json'), 'wx');
+        try { await handle.writeFile(JSON.stringify(journal)); await handle.sync(); } finally { await handle.close(); }
+        if (previous) await fs.rename(destination, path.join(directory, 'previous'));
+        await fs.copyFile(path.join(directory, `replacement.${extension}`), destination, require('node:fs').constants.COPYFILE_EXCL);
+        if (newThumbnailHash) {
+          await this._checkManagedParent(thumbnailRelative);
+          await fs.copyFile(path.join(directory, 'thumbnail.jpg'), thumbnailPath, require('node:fs').constants.COPYFILE_EXCL);
+        }
+        const draft = clone(this.data), timestamp = now();
+        const metadata = { name, ext: extension, mediaType: 'document', size: bytes.length, width: 0, height: 0, hash,
+          filename: relative, thumbnail, folderId: rootId, updatedAt: timestamp, trashedAt: null, reimbursementGenerated: { rootId, kind } };
+        const asset = draft.assets.find(asset => asset.id === id);
+        if (asset) Object.assign(asset, metadata);
+        else draft.assets.push({ id, createdAt: timestamp, tags: [], rating: 0, notes: '', ...metadata });
+        const targetRoot = draft.folders.find(folder => folder.id === rootId);
+        targetRoot.reimbursement[pointer] = id; targetRoot.updatedAt = timestamp;
+        await this._persist(draft);
+      } catch (error) {
+        try { await this._recoverReimbursementDocument(directory); }
+        catch (recoveryError) { this._reimbursementRecoveryPending = true; throw new Error(`${error.message}；文档回滚未完成，暂存文件已保留：${recoveryError.message}`); }
+        throw error;
+      }
+      let warning;
+      try { await this._recoverReimbursementDocument(directory); }
+      catch (error) { this._reimbursementRecoveryPending = true; warning = `文档已保存，暂存文件将在下次打开时清理：${error.message}`; }
+      return { snapshot: this.snapshot(), assetId: id, ...(warning ? { warning } : {}) };
+    });
+  }
+
+  clearReimbursementDocument(rootId, kind) {
+    return this._mutate(async () => {
+      const { pointer } = ReimbursementFolders.documentKind(kind);
+      const root = this.data.folders.find(folder => folder.id === rootId);
+      if (!ReimbursementFolders.isRoot(root)) throw new Error('报销文件夹已不存在');
+      const draft = clone(this.data), targetRoot = draft.folders.find(folder => folder.id === rootId);
+      const asset = draft.assets.find(asset => asset.reimbursementGenerated?.rootId === rootId && asset.reimbursementGenerated?.kind === kind);
+      if ((targetRoot.reimbursement[pointer] ?? null) === null && (!asset || asset.trashedAt)) return this.snapshot();
+      targetRoot.reimbursement[pointer] = null; targetRoot.updatedAt = now();
+      if (asset) Object.assign(asset, { trashedAt: asset.trashedAt || now(), updatedAt: now() });
+      await this._persist(draft);
+      return this.snapshot();
+    });
+  }
+
   renameFolder(id, name, options = {}) {
     return this._mutate(async () => {
       const record = this._recordHistory(options);
       this._folder(id);
       if (id === null) throw new Error('分类不存在');
-      name = text(name, '文件夹名称', 100);
+      name = ReimbursementFolders.isCategory(this.data.folders.find(folder => folder.id === id))
+        ? ReimbursementFolders.categoryName(name) : text(name, '文件夹名称', 100);
       const parentId = FolderTree.parentId(this.data.folders.find(folder => folder.id === id));
       if (this.data.folders.some(folder => folder.id !== id && FolderTree.parentId(folder) === parentId && folder.name === name)) throw new Error('同级文件夹中已存在此名称');
       if (this.data.folders.find(folder => folder.id === id).name === name) return this.snapshot();
@@ -1033,6 +1341,7 @@ class Library {
       if (id === parentId || FolderTree.descendantIds(this.data.folders, id).has(parentId)) throw new Error('文件夹不能移入自己或自己的子文件夹');
       const folder = this.data.folders.find(item => item.id === id);
       const previousParent = FolderTree.parentId(folder);
+      if (ReimbursementFolders.isCategory(folder) && parentId !== folder.reimbursementRootId) throw new Error('报销分类不能移出所属报销文件夹');
       const before = options.beforeId !== undefined, after = options.afterId !== undefined;
       if (before && after) throw new Error('文件夹排序位置不能同时指定前后参照');
       const anchorId = before ? options.beforeId : after ? options.afterId : undefined;
@@ -1072,6 +1381,7 @@ class Library {
     return this._mutate(async () => {
       this._folder(id);
       if (id === null) throw new Error('分类不存在');
+      if (ReimbursementFolders.isCategory(this.data.folders.find(folder => folder.id === id))) throw new Error('报销分类不能单独删除，请使用“管理报销分类”保留其中的文件');
       const removed = FolderTree.descendantIds(this.data.folders, id);
       const draft = clone(this.data);
       draft.folders = draft.folders.filter(folder => !removed.has(folder.id));
@@ -1114,6 +1424,78 @@ class Library {
     const asset = this.data.assets.find(item => item.id === id);
     if (!asset || !PROJECT.has(asset.ext) || !isSafeBundlePath(relative) || !asset.projectBundle.files.some(file => file.path === relative)) return null;
     return path.join(this.root, bundleRelative(asset.id, asset.ext), relative);
+  }
+
+  async _recoverReimbursementDocuments() {
+    for (const name of await fs.readdir(this.root))
+      if (PENDING_REIMBURSEMENT.test(name)) await this._recoverReimbursementDocument(path.join(this.root, name));
+    this._reimbursementRecoveryPending = false;
+  }
+
+  async _recoverReimbursementDocument(directory) {
+    if (path.dirname(directory) !== this.root || !PENDING_REIMBURSEMENT.test(path.basename(directory))) throw new Error('报销文档暂存路径无效');
+    const info = await fs.lstat(directory);
+    if (!info.isDirectory() || info.isSymbolicLink()) throw new Error('报销文档暂存目录无效');
+    const names = await fs.readdir(directory);
+    const allowed = new Set(['manifest.json', 'replacement.xlsx', 'replacement.pdf', 'previous', 'thumbnail.jpg']);
+    for (const name of names) {
+      const entry = await fs.lstat(path.join(directory, name));
+      if (!allowed.has(name) || !entry.isFile() || entry.isSymbolicLink()) throw new Error('报销文档暂存目录包含未知文件，已保留');
+    }
+    const journal = path.join(directory, 'manifest.json'), journalInfo = await fileInfo(journal);
+    if (journalInfo) {
+      if (journalInfo.size > 65536) throw new Error('报销文档恢复清单过大');
+      const record = JSON.parse(await fs.readFile(journal, 'utf8'));
+      const { version, id, rootId, kind, extension, oldHash, newHash, hadOriginal, newThumbnailHash } = record;
+      const oldAssetHash = record.oldAssetHash === undefined ? oldHash : record.oldAssetHash;
+      if (version !== 1 || typeof id !== 'string' || !/^[a-zA-Z0-9-]{1,128}$/.test(id) ||
+          typeof rootId !== 'string' || !/^[a-zA-Z0-9-]{1,128}$/.test(rootId) ||
+          ReimbursementFolders.documentKind(kind).extension !== extension || typeof newHash !== 'string' || !/^[a-f0-9]{64}$/.test(newHash) ||
+          (oldHash !== null && (typeof oldHash !== 'string' || !/^[a-f0-9]{64}$/.test(oldHash))) || typeof hadOriginal !== 'boolean' ||
+          (oldAssetHash !== null && (typeof oldAssetHash !== 'string' || !/^[a-f0-9]{64}$/.test(oldAssetHash))) ||
+          (newThumbnailHash !== null && (typeof newThumbnailHash !== 'string' || !/^[a-f0-9]{64}$/.test(newThumbnailHash)))) throw new Error('报销文档恢复清单无效');
+      const current = path.join(this.root, `originals/${id}.${extension}`), previous = path.join(directory, 'previous'), replacement = path.join(directory, `replacement.${extension}`);
+      await this._checkManagedParent(`originals/${id}.${extension}`);
+      const currentInfo = await fileInfo(current), previousInfo = await fileInfo(previous), replacementInfo = await fileInfo(replacement);
+      if (currentInfo && (!currentInfo.isFile() || currentInfo.isSymbolicLink())) throw new Error('报销文档恢复时发现原件路径冲突');
+      if (replacementInfo && await hashFile(replacement) !== newHash) throw new Error('报销文档新副本校验失败，已保留');
+      if (previousInfo && (!hadOriginal || oldHash === null || await hashFile(previous) !== oldHash)) throw new Error('报销文档旧副本校验失败，已保留');
+      const asset = this.data.assets.find(item => item.id === id);
+      const committed = asset?.hash === newHash && asset?.reimbursementGenerated?.rootId === rootId && asset?.reimbursementGenerated?.kind === kind;
+      const currentHash = currentInfo ? await hashFile(current) : null;
+      if (committed) {
+        if (currentInfo && currentHash !== newHash) throw new Error('已保存的报销文档原件已变化，暂存文件已保留');
+        if (!currentInfo) {
+          if (!replacementInfo) throw new Error('已保存的报销文档原件缺失');
+          await fs.copyFile(replacement, current, require('node:fs').constants.COPYFILE_EXCL);
+        }
+        // A backup index must describe the same managed document bytes.
+        await fs.copyFile(this.indexPath, path.join(this.root, 'index.backup.json'));
+      } else {
+        if (asset && (asset.hash !== oldAssetHash || asset.reimbursementGenerated?.rootId !== rootId || asset.reimbursementGenerated?.kind !== kind)) throw new Error('报销文档索引与恢复清单不一致，已保留');
+        if (!asset && oldAssetHash !== null) throw new Error('报销文档旧索引已不存在，暂存文件已保留');
+        if (previousInfo) {
+          if (currentInfo && currentHash !== newHash && currentHash !== oldHash) throw new Error('恢复报销文档时发现文件冲突，已保留两份文件');
+          if (currentInfo && currentHash !== oldHash) await fs.unlink(current);
+          if (!currentInfo || currentHash !== oldHash) await fs.rename(previous, current);
+        } else if (hadOriginal) {
+          if (!currentInfo || currentHash !== oldHash) throw new Error('报销文档旧副本未找到，暂存文件已保留');
+        } else if (currentInfo) {
+          if (currentHash !== newHash) throw new Error('恢复报销文档时发现文件冲突，已保留');
+          await fs.unlink(current);
+        }
+        if (newThumbnailHash) {
+          await this._checkManagedParent(`thumbnails/${id}.jpg`);
+          const thumbnail = path.join(this.root, `thumbnails/${id}.jpg`), thumbnailInfo = await fileInfo(thumbnail);
+          if (thumbnailInfo) {
+            if (!thumbnailInfo.isFile() || thumbnailInfo.isSymbolicLink() || await hashFile(thumbnail) !== newThumbnailHash) throw new Error('恢复报销文档时发现封面冲突，已保留');
+            await fs.unlink(thumbnail);
+          }
+        }
+      }
+    } else if (names.includes('previous')) throw new Error('报销文档旧副本缺少恢复清单，已保留');
+    for (const name of names) await fs.unlink(path.join(directory, name)).catch(error => { if (error.code !== 'ENOENT') throw error; });
+    await fs.rmdir(directory);
   }
 
   async _recoverBundleRepairs() {
@@ -1487,4 +1869,4 @@ class Library {
   }
 }
 
-module.exports = { Library, SUPPORTED, VIDEO, AUDIO, MODEL, PROJECT, FONT };
+module.exports = { Library, SUPPORTED, VIDEO, AUDIO, MODEL, PROJECT, FONT, DOCUMENT };

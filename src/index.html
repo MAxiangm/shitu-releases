@@ -23,6 +23,7 @@
   <link rel="stylesheet" href="./similar-images.css">
   <link rel="stylesheet" href="./task-center.css">
   <link rel="stylesheet" href="./image-editor.css">
+  <link rel="stylesheet" href="./reimbursement-center.css">
 </head>
 <body>
   <canvas id="ambientParticles" aria-hidden="true"></canvas>
@@ -82,8 +83,10 @@
         <div id="headerMenu" class="header-menu hidden" role="group" aria-label="更多工具">
           <button id="taskCenterButton" class="header-button" type="button" aria-controls="progressPanel" aria-expanded="false"><svg class="icon" aria-hidden="true"><use href="#i-clock"/></svg><span>后台任务</span></button>
           <button id="settingsButton" class="header-button" type="button" aria-haspopup="dialog" title="设置转码设备"><svg class="icon" aria-hidden="true"><use href="#i-settings"/></svg><span>转码设备设置</span></button>
+          <button id="reimbursementSettingsButton" class="header-button" type="button" aria-haspopup="dialog" title="设置报销申请人与收款资料"><svg class="icon" aria-hidden="true"><use href="#i-settings"/></svg><span>报销资料设置</span></button>
           <button id="appUpdateButton" class="header-button update-button" type="button" title="检查 Mosaic 更新" aria-haspopup="dialog"><svg class="icon" aria-hidden="true"><use href="#i-download"/></svg><span id="appUpdateLabel">更新</span></button>
           <button id="pluginCenterButton" class="header-button" type="button" title="插件中心"><svg class="icon" aria-hidden="true"><use href="#i-image"/></svg><span>插件中心</span></button>
+          <button id="invoiceCenterButton" class="header-button" type="button" title="发票整合"><svg class="icon" aria-hidden="true"><use href="#i-folder"/></svg><span>发票整合</span></button>
           <button id="backupButton" class="header-button" type="button" title="备份素材库"><svg class="icon" aria-hidden="true"><use href="#i-shield"/></svg><span>备份素材库</span></button>
           <button id="brandMotionButton" class="header-button" type="button" aria-pressed="false" title="开启或暂停 Mosaic 标志动效"><svg class="icon" aria-hidden="true"><use href="#i-mosaic-mark"/></svg><span id="brandMotionLabel">标志动效：关</span></button>
           <button id="backgroundMotionButton" class="header-button" type="button" aria-pressed="true" title="开启或暂停默认皮肤的背景动效"><svg class="icon" aria-hidden="true"><use href="#i-motion"/></svg><span id="backgroundMotionLabel">背景动效：开</span></button>
@@ -108,7 +111,7 @@
           <details class="collection-menu tag-browser"><summary><svg class="icon"><use href="#i-tag"/></svg>标签<span id="tagCount" class="small-count">0</span><svg class="icon tiny"><use href="#i-chevron"/></svg></summary><div class="browser-popover"><div class="section-label">标签</div><div id="tagNav" class="tag-nav"></div><p class="sidebar-hint" id="tagHint">选择图片，为它添加第一个标签</p></div></details>
         </div>
       </div>
-      <div class="toolbar"><label class="search-box"><svg class="icon"><use href="#i-search"/></svg><input type="search" id="searchInput" placeholder="搜索名称、标签、备注或来源…" autocomplete="off" aria-label="搜索素材"><kbd>Ctrl K</kbd></label><div class="filter-controls"><select id="formatFilter" aria-label="按格式筛选"><option value="all">所有格式</option><option value="images">所有图片</option><option value="video">视频</option><option value="audio">音乐</option><option value="mp3">MP3</option><option value="wav">WAV</option><option value="flac">FLAC</option><option value="m4a">M4A / ALAC</option><option value="aac">AAC</option><option value="ogg">OGG</option><option value="opus">OPUS</option><option value="aiff">AIFF</option><option value="ape">APE</option><option value="wma">WMA</option><option value="model">3D 模型</option><option value="project">AE 工程</option><option value="font">字体</option><option value="ttf">TTF</option><option value="otf">OTF</option><option value="ttc">TTC</option><option value="otc">OTC</option><option value="woff">WOFF</option><option value="woff2">WOFF2</option><option value="aep">AEP</option><option value="aepx">AEPX</option><option value="glb">GLB</option><option value="gltf">glTF</option><option value="fbx">FBX</option><option value="obj">OBJ</option><option value="blend">BLEND</option><option value="c4d">C4D</option><option value="max">MAX</option><option value="stl">STL</option><option value="ply">PLY</option><option value="jpg">JPG / JPEG</option><option value="png">PNG</option><option value="webp">WEBP</option><option value="gif">GIF</option><option value="svg">SVG</option><option value="other">其他格式</option></select><select id="sortSelect" aria-label="排序"><option value="newest">最近导入</option><option value="oldest">最早导入</option><option value="name">名称 A—Z</option><option value="rating">评分优先</option><option value="size">文件大小</option></select><svg class="icon muted"><use href="#i-image"/></svg><input id="sizeSlider" type="range" min="140" max="600" value="440" aria-label="缩略图大小"></div><div class="import-actions"><button id="selectionModeButton" class="selection-mode-button" type="button" aria-pressed="false" title="进入选择模式：点选或拖动框选"><svg class="icon"><use href="#i-select"/></svg><span>选择</span></button><button id="importFolder" class="secondary-button"><svg class="icon"><use href="#i-folder"/></svg>导入文件夹</button><button id="importFiles" class="primary-button">导入素材<svg class="icon"><use href="#i-arrow"/></svg></button></div></div>
+      <div class="toolbar"><label class="search-box"><svg class="icon"><use href="#i-search"/></svg><input type="search" id="searchInput" placeholder="搜索名称、标签、备注或来源…" autocomplete="off" aria-label="搜索素材"><kbd>Ctrl K</kbd></label><div class="filter-controls"><select id="formatFilter" aria-label="按格式筛选"><option value="all">所有格式</option><option value="images">所有图片</option><option value="video">视频</option><option value="audio">音乐</option><option value="mp3">MP3</option><option value="wav">WAV</option><option value="flac">FLAC</option><option value="m4a">M4A / ALAC</option><option value="aac">AAC</option><option value="ogg">OGG</option><option value="opus">OPUS</option><option value="aiff">AIFF</option><option value="ape">APE</option><option value="wma">WMA</option><option value="model">3D 模型</option><option value="project">AE 工程</option><option value="font">字体</option><option value="document">文档</option><option value="pdf">PDF</option><option value="docx">Word · DOCX</option><option value="doc">Word · DOC</option><option value="xlsx">Excel · XLSX</option><option value="pptx">PowerPoint · PPTX</option><option value="txt">TXT 文本</option><option value="ttf">TTF</option><option value="otf">OTF</option><option value="ttc">TTC</option><option value="otc">OTC</option><option value="woff">WOFF</option><option value="woff2">WOFF2</option><option value="aep">AEP</option><option value="aepx">AEPX</option><option value="glb">GLB</option><option value="gltf">glTF</option><option value="fbx">FBX</option><option value="obj">OBJ</option><option value="blend">BLEND</option><option value="c4d">C4D</option><option value="max">MAX</option><option value="stl">STL</option><option value="ply">PLY</option><option value="jpg">JPG / JPEG</option><option value="png">PNG</option><option value="webp">WEBP</option><option value="gif">GIF</option><option value="svg">SVG</option><option value="other">其他格式</option></select><select id="sortSelect" aria-label="排序"><option value="newest">最近导入</option><option value="oldest">最早导入</option><option value="name">名称 A—Z</option><option value="rating">评分优先</option><option value="size">文件大小</option></select><svg class="icon muted"><use href="#i-image"/></svg><input id="sizeSlider" type="range" min="140" max="600" value="440" aria-label="缩略图大小"></div><div class="import-actions"><button id="selectionModeButton" class="selection-mode-button" type="button" aria-pressed="false" title="进入选择模式：点选或拖动框选"><svg class="icon"><use href="#i-select"/></svg><span>选择</span></button><button id="importFolder" class="secondary-button"><svg class="icon"><use href="#i-folder"/></svg>导入文件夹</button><button id="importFiles" class="primary-button">导入素材<svg class="icon"><use href="#i-arrow"/></svg></button></div></div>
       <div id="folderNavigation" class="folder-navigation" role="group" aria-label="文件夹导航">
         <div class="folder-navigation-actions">
           <button id="folderBack" class="folder-navigation-button" type="button" aria-label="后退" title="后退（Alt＋←）" disabled><svg class="icon" aria-hidden="true"><use href="#i-arrow-left"/></svg></button>
@@ -118,6 +121,7 @@
         <nav id="folderBreadcrumbs" class="folder-breadcrumbs" aria-label="当前文件夹路径"><span class="folder-path-placeholder">尚未打开素材库</span></nav>
         <div class="history-actions" role="group" aria-label="撤销与重做"><button id="undoHistoryButton" class="folder-navigation-button" type="button" aria-label="撤销" title="撤销（Ctrl＋Z）" disabled><svg class="icon" aria-hidden="true"><use href="#i-undo"/></svg></button><button id="redoHistoryButton" class="folder-navigation-button" type="button" aria-label="重做" title="重做（Ctrl＋Shift＋Z）" disabled><svg class="icon" aria-hidden="true"><use href="#i-redo"/></svg></button></div>
         <button id="createFolderHere" class="secondary-button folder-create-button" type="button" disabled><svg class="icon" aria-hidden="true"><use href="#i-folder-plus"/></svg><span>新建文件夹</span></button>
+        <button id="openReimbursementFolder" class="secondary-button hidden" type="button"><svg class="icon" aria-hidden="true"><use href="#i-folder"/></svg><span>报销工作区</span></button>
       </div>
       <div id="activeFilter" class="active-filter hidden"></div>
       <div class="content-meta"><span class="asset-health-meta"><span id="resultCount">0 个素材</span><button id="missingResourcesFilter" class="asset-health-filter hidden" type="button" aria-pressed="false" aria-controls="gallery">缺失资源</button></span><span id="selectionHint">Ctrl＋滚轮缩放 · 空格预览 · Ctrl 多选</span></div>
@@ -191,6 +195,7 @@
       <div class="modal-icon"><svg class="icon"><use href="#i-folder"/></svg></div>
       <h2 id="modalTitle"></h2><p id="modalDescription"></p>
       <input id="modalInput" autocomplete="off" maxlength="100" aria-label="文件夹名称">
+      <label id="modalFolderTypeField" class="modal-parent-field hidden" for="modalFolderType"><span>文件夹类型</span><select id="modalFolderType" aria-label="文件夹类型"><option value="normal">普通文件夹</option><option value="reimbursement">报销文件夹（自带申请表与分类）</option></select></label>
       <label id="modalParentField" class="modal-parent-field hidden" for="modalParent"><span>上级文件夹</span><select id="modalParent" aria-label="上级文件夹"></select></label>
       <div id="modalColorField" class="modal-color-field hidden">
         <label for="modalColorHex">颜色</label>
@@ -290,6 +295,7 @@
   <script src="./batch-rename.js"></script>
   <script src="./font-compare.js"></script>
   <script src="./font-layout.js"></script>
+  <script src="./document-formats.js"></script>
   <script src="./smart-folders.js"></script>
   <script src="./smart-folders-ui.js"></script>
   <script src="./skin-picker.js"></script>
@@ -302,7 +308,11 @@
   <script src="./content-aware-fill.js"></script>
   <script src="./material-preview.js"></script>
   <script src="./image-layers.js"></script>
+  <script src="./image-basics.js"></script>
   <script src="./image-editor.js"></script>
+  <script src="./invoice-amounts.js"></script>
+  <script src="./invoice-center.js"></script>
+  <script src="./reimbursement-center.js"></script>
   <script src="./renderer.js"></script>
 </body>
 </html>

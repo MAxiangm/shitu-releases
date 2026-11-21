@@ -15,6 +15,7 @@ async function runProduction(electron, options) {
   const { app, BrowserWindow, dialog, session } = electron;
   const fs = require('node:fs/promises'), path = require('node:path');
   const checks = [], errors = [], warnings = [], nativeDialogs = [];
+  let expectPsdDialog = false, psdDialogCount = 0;
   let window;
   const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
   const check = (condition, message) => { if (!condition) throw new Error(message); };
@@ -51,7 +52,14 @@ async function runProduction(electron, options) {
     throw new Error(`Unexpected native dialog: ${kind}`);
   }
   dialog.showErrorBox = (...args) => { nativeDialogs.push({ kind: 'error', title: args[0], message: args[1] }); };
-  for (const method of ['showOpenDialog', 'showSaveDialog', 'showMessageBox']) dialog[method] = async (...args) => unexpectedDialog(method, args);
+  for (const method of ['showOpenDialog', 'showMessageBox']) dialog[method] = async (...args) => unexpectedDialog(method, args);
+  dialog.showSaveDialog = async (...args) => {
+    const settings = args.at(-1);
+    if (!expectPsdDialog || settings?.filters?.length !== 1 || settings.filters[0].extensions?.join(',') !== 'psd') return unexpectedDialog('showSaveDialog', args);
+    expectPsdDialog = false; psdDialogCount++;
+    nativeDialogs.push({ kind: 'expected-psd-save', title: settings.title });
+    return { canceled: false, filePath: path.join(options.directory, 'export.psd') };
+  };
   app.on('browser-window-created', (_event, candidate) => {
     window = candidate;
     candidate.setSkipTaskbar(true);
@@ -148,9 +156,54 @@ async function runProduction(electron, options) {
     check(await js(() => state.library.assets.length) === 2, 'Production renderer did not receive the imported asset');
     checks.push('real image-editor-save IPC imported named full-resolution PNG and refreshed gallery');
     await capture('editor-saved.png');
+
+    await js(async () => {
+      const edit = document.querySelector('[data-mode="edit"]');
+      if (!edit || edit.disabled) throw new Error('Edit tab is unavailable');
+      edit.click();
+      if (typeof window.shitu.exportEditedPsd !== 'function') throw new Error('PSD export IPC is missing from preload');
+      const bitmap = document.createElement('canvas'); bitmap.width = 32; bitmap.height = 24;
+      const ctx = bitmap.getContext('2d'); ctx.fillStyle = '#e04020'; ctx.fillRect(0, 0, 32, 24);
+      const blob = await new Promise(resolve => bitmap.toBlob(resolve, 'image/png'));
+      const transfer = new DataTransfer(); transfer.items.add(new File([blob], 'PSD 叠加层.png', { type: 'image/png' }));
+      const input = document.querySelector('#imageEditorLayerFile');
+      input.files = transfer.files; input.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await waitFor(() => js(() => document.querySelectorAll('.ie-layer-row').length === 2 && !document.querySelector('[data-action="export-psd"]').disabled), 'Image-layer import did not become ready for PSD export');
+    const expectedPsd = await js(async () => {
+      for (const [name, value] of [['opacity', 60], ['blend', 'multiply'], ['x', 17], ['y', -9]]) {
+        const input = document.querySelector(`[data-layer-param="${name}"]`);
+        if (!input || input.disabled) throw new Error(`Layer parameter ${name} is unavailable`);
+        input.value = String(value); input.dispatchEvent(new Event('input', { bubbles: true })); input.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+      await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      const canvas = document.querySelector('#imageEditorCanvas');
+      return { width: canvas.width, height: canvas.height, pixels: Array.from(canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data) };
+    });
+    expectPsdDialog = true;
+    await js(() => document.querySelector('[data-action="export-psd"]').click());
+    await waitFor(async () => {
+      const exists = await fs.access(path.join(options.directory, 'export.psd')).then(() => true, () => false);
+      return exists && await js(() => !document.querySelector('[data-action="export-psd"]').disabled && document.querySelector('#imageEditorStatus').textContent.includes('PSD 已导出'));
+    }, 'Production PSD export did not write a document');
+    const { readPsd, initializeCanvas } = require('ag-psd');
+    initializeCanvas(() => { throw new Error('PSD smoke uses raw image data'); }, (width, height) => ({ width, height, data: new Uint8ClampedArray(width * height * 4) }));
+    const psdBytes = await fs.readFile(path.join(options.directory, 'export.psd'));
+    const psd = readPsd(psdBytes, { useImageData: true, skipThumbnail: true });
+    check(psd.width === expectedPsd.width && psd.height === expectedPsd.height, 'PSD document dimensions changed during IPC export');
+    check(psd.children?.length === 2, 'PSD did not preserve the two independent layers');
+    check(psd.children[0].name === 'PSD 叠加层' && psd.children[1].name === api.name, 'PSD layer names/order differ from the layer panel');
+    check(psd.children[0].blendMode === 'multiply' && Math.abs(psd.children[0].opacity - .6) < 1 / 255, 'PSD layer blend or opacity differs from the UI');
+    check(psd.children[0].left === 17 && psd.children[0].top === -9, 'PSD export lost the translated layer origin');
+    const placed = psd.children[0].imageData, at = (84 * placed.width + 112) * 4;
+    check(placed.data[at] === 224 && placed.data[at + 1] === 64 && placed.data[at + 2] === 32 && placed.data[at + 3] === 255, 'PSD independent layer pixels changed during IPC export');
+    check(Buffer.from(psd.imageData.data).equals(Buffer.from(expectedPsd.pixels)), 'PSD composite pixels differ from the editor preview');
+    check(psdDialogCount === 1 && !expectPsdDialog, 'PSD did not use exactly one expected save dialog');
+    checks.push('real PSD export IPC preserved separate RGBA layers, names, translated origin, blend, opacity and exact composite pixels');
+    await capture('editor-psd-exported.png');
     await js(() => imageEditorUi.close(true));
     check(errors.length === 0, `Production console/process errors: ${errors.join('; ')}`);
-    check(nativeDialogs.length === 0, `Unexpected native dialogs: ${JSON.stringify(nativeDialogs)}`);
+    check(nativeDialogs.length === 1 && nativeDialogs[0].kind === 'expected-psd-save', `Unexpected native dialogs: ${JSON.stringify(nativeDialogs)}`);
     await persist({ ok: true, snapshot, material: { width: material.width, height: material.height, changed: material.changed } });
     for (const candidate of BrowserWindow.getAllWindows()) candidate.destroy();
     app.exit(0);

@@ -1,7 +1,7 @@
 {
   "name": "shitu",
   "productName": "Mosaic",
-  "version": "0.29.33",
+  "version": "0.29.46",
   "description": "A local-first creative asset library for Windows",
   "main": "src/main.cjs",
   "private": true,
@@ -28,6 +28,7 @@
     "test:colors": "node scripts/smoke-colors.cjs",
     "test:image-editor": "node scripts/smoke-image-editor.cjs",
     "test:image-editor:app": "node scripts/smoke-image-editor-app.cjs",
+    "test:document-plugins": "node scripts/smoke-document-plugins.cjs",
     "test:video": "node scripts/smoke-video.cjs",
     "test:transcode": "node scripts/smoke-transcode.cjs",
     "test:ui-recovery": "node scripts/smoke-ui-recovery.cjs",
@@ -40,13 +41,19 @@
     "test:ae": "node scripts/smoke-ae.cjs",
     "test:bundles": "node scripts/smoke-bundle.cjs",
     "prepare:video": "node scripts/prepare-video-runtime.cjs",
-    "prepare:youtube": "node scripts/prepare-youtube-runtime.cjs"
+    "prepare:youtube": "node scripts/prepare-youtube-runtime.cjs",
+    "test:invoices": "node scripts/smoke-invoice-plugin.cjs",
+    "test:invoices:app": "node scripts/smoke-invoice-app.cjs",
+    "test:invoices:pdf": "node scripts/smoke-invoice-pdf-reader.cjs",
+    "test:reimbursement": "node scripts/smoke-reimbursement-center.cjs",
+    "test:reimbursement:app": "node scripts/smoke-reimbursement-app.cjs"
   },
   "devDependencies": {
     "electron": "45.1.0",
     "playwright-core": "^1.64.1"
   },
   "dependencies": {
+    "ag-psd": "34.2.2",
     "koffi": "3.3.8",
     "sharp": "0.35.5"
   },

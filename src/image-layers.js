@@ -7,6 +7,7 @@
 
   const MAX_LAYERS = 12;
   const MAX_PIXELS = 64 * 1024 * 1024;
+  const MAX_DOCUMENT_PIXELS = 16_777_216;
   const BLENDS = Object.freeze({
     'source-over': '正常', multiply: '正片叠底', screen: '滤色', overlay: '叠加',
     darken: '变暗', lighten: '变亮', 'color-dodge': '颜色减淡', 'color-burn': '颜色加深',
@@ -16,6 +17,19 @@
   const clamp = (value, low, high) => Math.max(low, Math.min(high, value));
   const finite = (value, fallback) => Number.isFinite(Number(value)) ? Number(value) : fallback;
   let nextId = 0;
+
+  function textMetadata(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value) || typeof value.text !== 'string') return undefined;
+    const family = typeof value.fontFamily === 'string' ? value.fontFamily.replace(/[\u0000-\u001f"'\\;:{}]/g, '').trim().slice(0, 120) : '';
+    return {
+      text: value.text.slice(0, 20000), fontSize: clamp(finite(value.fontSize, 48), 1, 4096),
+      fontFamily: family || 'Microsoft YaHei', bold: Boolean(value.bold),
+      align: ['left', 'center', 'right'].includes(value.align) ? value.align : 'left',
+      x: clamp(finite(value.x, 0), -1e6, 1e6), y: clamp(finite(value.y, 0), -1e6, 1e6),
+      lineHeight: clamp(finite(value.lineHeight, 1.2), 0.5, 10),
+      color: typeof value.color === 'string' && /^#(?:[\da-f]{3}|[\da-f]{4}|[\da-f]{6}|[\da-f]{8})$/i.test(value.color) ? value.color : '#ffffff'
+    };
+  }
 
   function defaultCanvas(width, height) {
     let result;
@@ -54,11 +68,12 @@
       return layer;
     }
     function metadata(layer, overrides = {}) {
+      const text = textMetadata(layer.text);
       return {
         id: layer.id, name: nameOf(layer.name), visible: layer.visible !== false, locked: Boolean(layer.locked),
         opacity: clamp(finite(layer.opacity, 100), 0, 100), blend: Object.hasOwn(BLENDS, layer.blend) ? layer.blend : 'source-over',
         x: finite(layer.x, 0), y: finite(layer.y, 0), scale: clamp(finite(layer.scale, 100), 1, 10000),
-        rotation: finite(layer.rotation, 0), ...overrides
+        rotation: finite(layer.rotation, 0), ...(text ? { text } : {}), ...overrides
       };
     }
     function cloneCanvas(input) {
@@ -169,16 +184,43 @@
       layers = [layer]; activeId = layer.id;
       return layer;
     }
+    function remap(newWidth, newHeight, transform = { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 }) {
+      if (!Number.isSafeInteger(newWidth) || !Number.isSafeInteger(newHeight) || newWidth < 1 || newHeight < 1 ||
+          newWidth * newHeight > MAX_DOCUMENT_PIXELS || newWidth * newHeight * layers.length > MAX_PIXELS) {
+        throw new Error('变换后的画布超过尺寸或图层总像素上限');
+      }
+      const values = ['a', 'b', 'c', 'd', 'e', 'f'].map(key => transform?.[key]);
+      if (values.some(value => typeof value !== 'number' || !Number.isFinite(value)) || Math.abs(values[0] * values[3] - values[1] * values[2]) < 1e-12) {
+        throw new Error('画布变换矩阵无效');
+      }
+      // Allocate a separate document; the original layers remain intact for undo.
+      const result = create(newWidth, newHeight, null, '背景', { canvasFactory: factory });
+      const remapped = layers.map((layer, index) => {
+        const bitmap = index === 0 ? result.layers[0].canvas : factory(newWidth, newHeight);
+        if (!bitmap || typeof bitmap.getContext !== 'function') throw new Error('无法创建变换图层');
+        bitmap.width = newWidth; bitmap.height = newHeight;
+        const ctx = context(bitmap); if (!ctx) throw new Error('无法创建图层绘图上下文');
+        ctx.save();
+        try { ctx.setTransform(...values); applyTransform(ctx, layer); ctx.drawImage(layer.canvas, 0, 0); }
+        finally { ctx.restore(); }
+        const state = metadata(layer, { x: 0, y: 0, scale: 100, rotation: 0 });
+        delete state.text;
+        return { ...state, canvas: bitmap };
+      });
+      result.layers.splice(0, result.layers.length, ...remapped);
+      result.activeId = activeId;
+      return result;
+    }
 
     add(baseName, baseCanvas, { fit: false });
     return {
       width, height, get layers() { return layers; },
       get activeId() { return activeId; },
       set activeId(id) { activeId = find(id).id; },
-      active: () => find(), add, duplicate, remove, move, composite, snapshot, restore, flatten,
+      active: () => find(), add, duplicate, remove, move, composite, snapshot, restore, flatten, remap,
       matrix, applyTransform, point, bounds, estimateBytes: () => pixels * layers.length * 4
     };
   }
 
-  return Object.freeze({ create, MAX_LAYERS, MAX_PIXELS, BLENDS });
+  return Object.freeze({ create, MAX_LAYERS, MAX_PIXELS, MAX_DOCUMENT_PIXELS, BLENDS });
 });

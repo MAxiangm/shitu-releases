@@ -12,7 +12,9 @@ const MODEL_NATIVE = new Set(['blend', 'c4d', 'max']);
 const MODEL = new Set(['glb', 'gltf', 'obj', 'fbx', 'stl', 'ply', ...MODEL_NATIVE]);
 const PROJECT = new Set(['aep', 'aepx']);
 const FONT = new Set(['ttf', 'otf', 'woff', 'woff2', 'ttc', 'otc']);
-const SUPPORTED = new Set([...IMAGE, ...VIDEO, ...AUDIO, ...MODEL, ...PROJECT, ...FONT]);
+const DocumentFormats = require('./document-formats.js');
+const DOCUMENT = new Set(DocumentFormats.extensions);
+const SUPPORTED = new Set([...IMAGE, ...VIDEO, ...AUDIO, ...MODEL, ...PROJECT, ...FONT, ...DOCUMENT]);
 const MIME = {
   jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp', gif: 'image/gif',
   bmp: 'image/bmp', tif: 'image/tiff', tiff: 'image/tiff', svg: 'image/svg+xml', avif: 'image/avif',
@@ -36,6 +38,7 @@ const MIME = {
   mtl: 'text/plain', bin: 'application/octet-stream', ktx2: 'image/ktx2',
   dds: 'image/vnd-ms.dds', tga: 'image/x-tga', aep: 'application/octet-stream', aepx: 'application/xml',
   ttf: 'font/ttf', otf: 'font/otf', woff: 'font/woff', woff2: 'font/woff2',
-  ttc: 'font/collection', otc: 'font/collection'
+  ttc: 'font/collection', otc: 'font/collection',
+  ...DocumentFormats.mimeTypes
 };
-module.exports = { IMAGE, VIDEO, AUDIO, MODEL, MODEL_NATIVE, PROJECT, FONT, SUPPORTED, MIME };
+module.exports = { IMAGE, VIDEO, AUDIO, MODEL, MODEL_NATIVE, PROJECT, FONT, DOCUMENT, SUPPORTED, MIME };

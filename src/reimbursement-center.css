@@ -1,0 +1,107 @@
+.rb-overlay { position:fixed; inset:0; z-index:88; display:flex; padding:24px; background:#0009; backdrop-filter:blur(9px); }
+.rb-overlay[hidden],.rb-overlay [hidden] { display:none!important; }
+.rb-window { display:flex; flex-direction:column; width:100%; height:100%; max-width:1460px; margin:auto; overflow:hidden; background:#111; border:1px solid #ffffff29; border-radius:12px; box-shadow:0 25px 100px #0009; }
+.rb-header { display:flex; flex:none; align-items:center; justify-content:space-between; gap:20px; padding:24px 28px 20px; border-bottom:1px solid #ffffff18; }
+.rb-kicker { font-size:9px; color:#818181; letter-spacing:1.7px; }
+.rb-header h2 { margin:9px 0 7px; font-size:23px; font-weight:400; }
+.rb-header p { margin:0; color:#8e8e8e; font-size:11px; }
+.rb-close { display:grid; place-items:center; width:34px; height:34px; border-radius:50%; background:none; font-size:26px; font-weight:200; color:#999; }
+.rb-close:hover { color:#fff; background:#ffffff0c; }
+.rb-notice { flex:none; padding:10px 28px; max-height:90px; overflow:auto; border-bottom:1px solid #ffffff15; background:#ffffff05; color:#aaa; font-size:11px; line-height:1.7; white-space:pre-line; overflow-wrap:anywhere; }
+.rb-error { color:#e9a8a8!important; }
+.rb-content { padding:24px 28px; overflow:auto; min-height:0; flex:1; }
+.rb-workspace-bar { display:flex; align-items:center; gap:24px; justify-content:space-between; padding-bottom:21px; margin-bottom:22px; border-bottom:1px solid #ffffff17; }
+.rb-workspace-bar>div { min-width:0; }
+.rb-workspace-bar h3 { margin:0 0 9px; font-size:13px; font-weight:400; }
+.rb-workspace-bar .rb-help { margin:0; overflow-wrap:anywhere; }
+.rb-workspace-actions { display:flex; flex-wrap:wrap; justify-content:flex-end; gap:10px; flex:none; }
+.rb-primary,.rb-secondary { min-height:36px; padding:9px 17px; border:1px solid #ffffff2b; border-radius:30px; background:transparent; color:#ddd; font-size:11px; white-space:nowrap; flex:none; }
+.rb-primary { color:#141414; background:#e9e9e9; border-color:#e9e9e9; }
+.rb-primary:hover { background:#fff; }
+.rb-secondary:hover { background:#ffffff09; }
+.rb-text-button { padding:5px 0; color:#aaa; font-size:11px; background:none; white-space:nowrap; }
+.rb-text-button:hover { color:#eee; }
+.rb-help { color:#858585; font-size:11px; line-height:1.8; }
+.rb-categories { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px; }
+.rb-category { display:flex; flex-direction:column; min-width:0; min-height:220px; padding:17px 15px; border:1px solid #ffffff20; border-radius:7px; background:#ffffff02; transition:border-color .15s,background-color .15s; }
+.rb-category.is-drop-target { border-color:#bbb; background:#ffffff12; }
+.rb-category-amount { margin:9px 0 0; color:#b7b7b7; font-size:11px; line-height:1.7; }
+.rb-supplement-card { grid-column:1/-1; display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; min-height:0; }
+.rb-supplement-card>.rb-category-title,.rb-supplement-card>.rb-category-amount { grid-column:1/-1; }
+.rb-supplement-card>.rb-category-amount { margin:0; }
+.rb-drop-zone { display:flex; flex-direction:column; min-width:0; padding:14px; border:1px dashed #ffffff24; border-radius:5px; }
+.rb-drop-zone.is-drop-target { background:#ffffff12; border-color:#bbb; }
+.rb-drop-zone h4 { margin:0; font-size:12px; font-weight:400; }
+.rb-drop-zone>.rb-text-button { align-self:flex-start; margin-top:auto; }
+.rb-drop-zone .rb-drop-hint { min-height:60px; }
+.rb-category-title { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+.rb-category h3 { margin:0; color:#ddd; font-size:14px; font-weight:400; }
+.rb-count { color:#777; font-size:10px; white-space:nowrap; }
+.rb-category .rb-help { font-size:10px; min-height:36px; margin:10px 0; }
+.rb-file-list { padding:0; margin:3px 0 14px; list-style:none; flex:1; max-height:150px; overflow:auto; }
+.rb-file-list li { display:grid; grid-template-columns:minmax(0,1fr) auto auto; gap:7px; align-items:center; padding:6px 0; color:#b0b0b0; font-size:10px; line-height:1.4; }
+.rb-file-list li>span { min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.rb-file-list small { color:#666; font-size:9px; flex:none; }
+.rb-file-remove { padding:5px 7px; border:1px solid #ae777745; border-radius:4px; background:#aa55550b; color:#d9a4a4; font-size:10px; white-space:nowrap; }
+.rb-file-remove:hover { background:#aa555520; color:#f0bbbb; }
+.rb-file-remove:disabled { opacity:.45; cursor:default; }
+.rb-file-confirmation { grid-column:1/-1; min-width:0; padding:9px; border:1px solid #ae777730; border-radius:4px; background:#aa555509; }
+.rb-file-confirmation p { margin:0 0 8px; color:#b9a3a3; font-size:10px; overflow-wrap:anywhere; }
+.rb-file-confirm-actions { display:flex; flex-wrap:wrap; align-items:center; gap:14px; }
+.rb-drop-hint { flex:1; display:grid; place-items:center; padding:18px 0; border:1px dashed #ffffff17; border-radius:4px; color:#626262; font-size:10px; margin:4px 0 14px; }
+.rb-category>.rb-text-button { align-self:flex-start; margin-top:auto; }
+.rb-category-empty { grid-column:1/-1; padding:28px; border:1px dashed #ffffff25; border-radius:7px; text-align:center; }
+.rb-outputs { padding-top:25px; margin-top:25px; border-top:1px solid #ffffff17; }
+.rb-outputs>h3 { margin:0 0 16px; color:#ccc; font-size:13px; font-weight:400; }
+.rb-output-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; }
+.rb-output-card { display:flex; flex-direction:column; min-width:0; padding:18px 20px; border:1px solid #ffffff1c; border-radius:6px; background:#ffffff02; }
+.rb-output-card h4 { margin:0 0 8px; color:#ddd; font-size:13px; font-weight:400; }
+.rb-output-card .rb-help { margin:0 0 13px; font-size:10px; }
+.rb-output-status { color:#aaa; font-size:11px; margin:0 0 15px; overflow-wrap:anywhere; }
+.rb-output-actions { display:flex; flex-wrap:wrap; gap:10px; margin-top:auto; }
+.rb-output-actions button { min-height:32px; padding:7px 14px; font-size:10px; }
+.rb-invoice-source-count { margin:0 0 12px; color:#aaa; font-size:11px; }
+.rb-invoice-unsupported { color:#b4a58f; }
+.rb-invoice-layout { display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:14px; color:#999; font-size:11px; }
+.rb-invoice-layout .rb-input { width:124px; min-height:32px; font-size:11px; padding:6px 9px; }
+.rb-amount-total { display:flex; align-items:center; flex-wrap:wrap; gap:12px 22px; margin-bottom:20px; padding:16px 20px; background:#ffffff04; border:1px solid #ffffff20; border-radius:6px; }
+.rb-amount-total strong { font-size:18px; font-weight:400; font-variant-numeric:tabular-nums; }
+.rb-amount-total>span { font-size:11px; line-height:1.8; }
+.rb-amount-pending { color:#c7b79a!important; }
+.rb-amount-review { margin-top:24px; padding-top:22px; border-top:1px solid #ffffff17; }
+.rb-amount-review h3 { margin:0 0 10px; font-size:13px; font-weight:400; }
+.rb-amount-review>.rb-help { margin:0 0 14px; }
+.rb-amount-rows { max-height:440px; overflow:auto; border:1px solid #ffffff1c; border-radius:5px; }
+.rb-amount-row { display:grid; grid-template-columns:minmax(180px,1fr) 140px 140px; align-items:center; gap:22px; padding:15px 18px; border-bottom:1px solid #ffffff15; }
+.rb-amount-row:last-child { border-bottom:0; }
+.rb-amount-info { display:flex; flex-direction:column; gap:5px; min-width:0; }
+.rb-amount-info strong { font-size:12px; font-weight:400; overflow-wrap:anywhere; }
+.rb-amount-info span,.rb-amount-info small { font-size:10px; color:#888; line-height:1.7; overflow-wrap:anywhere; }
+.rb-amount-field { display:flex; flex-direction:column; gap:7px; font-size:10px; color:#888; }
+.rb-amount-field input { min-height:35px; text-align:right; font-variant-numeric:tabular-nums; }
+.rb-amount-field input[aria-invalid=true] { border-color:#b17676; }
+.rb-amount-actions { display:flex; flex-direction:column; align-items:center; gap:6px; }
+.rb-amount-actions .rb-secondary { padding:7px 12px; min-height:32px; font-size:10px; }
+.rb-workspace-footer { display:flex; align-items:center; justify-content:space-between; gap:20px; padding-top:20px; }
+.rb-workspace-footer .rb-help { margin:0; }
+.rb-settings-mode .rb-window { width:560px; height:auto; max-height:calc(100vh - 48px); }
+.rb-profile-form { display:flex; flex-direction:column; }
+.rb-field { display:flex; flex-direction:column; gap:9px; margin-bottom:21px; color:#aaa; font-size:12px; }
+.rb-input { min-height:40px; width:100%; min-width:0; border:1px solid #ffffff24; border-radius:5px; padding:9px 11px; background:#191919; color:#ddd; font-size:13px; }
+.rb-profile-form>.rb-help { margin:0 0 24px; font-size:10px; }
+.rb-actions { display:flex; justify-content:flex-end; gap:10px; }
+.rb-categories-mode .rb-window { max-width:800px; height:auto; max-height:calc(100vh - 48px); }
+.rb-category-editor-heading { display:flex; justify-content:space-between; color:#aaa; font-size:12px; margin-bottom:15px; }
+.rb-category-list { display:flex; flex-direction:column; gap:10px; }
+.rb-category-editor-row { display:grid; grid-template-columns:24px minmax(0,1fr) auto; align-items:center; gap:12px; padding:12px; border:1px solid #ffffff19; border-radius:5px; }
+.rb-category-position { color:#777; font-size:12px; text-align:center; }
+.rb-category-name-field { display:flex; flex-direction:column; gap:7px; min-width:0; }
+.rb-category-name-field .rb-help { font-size:10px; }
+.rb-category-row-actions { display:flex; gap:12px; padding-top:22px; }
+.rb-category-add { display:grid; grid-template-columns:185px minmax(100px,1fr) auto; gap:10px; padding-top:20px; margin-top:20px; border-top:1px solid #ffffff1a; }
+.rb-category-add .rb-secondary { border-radius:5px; }
+.rb-category-editor>.rb-help { font-size:11px; margin:16px 0; }
+.rb-category-editor>.rb-actions { margin-top:22px; }
+@media (max-width:1100px) { .rb-overlay { padding:14px; } .rb-header { padding:20px 22px; } .rb-content { padding:20px 22px; } .rb-categories { grid-template-columns:repeat(3,minmax(0,1fr)); } .rb-output-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } .rb-category { min-height:200px; } }
+@media (max-width:780px) { .rb-output-grid,.rb-supplement-card { grid-template-columns:1fr; } .rb-amount-row { grid-template-columns:minmax(100px,1fr) 110px 95px; gap:10px; padding:12px; } }
+@media (max-height:760px) { .rb-header { padding-top:16px; padding-bottom:16px; } .rb-header h2 { margin:6px 0; font-size:21px; } .rb-content { padding-top:18px; } .rb-field { margin-bottom:15px; } .rb-settings-mode .rb-window,.rb-categories-mode .rb-window { max-height:calc(100vh - 28px); } }

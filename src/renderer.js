@@ -13,6 +13,7 @@ const bundleDetails = window.ShituBundleDetails;
 const state = { library: { assets: [], folders: [], smartFolders: [], tags: [], stats: {}, root: null, needsLibrary: true }, view: 'all', folder: null, smartFolder: null, tag: null, selected: new Set(), selectionMode: false, anchor: null, search: '', format: 'all', missingResources: false, sort: 'newest', limit: 240, previewId: null, details: false, busy: false, libraryChanging: false };
 let modalResolve = null;
 let modalHasParent = false;
+let modalHasFolderType = false;
 let modalHasColor = false;
 let folderMenuAnchor = null;
 const collapsedFolders = new Set();
@@ -192,7 +193,7 @@ async function openSmartFolderEditor(item = null) {
   const root = state.library.root;
   if (!await waitForMetadata() || root !== state.library.root) return;
   closePreview(); stopGalleryPreviews();
-  const mediaType = state.format === 'images' ? 'image' : ['video', 'audio', 'font', 'model', 'project'].includes(state.format) ? state.format : 'all';
+  const mediaType = state.format === 'images' ? 'image' : ['video', 'audio', 'font', 'model', 'project', 'document'].includes(state.format) ? state.format : 'all';
   smartFoldersUi.open(item, root, { mediaType, colorLabel: null, recentDays: state.view === 'recent' ? 7 : 0, search: state.search, favorite: state.view === 'favorites' });
 }
 
@@ -354,7 +355,7 @@ function date(value) {
   const d = new Date(value);
   return Number.isNaN(d.getTime()) ? '—' : d.toLocaleString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false });
 }
-function dimensions(a) { return isAudio(a) ? (videoDuration(a.duration) || '音乐素材') : isFont(a) ? (a.font?.style || '字体') : isProject(a) ? 'AE 工程' : isModel(a) ? '3D 模型' : a.width && a.height ? `${a.width} × ${a.height}` : '尺寸未知'; }
+function dimensions(a) { return isDocument(a) ? (window.MosaicDocumentFormats?.label(a.ext) || '文档') : isAudio(a) ? (videoDuration(a.duration) || '音乐素材') : isFont(a) ? (a.font?.style || '字体') : isProject(a) ? 'AE 工程' : isModel(a) ? '3D 模型' : a.width && a.height ? `${a.width} × ${a.height}` : '尺寸未知'; }
 function videoDuration(value) {
   if (!Number.isFinite(Number(value)) || Number(value) <= 0) return '';
   const seconds = Math.round(Number(value));
@@ -618,13 +619,32 @@ const modelExtensions = new Set(['glb', 'gltf', 'obj', 'fbx', 'stl', 'ply', 'ble
 function isModel(asset) { return asset.mediaType === 'model' || modelExtensions.has((asset.ext || '').replace(/^\./, '').toLowerCase()); }
 function isProject(asset) { return asset.mediaType === 'project' || ['aep', 'aepx'].includes((asset.ext || '').replace(/^\./, '').toLowerCase()); }
 function isFont(asset) { return asset.mediaType === 'font' || ['ttf', 'otf', 'woff', 'woff2', 'ttc', 'otc'].includes((asset.ext || '').replace(/^\./, '').toLowerCase()); }
+function isDocument(asset) { return asset.mediaType === 'document' || window.MosaicDocumentFormats?.has(asset.ext); }
 function mimeType(asset) {
+  if (isDocument(asset)) return window.MosaicDocumentFormats?.mimeTypes[asset.ext] || asset.mimeType || 'application/octet-stream';
   if (isAudio(asset)) return ({ mp3: 'audio/mpeg', mp2: 'audio/mpeg', wav: 'audio/wav', wave: 'audio/wav', w64: 'audio/wav', flac: 'audio/flac', m4a: 'audio/mp4', m4b: 'audio/mp4', aac: 'audio/aac', ogg: 'audio/ogg', oga: 'audio/ogg', opus: 'audio/ogg', aif: 'audio/aiff', aiff: 'audio/aiff', aifc: 'audio/aiff', wma: 'audio/x-ms-wma', ape: 'audio/x-ape', amr: 'audio/amr', ac3: 'audio/ac3', eac3: 'audio/eac3', dts: 'audio/vnd.dts', mka: 'audio/x-matroska', alac: 'audio/mp4', au: 'audio/basic', snd: 'audio/basic', wv: 'audio/wavpack', tta: 'audio/x-tta', dsf: 'audio/x-dsf', dff: 'audio/x-dff', caf: 'audio/x-caf' })[asset.ext?.toLowerCase()] || asset.mimeType || 'audio/mpeg';
   if (isFont(asset)) return ({ ttf: 'font/ttf', otf: 'font/otf', woff: 'font/woff', woff2: 'font/woff2', ttc: 'font/collection', otc: 'font/collection' })[asset.ext.toLowerCase()] || 'font/ttf';
   return asset.mimeType || ({ mp4: 'video/mp4', m4v: 'video/mp4', f4v: 'video/mp4', webm: 'video/webm', mov: 'video/quicktime', qt: 'video/quicktime', dxv: 'video/quicktime', ogv: 'video/ogg', ogg: 'video/ogg', avi: 'video/x-msvideo', divx: 'video/x-msvideo', mkv: 'video/x-matroska', mpg: 'video/mpeg', mpeg: 'video/mpeg', mpe: 'video/mpeg', m1v: 'video/mpeg', m2v: 'video/mpeg', mts: 'video/mp2t', m2ts: 'video/mp2t', m2t: 'video/mp2t', ts: 'video/mp2t', vob: 'video/mpeg', wmv: 'video/x-ms-wmv', asf: 'video/x-ms-asf', flv: 'video/x-flv', mxf: 'application/mxf', '3gp': 'video/3gpp', '3g2': 'video/3gpp2', rm: 'application/vnd.rn-realmedia', rmvb: 'application/vnd.rn-realmedia-vbr', dv: 'video/dv', jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', svg: 'image/svg+xml', webp: 'image/webp', avif: 'image/avif' })[(asset.ext || '').toLowerCase()] || '—';
 }
 function selectedAssets() { return state.library.assets.filter((a) => state.selected.has(a.id)); }
 function currentFolder() { return state.folder || null; }
+function currentReimbursementRoot(folderId = currentFolder()) {
+  const seen = new Set();
+  while (folderId && !seen.has(folderId)) {
+    seen.add(folderId);
+    const folder = state.library.folders.find(item => item.id === folderId);
+    if (!folder) return null;
+    if (folder.kind === 'reimbursement') return folder;
+    folderId = folder.reimbursementRootId || folder.parentId;
+  }
+  return null;
+}
+async function openReimbursementWorkspace(folderId = currentFolder()) {
+  const root = currentReimbursementRoot(folderId);
+  if (!root || !await waitForMetadata()) return;
+  stopGalleryPreviews();
+  await window.shituReimbursements.open({ folderId: root.id, libraryRoot: state.library.root });
+}
 function hasLibrary() { return Boolean(state.library.root) && !state.library.needsLibrary; }
 function viewName() {
   if (activeSmartFolder()) return activeSmartFolder().name;
@@ -799,7 +819,7 @@ async function waitForMetadata() {
 }
 function historyBlocked() {
   return !hasLibrary() || state.libraryChanging || state.busy || draggingAssets || draggingFolders || folderMoveSaving || folderTreeDrag.pending || nativeAssetDrag || assetFolderDrag.pending || deletingAssets || closing ||
-    Boolean(state.previewId || modalResolve || featureDialogOpen() || window.shituPlugins?.isOpen() || document.querySelector('.modal-overlay:not(.hidden),.preview:not(.hidden),.sp-overlay:not([hidden]),#dropOverlay:not(.hidden)'));
+    Boolean(state.previewId || modalResolve || featureDialogOpen() || window.shituInvoices?.isOpen() || window.shituReimbursements?.isOpen() || window.shituPlugins?.isOpen() || document.querySelector('.modal-overlay:not(.hidden),.preview:not(.hidden),.sp-overlay:not([hidden]),#dropOverlay:not(.hidden)'));
 }
 function hasHistoryDrafts() {
   return pendingSaves.size > 0 || [...$('detailsContent').querySelectorAll('input[data-saved-value],textarea[data-saved-value]')].some(input => !input.disabled && input.value !== input.dataset.savedValue);
@@ -1079,10 +1099,11 @@ function filteredAssets() {
       else if (state.format === 'model') { if (!isModel(a)) return false; }
       else if (state.format === 'project') { if (!isProject(a)) return false; }
       else if (state.format === 'font') { if (!isFont(a)) return false; }
+      else if (state.format === 'document') { if (!isDocument(a)) return false; }
       else if (state.format === 'aiff') { if (!['aif', 'aiff', 'aifc'].includes(ext)) return false; }
       else if (state.format === 'm4a') { if (!['m4a', 'alac'].includes(ext)) return false; }
-      else if (state.format === 'images') { if (isAudio(a) || isVideo(a) || isModel(a) || isProject(a) || isFont(a)) return false; }
-      else if (state.format === 'jpg' ? !['jpg', 'jpeg'].includes(ext) : state.format === 'other' ? ['jpg', 'jpeg', 'png', 'webp', 'gif', 'svg'].includes(ext) || isAudio(a) || isVideo(a) || isModel(a) || isProject(a) || isFont(a) : ext !== state.format) return false;
+      else if (state.format === 'images') { if (isAudio(a) || isVideo(a) || isModel(a) || isProject(a) || isFont(a) || isDocument(a)) return false; }
+      else if (state.format === 'jpg' ? !['jpg', 'jpeg'].includes(ext) : state.format === 'other' ? ['jpg', 'jpeg', 'png', 'webp', 'gif', 'svg'].includes(ext) || isAudio(a) || isVideo(a) || isModel(a) || isProject(a) || isFont(a) || isDocument(a) : ext !== state.format) return false;
     }
     if (terms.length) {
       const haystack = `${a.name} ${a.font?.family || ''} ${a.font?.fullName || ''} ${a.font?.style || ''} ${a.audio?.title || ''} ${a.audio?.artist || ''} ${a.audio?.album || ''} ${(a.tags || []).join(' ')} ${a.notes || ''} ${a.sourceUrl || ''} ${a.pageUrl || ''}`.toLocaleLowerCase();
@@ -1324,6 +1345,7 @@ function renderNavigation() {
   $('storageLabel').textContent = `${active.length.toLocaleString()} 个素材 · ${size(active.reduce((n, a) => n + a.size, 0))}`;
 }
 function renderHeader(list) {
+  $('openReimbursementFolder').classList.toggle('hidden', !currentReimbursementRoot());
   renderFolderNavigation();
   renderHistory();
   const name = viewName();
@@ -1368,6 +1390,12 @@ function audioPlaceholder(asset, className = '') {
   return fallback;
 }
 function mediaFor(asset, kind) {
+  if (isDocument(asset)) {
+    if (asset.thumbnail) return imageFor(asset, 'thumbnail');
+    const fallback = el('div', 'asset-fallback asset-document-placeholder');
+    fallback.append(el('strong', '', (asset.ext || '文档').toUpperCase()), el('span', '', window.MosaicDocumentFormats?.label(asset.ext) || '文档'));
+    return fallback;
+  }
   if (isAudio(asset)) return asset.thumbnail ? imageFor(asset, 'thumbnail') : audioPlaceholder(asset);
   if (isFont(asset)) {
     if (asset.thumbnail) return imageFor(asset, 'thumbnail');
@@ -1463,10 +1491,10 @@ function renderGallery(list) {
       modelHover.attach(thumb, asset, state.library.root);
       warmupCards.push({ thumb, asset, root: state.library.root });
     }
-    if (isAudio(asset) || isVideo(asset) || isModel(asset) || isProject(asset) || isFont(asset)) {
+    if (isAudio(asset) || isVideo(asset) || isModel(asset) || isProject(asset) || isFont(asset) || isDocument(asset)) {
       const badge = el('span', 'asset-video-badge');
-      if (!isFont(asset)) badge.append(icon(isAudio(asset) ? 'music' : isProject(asset) ? 'folder' : isModel(asset) ? 'grid' : 'video'));
-      badge.append(document.createTextNode(isAudio(asset) ? '音乐' : isFont(asset) ? '字体' : isProject(asset) ? 'AE 工程' : isModel(asset) ? '3D 模型' : '视频'));
+      if (!isFont(asset)) badge.append(icon(isDocument(asset) ? 'folder' : isAudio(asset) ? 'music' : isProject(asset) ? 'folder' : isModel(asset) ? 'grid' : 'video'));
+      badge.append(document.createTextNode(isDocument(asset) ? '文档' : isAudio(asset) ? '音乐' : isFont(asset) ? '字体' : isProject(asset) ? 'AE 工程' : isModel(asset) ? '3D 模型' : '视频'));
       thumb.append(badge);
     }
     if (health) thumb.append(assetHealth.cardBadge(health));
@@ -1478,7 +1506,7 @@ function renderGallery(list) {
     if (mark) nameRow.append(mark);
     nameRow.append(name);
     const subline = el('div', 'asset-subline');
-    subline.append(el('span', '', isAudio(asset) ? [videoDuration(asset.duration), asset.audio?.artist].filter(Boolean).join(' · ') || '音乐素材' : isFont(asset) ? (asset.font?.family || '字体素材') : asset.width && asset.height ? dimensions(asset) : isVideo(asset) ? '视频素材' : '尺寸未知'));
+    subline.append(el('span', '', isDocument(asset) ? dimensions(asset) : isAudio(asset) ? [videoDuration(asset.duration), asset.audio?.artist].filter(Boolean).join(' · ') || '音乐素材' : isFont(asset) ? (asset.font?.family || '字体素材') : asset.width && asset.height ? dimensions(asset) : isVideo(asset) ? '视频素材' : '尺寸未知'));
     if (asset.rating) subline.append(el('span', 'asset-stars', '★'.repeat(asset.rating)));
     else subline.append(el('span', '', size(asset.size)));
     info.append(nameRow, subline);
@@ -1708,7 +1736,7 @@ function assetDropTarget(event, payload) {
   const hit = document.elementFromPoint(event.clientX, event.clientY);
   const summary = hit?.closest('.folder-browser > summary');
   if (summary && folderPanelMode !== 'sidebar' && !summary.parentElement.open) { summary.parentElement.open = true; dragOpenedMenu = true; }
-  const node = hit?.closest('.folder-card[data-folder-id],.folder-row[data-folder-id],.folder-breadcrumb[data-folder-id]');
+  const node = hit?.closest('.folder-card[data-folder-id],.folder-row[data-folder-id],.folder-breadcrumb[data-folder-id],[data-reimbursement-category][data-folder-id]');
   if (!node) return null;
   const folderId = node.dataset.folderId || null;
   const folder = folderId ? state.library.folders.find(item => item.id === folderId) : null;
@@ -1848,7 +1876,7 @@ async function openPluginCenter(pluginId, ids = [...state.selected]) {
   if (!await waitForMetadata()) return;
   if (state.previewId) closePreview();
   window.shituPlugins.open({
-    assets: state.library.assets.filter(asset => !asset.trashedAt && !isAudio(asset) && !isVideo(asset) && !isModel(asset) && !isProject(asset) && !isFont(asset)),
+    assets: state.library.assets.filter(asset => !asset.trashedAt && !isAudio(asset) && !isVideo(asset) && !isModel(asset) && !isProject(asset) && !isFont(asset) && !isDocument(asset)),
     selectedIds: ids, libraryRoot: state.library.root, pluginId
   });
 }
@@ -2036,7 +2064,7 @@ function renderDetails() {
     preview.dataset.assetId = asset.id;
     preview.append(mediaFor(asset, 'thumb'));
     preview.addEventListener('click', () => openPreview(asset.id));
-    preview.title = isAudio(asset) ? '点击播放音乐' : isFont(asset) ? '点击预览字体与自定义文字' : isProject(asset) ? '查看已打包的 AE 工程' : isModel(asset) ? '点击旋转预览 3D 模型' : isVideo(asset) ? '点击播放视频' : '点击预览原图';
+    preview.title = isDocument(asset) ? '查看文档信息，使用系统应用打开' : isAudio(asset) ? '点击播放音乐' : isFont(asset) ? '点击预览字体与自定义文字' : isProject(asset) ? '查看已打包的 AE 工程' : isModel(asset) ? '点击旋转预览 3D 模型' : isVideo(asset) ? '点击播放视频' : '点击预览原图';
     box.append(preview);
   } else {
     const preview = el('div', 'detail-preview multi-preview');
@@ -2119,7 +2147,7 @@ function renderDetails() {
   notes.maxLength = 20000;
   notes.addEventListener('change', () => saveTextInput(notes, 'notes'));
   box.append(field('备注', notes), el('div', 'detail-save-note', '修改后自动保存到本地素材库。'), el('div', 'detail-separator'));
-  const metadata = one ? [['类型', isAudio(asset) ? '音乐' : isFont(asset) ? '字体' : isProject(asset) ? 'AE 工程' : isModel(asset) ? '3D 模型' : isVideo(asset) ? '视频' : '图片'], ['格式', asset.ext.toUpperCase()], ['MIME', isProject(asset) ? '工程资源包' : isModel(asset) ? '模型资源包' : mimeType(asset)], [isAudio(asset) ? '时长' : isFont(asset) ? '字形样式' : isModel(asset) || isProject(asset) ? '包内文件' : '尺寸', isProject(asset) ? `${asset.projectBundle?.files?.length || 1} 个` : isModel(asset) ? `${asset.modelBundle?.files?.length || 1} 个` : dimensions(asset)], ['文件大小', size(asset.size)], ['导入时间', date(asset.createdAt)]] : [['已选素材', `${assets.length} 个`], ['总大小', size(assets.reduce((n, a) => n + a.size, 0))]];
+  const metadata = one ? [['类型', isDocument(asset) ? '文档' : isAudio(asset) ? '音乐' : isFont(asset) ? '字体' : isProject(asset) ? 'AE 工程' : isModel(asset) ? '3D 模型' : isVideo(asset) ? '视频' : '图片'], ['格式', asset.ext.toUpperCase()], ['MIME', isProject(asset) ? '工程资源包' : isModel(asset) ? '模型资源包' : mimeType(asset)], [isAudio(asset) ? '时长' : isFont(asset) ? '字形样式' : isModel(asset) || isProject(asset) ? '包内文件' : '尺寸', isProject(asset) ? `${asset.projectBundle?.files?.length || 1} 个` : isModel(asset) ? `${asset.modelBundle?.files?.length || 1} 个` : dimensions(asset)], ['文件大小', size(asset.size)], ['导入时间', date(asset.createdAt)]] : [['已选素材', `${assets.length} 个`], ['总大小', size(assets.reduce((n, a) => n + a.size, 0))]];
   if (one && isFont(asset)) {
     if (asset.font?.family) metadata.push(['字体家族', asset.font.family]);
     if (asset.font?.fullName) metadata.push(['字体名称', asset.font.fullName]);
@@ -2286,7 +2314,7 @@ async function changeLibrary(kind) {
     for (const id of ['setupOperationStatus', 'managerOperationStatus']) $(id).classList.add('hidden');
   }
 }
-function modal({ title, description = '', value = '', input = true, confirm = '确定', cancel = '取消', destructive = false, parentOptions = null, parentId = null, colorValue }) {
+function modal({ title, description = '', value = '', input = true, confirm = '确定', cancel = '取消', destructive = false, parentOptions = null, parentId = null, colorValue, folderType = false }) {
   folderTreeDrag.cancel();
   assetFolderDrag.cancel();
   stopGalleryPreviews();
@@ -2297,6 +2325,9 @@ function modal({ title, description = '', value = '', input = true, confirm = '�
   $('modalInput').value = value;
   $('modalInput').classList.toggle('hidden', !input);
   modalHasParent = Array.isArray(parentOptions);
+  modalHasFolderType = folderType;
+  $('modalFolderTypeField').classList.toggle('hidden', !folderType);
+  $('modalFolderType').value = 'normal';
   modalHasColor = colorValue !== undefined;
   $('modalColorField').classList.toggle('hidden', !modalHasColor);
   $('modalColorError').classList.add('hidden');
@@ -2329,8 +2360,13 @@ function resolveModal(value) {
 async function createFolder(parentId = currentFolder()) {
   if (!hasLibrary() || state.libraryChanging || state.busy) return;
   const root = state.library.root;
-  const result = await modal({ title: parentId ? '新建子文件夹' : '新建文件夹', description: '选择上级文件夹，按项目、主题或使用场景收好素材。', parentOptions: folderTree.flatten(state.library.folders), parentId });
+  const result = await modal({ title: parentId ? '新建子文件夹' : '新建文件夹', description: '报销文件夹自带申请表和默认分类，可在报销工作区自定义分类。', parentOptions: folderTree.flatten(state.library.folders), parentId, folderType: true });
   if (!result?.name?.trim() || !await waitForMetadata() || state.library.root !== root || state.libraryChanging) return;
+  if (result.folderType === 'reimbursement') {
+    const created = await run(() => api.reimbursementCreate({ name: result.name.trim(), parentId: result.parentId, libraryRoot: root }));
+    if (created?.snapshot) { applyLibrary(created.snapshot, false); changeView('all', created.folderId); await openReimbursementWorkspace(created.folderId); }
+    return;
+  }
   const snapshot = await run(() => api.createFolder(result.name.trim(), result.parentId));
   if (snapshot) { applyLibrary(snapshot, false); const created = snapshot.folders[snapshot.folders.length - 1]; if (created) changeView('all', created.id); toast('文件夹已创建'); }
 }
@@ -2406,7 +2442,10 @@ async function importImages(folder, paths) {
       if (state.view === 'trash' || state.view === 'favorites') { state.view = 'all'; state.tag = null; }
       applyLibrary(result.snapshot, false);
       const r = result.report || {};
-      const messages = [`已导入 ${r.imported || 0} 个素材`];
+      const messages = [];
+      if (r.imported) messages.push(`已导入 ${r.imported} 个素材`);
+      if (r.restored) messages.push(`已恢复 ${r.restored} 个文件到当前分类`);
+      if (!r.imported && !r.restored) messages.push('本次没有新增或恢复文件');
       if (r.duplicates) messages.push(`${r.duplicates} 个重复文件已跳过`);
       if (r.unsupported?.length) messages.push(`${r.unsupported.length} 个不支持的文件已跳过`);
       if (r.errors?.length) messages.push(`${r.errors.length} 个文件导入失败`);
@@ -2475,6 +2514,7 @@ const cylinderPreview = new window.ShituCylinderPreview({
   viewport: $('previewCylinder'), ring: $('previewCylinderRing'), parking: $('previewMediaParking'),
   media: [$('previewImage'), $('previewVideo'), $('previewFallback')],
   createThumbnail: asset => {
+    if (isDocument(asset)) return mediaFor(asset, 'thumbnail');
     if (isAudio(asset)) return asset.thumbnail ? imageFor(asset, 'thumbnail', 'cylinder-thumb') : audioPlaceholder(asset, 'cylinder-audio-placeholder');
     if (isFont(asset)) return asset.thumbnail ? imageFor(asset, 'thumbnail', 'cylinder-thumb') : el('div', 'cylinder-video-placeholder font-placeholder-glyph', 'Aa');
     if (isProject(asset)) return asset.thumbnail ? imageFor(asset, 'thumbnail', 'cylinder-thumb') : el('div', 'cylinder-video-placeholder project-ae-glyph', 'Ae');
@@ -2915,7 +2955,17 @@ function displayPreviewAsset(asset, index, total) {
   $('previewMeta').textContent = `${asset.ext.toUpperCase()}  ·  ${dimensions(asset)}  ·  ${size(asset.size)}`;
   $('previewIndex').textContent = `${index + 1} / ${total}`;
   $('previewFallback').classList.add('hidden');
-  if (isAudio(asset)) {
+  if (isDocument(asset)) {
+    if (asset.thumbnail) {
+      $('previewImage').src = api.assetUrl(asset.id, 'thumbnail');
+      $('previewImage').alt = `${asset.name} · 文档封面`;
+      $('previewImage').classList.remove('hidden');
+    } else {
+      $('previewFallback').textContent = '文档原件已完整保存，可使用右上角按钮在系统应用中打开。';
+      $('previewFallback').classList.remove('hidden');
+    }
+    $('previewHelp').textContent = '文档封面 · 右上角使用系统应用打开或导出原件 · ← → 切换素材';
+  } else if (isAudio(asset)) {
     $('preview').classList.add('is-audio-preview');
     $('previewHelp').textContent = '空格播放或暂停 · 拖动进度条定位 · ← → 切换素材';
     void audioPreview.show(asset, state.library.root);
@@ -3120,6 +3170,7 @@ function showCollector() {
 function closeCollector() { clearInterval(collectorRefreshTimer); $('collectorOverlay').classList.add('hidden'); $('collectorButton').focus(); }
 
 $('newFolder').addEventListener('click', () => createFolder());
+$('openReimbursementFolder').addEventListener('click', () => run(() => openReimbursementWorkspace()));
 $('createFolderHere').addEventListener('click', () => { if (canNavigateFolders()) createFolder(currentFolder()); });
 $('undoHistoryButton').addEventListener('click', () => { void performHistory('undo'); });
 $('redoHistoryButton').addEventListener('click', () => { void performHistory('redo'); });
@@ -3295,12 +3346,21 @@ $('backupButton').addEventListener('click', () => run(async () => {
 }));
 $('collectorButton').addEventListener('click', showCollector);
 $('pluginCenterButton').addEventListener('click', () => { stopGalleryPreviews(); run(() => openPluginCenter()); });
+$('invoiceCenterButton').addEventListener('click', () => {
+  stopGalleryPreviews();
+  run(async () => {
+    if (!await waitForMetadata()) return;
+    if (state.previewId) closePreview();
+    await window.shituInvoices.open({ assets: state.library.assets.filter(asset => !asset.trashedAt && (asset.mediaType === 'image' || asset.ext === 'pdf')), selectedIds: [...state.selected], libraryRoot: state.library.root });
+  });
+});
 $('appUpdateButton').addEventListener('click', showAppUpdate);
 $('setupAppUpdate').addEventListener('click', showAppUpdate);
 $('appUpdateClose').addEventListener('click', closeAppUpdate);
 $('appUpdateOverlay').addEventListener('click', event => { if (event.target === $('appUpdateOverlay')) closeAppUpdate(); });
 $('videoTranscodeButton').addEventListener('click', () => openVideoTranscode());
 $('settingsButton').addEventListener('click', openTranscodeSettings);
+$('reimbursementSettingsButton').addEventListener('click', () => { stopGalleryPreviews(); run(() => window.shituReimbursements.openSettings()); });
 $('skinButton').addEventListener('click', () => { stopGalleryPreviews(); skinPickerUi.open(); });
 function setHeaderMenuOpen(open, { focus = false } = {}) {
   $('headerMoreButton').setAttribute('aria-expanded', String(open));
@@ -3440,7 +3500,7 @@ $('modalForm').addEventListener('submit', (e) => {
   }
   const input = !$('modalInput').classList.contains('hidden'), name = $('modalInput').value.trim();
   if (input && !name) return;
-  resolveModal(modalHasParent ? { name, parentId: $('modalParent').value || null } : input ? name : true);
+  resolveModal(modalHasParent ? { name, parentId: $('modalParent').value || null, ...(modalHasFolderType ? { folderType: $('modalFolderType').value } : {}) } : input ? name : true);
 });
 const syncCustomColorPicker = () => {
   $('modalColorHex').value = $('modalColorPicker').value.toUpperCase();
@@ -3508,7 +3568,7 @@ $('detailsContent').addEventListener('contextmenu', event => {
 }, true);
 $('previewImage').addEventListener('error', () => {
   const asset = state.library.assets.find((item) => item.id === state.previewId);
-  if (asset && !isAudio(asset) && !isVideo(asset) && !isModel(asset) && !isProject(asset) && !isFont(asset)) {
+  if (asset && !isAudio(asset) && !isVideo(asset) && !isModel(asset) && !isProject(asset) && !isFont(asset) && !isDocument(asset)) {
     $('previewImage').classList.add('hidden');
     $('previewFallback').textContent = '此图片格式无法在窗口中预览，可使用右上角按钮在系统应用中打开。';
     $('previewFallback').classList.remove('hidden');
@@ -3525,7 +3585,7 @@ $('previewVideo').addEventListener('error', () => {
 });
 $('previewImage').addEventListener('load', () => {
   const asset = state.library.assets.find((item) => item.id === state.previewId);
-  if (asset && !isAudio(asset) && !isVideo(asset) && !isModel(asset) && !isProject(asset) && !isFont(asset)) { $('previewImage').classList.remove('hidden'); $('previewFallback').classList.add('hidden'); }
+  if (asset && !isAudio(asset) && !isVideo(asset) && !isModel(asset) && !isProject(asset) && !isFont(asset) && !isDocument(asset)) { $('previewImage').classList.remove('hidden'); $('previewFallback').classList.add('hidden'); }
 });
 $('previewVideo').addEventListener('loadeddata', () => {
   const asset = state.library.assets.find((item) => item.id === state.previewId);
@@ -3579,7 +3639,7 @@ document.addEventListener('keydown', (e) => {
     }
     return;
   }
-  if (window.shituPlugins?.isOpen() || featureDialogOpen()) return;
+  if (window.shituPlugins?.isOpen() || window.shituInvoices?.isOpen() || window.shituReimbursements?.isOpen() || featureDialogOpen()) return;
   const editing = ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName) || document.activeElement?.isContentEditable;
   if (!$('libraryManagerOverlay').classList.contains('hidden')) { if (e.key === 'Escape') { e.preventDefault(); closeLibraryManager(); } return; }
   if (!$('collectorOverlay').classList.contains('hidden')) { if (e.key === 'Escape') { e.preventDefault(); closeCollector(); } return; }
@@ -3647,7 +3707,22 @@ document.addEventListener('drop', (e) => {
   e.preventDefault(); dragDepth = 0; $('dropOverlay').classList.add('hidden');
   if (draggingAssets || folderTreeDrag.pending || folderMoveSaving) return;
   const paths = [...(e.dataTransfer?.files || [])].map((file) => api.getFilePath(file)).filter(Boolean);
-  if (paths.length) importImages(false, paths);
+  if (paths.length) {
+    const target = e.target?.closest('[data-folder-id]');
+    const targetId = target?.dataset.folderId || currentFolder();
+    const reimbursement = currentReimbursementRoot(targetId);
+    const folder = state.library.folders.find(item => item.id === targetId);
+    if (reimbursement && folder?.reimbursementCategory) {
+      void run(async () => {
+        const result = await api.reimbursementImport({ folderId: reimbursement.id, category: folder.reimbursementCategory, purpose: e.target?.closest('[data-purpose]')?.dataset.purpose, libraryRoot: state.library.root, paths });
+        if (result?.snapshot) applyLibrary(result.snapshot);
+        const report = result.report || {}, errors = report.errors || [];
+        const counts = [report.imported ? `已导入 ${report.imported} 个凭证` : '', report.restored ? `已恢复 ${report.restored} 个文件到当前分类` : '', report.duplicates ? `${report.duplicates} 个文件已在素材库中，本次未重复添加` : ''];
+        if (!report.imported && !report.restored && !report.duplicates && !errors.length) counts.push('本次没有新增或恢复文件');
+        toast([...counts, ...errors.slice(0, 3).map(item => item.message || '文件导入失败')].filter(Boolean).join('\n'), errors.length > 0);
+      });
+    } else importImages(false, paths);
+  }
 });
 api.onAssetDragEnd?.(finishAssetDrag);
 api.onActionError?.(message => { finishAssetDrag(); messageError(new Error(message)); });

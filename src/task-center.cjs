@@ -121,7 +121,7 @@ function createTaskCenter({ getLibrary, onEvent = () => {} }) {
       const report = await run(event => importStage(owner, event));
       const failures = new Map((report.errors || []).map(error => [error.path, error]));
       record(owner, id, { status: failures.size ? 'failed' : 'done', progress: 1,
-        note: `已导入 ${report.imported || 0} 个素材${report.duplicates ? ` · 跳过 ${report.duplicates} 个重复文件` : ''}${failures.size ? ` · ${failures.size} 项失败` : ''}` });
+        note: `${report.restored && !report.imported ? `已恢复 ${report.restored} 个素材` : `已导入 ${report.imported || 0} 个素材${report.restored ? ` · 已恢复 ${report.restored} 个` : ''}`}${report.duplicates ? ` · 跳过 ${report.duplicates} 个重复文件` : ''}${failures.size ? ` · ${failures.size} 项失败` : ''}` });
       for (const [filename, error] of failures) {
         const extension = typeof filename === 'string' ? path.extname(filename).slice(1).toLowerCase() : '';
         const canRetry = retryFile && canRetryImport(filename, paths);

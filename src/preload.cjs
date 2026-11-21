@@ -33,9 +33,45 @@ contextBridge.exposeInMainWorld('shitu', Object.freeze({
   pluginUninstall: id => call('plugin-uninstall', id),
   pluginRun: request => call('plugin-run', request),
   pluginCancel: id => call('plugin-cancel', id),
+  pluginCopyText: jobId => call('plugin-copy-text', jobId),
+  pluginSaveText: jobId => call('plugin-save-text', jobId),
+  pluginRevealResult: jobId => call('plugin-reveal-result', jobId),
+  invoiceStatus: () => call('invoice-status'),
+  invoiceChooseFiles: () => call('invoice-choose-files'),
+  invoiceAddAssets: request => call('invoice-add-assets', request),
+  invoiceRun: request => call('invoice-run', request),
+  invoiceCancel: id => call('invoice-cancel', id),
+  invoiceRevealResult: id => call('invoice-reveal-result', id),
+  invoicePreview: id => call('invoice-preview', id),
+  invoiceRemoveItems: ids => call('invoice-remove-items', ids),
+  reimbursementGetProfile: () => call('reimbursement-profile'),
+  reimbursementSaveProfile: profile => call('reimbursement-save-profile', profile),
+  reimbursementCreate: request => call('reimbursement-create', request),
+  reimbursementGet: request => call('reimbursement-get', request),
+  reimbursementRefresh: request => call('reimbursement-refresh', request),
+  reimbursementSaveCategories: request => call('reimbursement-save-categories', request),
+  reimbursementMergeInvoices: request => call('reimbursement-merge-invoices', request),
+  reimbursementSetAmount: request => call('reimbursement-set-amount', request),
+  reimbursementCancel: request => call('reimbursement-cancel', request),
+  reimbursementImport: request => call('reimbursement-import', request),
+  reimbursementRemoveFile: request => call('reimbursement-remove-file', request),
+  reimbursementChooseImport: request => call('reimbursement-choose-import', request),
+  reimbursementOpenArtifact: request => call('reimbursement-open', request),
+  reimbursementExport: request => call('reimbursement-export', request),
+  onReimbursementEvent: callback => {
+    const listener = (_event, detail) => callback(detail);
+    ipcRenderer.on('shitu:reimbursement-event', listener);
+    return () => ipcRenderer.removeListener('shitu:reimbursement-event', listener);
+  },
+  onInvoiceEvent: callback => {
+    const listener = (_event, detail) => callback(detail);
+    ipcRenderer.on('shitu:invoice-event', listener);
+    return () => ipcRenderer.removeListener('shitu:invoice-event', listener);
+  },
   readImageForEditor: (id, root) => call('image-editor-read', id, root),
   saveEditedImage: request => call('image-editor-save', request),
   exportEditedImage: request => call('image-editor-export', request),
+  exportEditedPsd: request => call('image-editor-export-psd', request),
   onPluginEvent: callback => {
     const listener = (_event, event) => callback(event);
     ipcRenderer.on('shitu:plugin-event', listener);
