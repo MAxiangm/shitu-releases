@@ -58,6 +58,10 @@ contextBridge.exposeInMainWorld('shitu', Object.freeze({
   reimbursementChooseImport: request => call('reimbursement-choose-import', request),
   reimbursementOpenArtifact: request => call('reimbursement-open', request),
   reimbursementExport: request => call('reimbursement-export', request),
+  reimbursementExportAll: request => call('reimbursement-export-all', request),
+  reimbursementPreview: request => call('reimbursement-preview', request),
+  reimbursementPreviewCancel: () => call('reimbursement-preview-cancel'),
+  reimbursementOpenSource: request => call('reimbursement-open-source', request),
   onReimbursementEvent: callback => {
     const listener = (_event, detail) => callback(detail);
     ipcRenderer.on('shitu:reimbursement-event', listener);

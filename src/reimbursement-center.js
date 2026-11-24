@@ -3,7 +3,7 @@
   'use strict';
   const api = window.shitu;
   const fields = [['applicant', '申请人'], ['companyName', '公司名称'], ['accountName', '开户名称'], ['bankName', '开户行'], ['accountNumber', '账号']];
-  const state = { open: false, mode: 'workspace', folderId: null, libraryRoot: null, workspace: null, profile: {}, loading: false, working: false, request: 0, previousFocus: null, returnToWorkspace: false, categoryDraft: [], categoryNewName: '', categoryNewType: 'normal', invoiceMergePages: null, supplementMergePages: null, mergingInvoices: false, mergingScope: null, amountDrafts: new Map(), cancelling: false, deleteConfirmation: null, deleteOperation: null, libraryRefreshPending: false, libraryRefreshOperation: null };
+  const state = { open: false, mode: 'workspace', folderId: null, libraryRoot: null, workspace: null, profile: {}, loading: false, working: false, request: 0, previousFocus: null, returnToWorkspace: false, categoryDraft: [], categoryNewName: '', categoryNewType: 'normal', invoiceMergePages: null, supplementMergePages: null, mergingInvoices: false, mergingScope: null, amountDrafts: new Map(), cancelling: false, deleteConfirmation: null, deleteOperation: null, libraryRefreshPending: false, libraryRefreshOperation: null, exportingAll: null };
   let root, libraryRefreshTimer;
   const $ = id => root.querySelector(`#${id}`);
   const node = (tag, cls, value) => { const result = document.createElement(tag); if (cls) result.className = cls; if (value !== undefined) result.textContent = String(value ?? ''); return result; };
@@ -19,6 +19,7 @@
     for (const kind of ['dragenter', 'dragover', 'dragleave', 'drop']) root.addEventListener(kind, handleDrop, true);
     document.addEventListener('keydown', event => {
       if (!state.open) return;
+      if (window.MosaicReimbursementPreview?.isOpen()) return;
       if (event.key === 'Escape') { event.preventDefault(); close(); }
       if (event.key === 'Tab') {
         const focusable = [...root.querySelectorAll('button:not(:disabled),input:not(:disabled),select:not(:disabled),summary')].filter(item => item.getClientRects().length);
@@ -47,15 +48,18 @@
   function close() {
     if (state.working) return;
     if (state.mode === 'categories') { cancelCategories(); return; }
+    window.MosaicReimbursementPreview?.close();
     state.open = false; state.request++; clearLibraryRefresh(); root.hidden = true; document.body.classList.remove('is-reimbursement-open'); state.previousFocus?.focus?.();
   }
   async function open({ folderId, libraryRoot } = {}) {
+    window.MosaicReimbursementPreview?.close();
     resetFileRemoval(); clearLibraryRefresh();
     show('workspace'); state.returnToWorkspace = false; state.folderId = folderId; state.libraryRoot = libraryRoot;
     state.workspace = null; state.invoiceMergePages = null; state.supplementMergePages = null; state.amountDrafts.clear(); report(''); renderWorkspace(); await loadWorkspace(false);
     $('rb-close').focus();
   }
   async function openSettings() {
+    window.MosaicReimbursementPreview?.close();
     resetFileRemoval();
     state.returnToWorkspace = state.open && state.mode === 'workspace' && Boolean(state.folderId);
     show('settings'); state.loading = true; report(''); renderSettings();
@@ -94,8 +98,10 @@
       const workspace = await (regenerate ? api.reimbursementRefresh(target) : api.reimbursementGet(target));
       if (revision !== state.request || target.folderId !== state.folderId || target.libraryRoot !== state.libraryRoot || !state.open || !canApply()) return;
       state.workspace = workspace; state.profile = workspace.profile || state.profile;
+      const preview = window.MosaicReimbursementPreview?.currentRequest?.();
+      if (preview && ![...workspace.categories.flatMap(category => category.items || []), ...(workspace.itinerary?.items || []), ...Object.values(workspace.artifacts || {}).filter(item => item?.ready).map(item => ({ id: item.assetId }))].some(item => item.id === preview.assetId)) window.MosaicReimbursementPreview.close();
       const pending = state.deleteConfirmation;
-      if (pending && !workspace.categories.some(category => category.key === pending.category && category.items?.some(item => item.id === pending.assetId))) state.deleteConfirmation = null;
+      if (pending && !hasFile(workspace, pending)) state.deleteConfirmation = null;
       if (state.invoiceMergePages === null) state.invoiceMergePages = workspace.invoiceMerge?.imagesPerPage || 2;
       if (state.supplementMergePages === null) state.supplementMergePages = workspace.supplementInvoiceMerge?.imagesPerPage || 2;
     } catch (error) { if (revision === state.request && state.open && canApply()) report(error.message || String(error), true); }
@@ -244,7 +250,7 @@
       if (category.invoiceCount !== undefined) card.append(node('p', 'rb-category-amount', `${category.invoiceCount} 页发票 · ${category.pendingCount ? '已识别小计' : '合计'} ¥${category.amount || '0.00'}${category.pendingCount ? ` · 待核对 ${category.pendingCount}` : ''}`));
       if (isSupplement) {
         card.classList.add('rb-supplement-card');
-        card.append(fileZone(category, 'invoice', '补票发票', '图片或 PDF，识别金额并计入报销', category.invoiceItems || []), fileZone(category, 'evidence', '购买截图', '仅图片，不计金额，生成说明 PDF', category.evidenceItems || []));
+        card.append(fileZone(category, 'invoice', '补票发票', '图片或 PDF，识别金额并计入报销', category.invoiceItems || []), fileZone(category, 'evidence', '购买截图', '仅图片，识别金额供参考，不计入报销，生成说明 PDF', category.evidenceItems || [], workspace.evidenceAmounts));
       } else {
         card.append(node('p', 'rb-help', '拖入发票、图片或文档附件'));
         appendFileList(card, category.items || [], category);
@@ -255,18 +261,29 @@
     if (!workspace) categories.append(node('p', 'rb-help', state.loading ? '正在读取分类…' : '资料夹暂不可用，请重试。'));
     else if (!workspace.categories.length) { const empty = node('div', 'rb-category-empty'); empty.append(node('p', 'rb-help', '还没有分类，可以按报销需要添加。')); empty.append(button('添加分类', 'rb-secondary', openCategories)); categories.append(empty); }
     content.append(categories);
+    if (workspace) {
+      const itinerary = node('section', 'rb-itinerary rb-drop-zone'); itinerary.id = 'rb-itinerary'; itinerary.dataset.purpose = 'itinerary';
+      const heading = node('div', 'rb-category-title'), items = workspace.itinerary?.items || [];
+      heading.append(node('h3', '', '打车行程单'), node('span', 'rb-count', `${workspace.itinerary?.count ?? items.length} 个文件`));
+      itinerary.append(heading, node('p', 'rb-help', '拖入行程单图片或 PDF，自动合并为独立 PDF；不识别金额，不计入报销总额。'));
+      appendFileList(itinerary, items, { key: 'itinerary', purpose: 'itinerary' });
+      const add = button('添加行程单…', 'rb-text-button', () => importCategory(undefined, undefined, 'itinerary')); add.id = 'rb-add-itinerary'; add.disabled = busy() || workspace.state === 'generating'; itinerary.append(add); content.append(itinerary);
+    }
     if (workspace?.amounts) content.append(amountReview(workspace));
+    if (workspace?.evidenceAmounts?.items?.length) content.append(amountReview(workspace, 'evidence'));
     const outputs = node('section', 'rb-outputs');
-    outputs.append(node('h3', '', '自动生成文件'));
+    const outputHeading = node('div', 'rb-outputs-heading'); outputHeading.append(node('h3', '', '自动生成文件'));
+    const exportAll = button(state.exportingAll ? '正在导出…' : '一键导出全部', 'rb-primary', exportAllArtifacts); exportAll.id = 'rb-export-all'; exportAll.title = '准备申请表与全部 PDF，导出到独立文件夹'; exportAll.disabled = busy() || !workspace?.artifacts?.form?.ready || workspace?.state === 'generating'; outputHeading.append(exportAll); outputs.append(outputHeading);
     const grid = node('div', 'rb-output-grid');
     const supplement = workspace?.categories.find(item => item.key === 'supplement');
-    for (const [kind, title, description] of [['form', '报销申请表', '自动填写日期、资料和按分类核对的发票金额。空分类不写入。'], ['supplementPdf', '购买截图说明 PDF', supplement ? `仅合并“${supplement.name}”内的购买截图，不计报销金额。` : '添加补票分类后，可导入购买截图生成说明 PDF。']]) {
+    for (const [kind, title, description] of [['form', '报销申请表', '自动填写日期、资料和按分类核对的发票金额。空分类不写入。'], ['supplementPdf', '购买截图说明 PDF', supplement ? `仅合并“${supplement.name}”内的购买截图，不计报销金额。` : '添加补票分类后，可导入购买截图生成说明 PDF。'], ['itineraryPdf', '打车行程单 PDF', '仅合并独立行程单区的图片和 PDF，不识别金额，不计入报销总额。']]) {
       const artifact = workspace?.artifacts?.[kind], card = node('section', 'rb-output-card'); card.dataset.artifact = kind;
       card.append(node('h4', '', title), node('p', 'rb-help', description));
-      const ready = artifact?.ready === true && workspace?.state !== 'generating' && (kind !== 'supplementPdf' || Boolean(supplement));
-      card.append(node('p', 'rb-output-status', workspace?.state === 'generating' ? '正在更新生成文件…' : ready ? artifact.name : kind === 'supplementPdf' ? supplement ? '待添加购买截图' : '未设置补票专区' : '申请表尚未生成'));
+      const stale = kind === 'itineraryPdf' && workspace?.itinerary?.stale;
+      const ready = artifact?.ready === true && !stale && workspace?.state !== 'generating' && (kind !== 'supplementPdf' || Boolean(supplement));
+      card.append(ready ? previewName(artifact.name, artifact.assetId, 1, `artifact:${kind}`, 'rb-output-status') : node('p', 'rb-output-status', workspace?.state === 'generating' ? '正在更新生成文件…' : stale ? workspace.itinerary.message || '行程单已变化，请刷新生成文件。' : kind === 'supplementPdf' ? supplement ? '待添加购买截图' : '未设置补票专区' : kind === 'itineraryPdf' ? '待添加打车行程单' : '申请表尚未生成'));
       const actions = node('div', 'rb-output-actions');
-      for (const [label, method] of [[kind === 'supplementPdf' ? '打开预览' : '打开申请表', 'open'], ['导出…', 'export']]) { const action = button(label, 'rb-secondary', () => artifactAction(kind, method)); action.disabled = busy() || !ready; actions.append(action); }
+      for (const [label, method] of [[kind === 'form' ? '打开申请表' : '打开预览', 'open'], ['导出…', 'export']]) { const action = button(label, 'rb-secondary', () => artifactAction(kind, method)); action.disabled = busy() || !ready; actions.append(action); }
       card.append(actions); grid.append(card);
     }
     grid.append(invoiceMergeCard(workspace));
@@ -274,7 +291,7 @@
     outputs.append(grid); content.append(outputs);
     const footer = node('div', 'rb-workspace-footer');
     const message = node('p', workspace?.state === 'error' ? 'rb-help rb-error' : 'rb-help', workspace?.message || '文件导入后会更新申请表与补票截图 PDF。'); message.setAttribute('role', 'status');
-    const refresh = button(state.loading ? '正在刷新…' : workspace?.amounts?.pendingCount ? '重试识别并更新' : '刷新生成文件', 'rb-secondary', () => { report(''); void loadWorkspace(true); }); refresh.id = 'rb-refresh-workspace'; refresh.disabled = busy() || !workspace || workspace.state === 'generating';
+    const refresh = button(state.loading ? '正在刷新…' : workspace?.amounts?.pendingCount || workspace?.evidenceAmounts?.pendingCount ? '重试识别并更新' : '刷新生成文件', 'rb-secondary', () => { report(''); void loadWorkspace(true); }); refresh.id = 'rb-refresh-workspace'; refresh.disabled = busy() || !workspace || workspace.state === 'generating';
     const actions = node('div', 'rb-workspace-actions'); actions.append(refresh);
     if (workspace?.state === 'generating') { const cancel = button(state.cancelling ? '正在取消…' : '取消当前处理', 'rb-secondary', cancelProcessing); cancel.id = 'rb-cancel-processing'; cancel.disabled = state.cancelling; actions.append(cancel); }
     footer.append(message, actions); content.append(footer);
@@ -285,14 +302,18 @@
     state.deleteConfirmation = null;
     if (state.deleteOperation) { state.deleteOperation = null; state.working = false; }
   }
+  function hasFile(workspace, reference) {
+    return reference.purpose === 'itinerary' ? workspace?.itinerary?.items?.some(item => item.id === reference.assetId)
+      : workspace?.categories?.some(category => category.key === reference.category && category.items?.some(item => item.id === reference.assetId));
+  }
   function appendFileList(container, items, category) {
     const list = node('ul', 'rb-file-list');
     for (const item of items) {
       const row = node('li', 'rb-file-row'); row.dataset.fileId = item.id;
-      const name = node('span', 'rb-file-name', item.name); name.title = item.name;
+      const name = previewName(item.name, item.id, 1, `file:${item.id}`, 'rb-file-name');
       const remove = button('删除', 'rb-file-remove', () => {
         if (busy() || state.workspace?.state === 'generating') return;
-        state.deleteConfirmation = { ...context(), category: category.key, assetId: item.id };
+        state.deleteConfirmation = { ...context(), category: category.key, assetId: item.id, ...(category.purpose === 'itinerary' ? { purpose: 'itinerary' } : {}) };
         renderWorkspace(); root.querySelector(`[data-confirm-remove-file="${CSS.escape(item.id)}"]`)?.focus();
       });
       remove.dataset.removeFile = item.id; remove.title = `删除 ${item.name}`; remove.setAttribute('aria-label', `删除 ${item.name}`);
@@ -321,9 +342,8 @@
     if (busy() || state.workspace?.state === 'generating') return;
     const pending = state.deleteConfirmation;
     if (pending?.assetId !== item.id || pending.category !== category.key || pending.folderId !== state.folderId || pending.libraryRoot !== state.libraryRoot) return;
-    const currentCategory = state.workspace?.categories.find(entry => entry.key === category.key);
-    if (!currentCategory?.items?.some(entry => entry.id === item.id)) return;
-    const operation = { ...context(), category: category.key, assetId: item.id };
+    if (!hasFile(state.workspace, pending)) return;
+    const operation = { ...context(), category: category.key, assetId: item.id, ...(category.purpose === 'itinerary' ? { purpose: 'itinerary' } : {}) };
     state.deleteOperation = operation; state.working = true; report(''); renderWorkspace();
     const active = () => state.deleteOperation === operation && state.open && operation.folderId === state.folderId && operation.libraryRoot === state.libraryRoot;
     try {
@@ -334,7 +354,7 @@
       else await loadWorkspace(false, false);
       if (!active()) return;
       state.deleteConfirmation = null;
-      for (const key of state.amountDrafts.keys()) if (key.startsWith(`${item.id}:`)) state.amountDrafts.delete(key);
+      for (const key of state.amountDrafts.keys()) if (['invoice', 'evidence'].some(purpose => key.startsWith(`${purpose}:${item.id}:`))) state.amountDrafts.delete(key);
       const syncError = result.syncError?.message || result.syncError;
       report(syncError ? `“${item.name}”已移到回收站，但报销表同步失败：${syncError}` : `“${item.name}”已移到回收站，可在回收站恢复。`, Boolean(syncError));
     } catch (error) { if (active()) report(error.message || String(error), true); }
@@ -342,58 +362,85 @@
       if (state.deleteOperation === operation) { state.deleteOperation = null; state.working = false; if (state.open && state.mode === 'workspace') renderWorkspace(); }
     }
   }
-  function fileZone(category, purpose, title, hint, items) {
+  function fileZone(category, purpose, title, hint, items, evidenceAmounts) {
     const zone = node('section', 'rb-drop-zone'); zone.dataset.purpose = purpose;
-    zone.append(node('h4', '', title), node('p', 'rb-help', hint)); appendFileList(zone, items, category);
+    zone.append(node('h4', '', title), node('p', 'rb-help', hint));
+    if (purpose === 'evidence' && items.length) {
+      const pending = Number(category.evidencePendingCount ?? evidenceAmounts?.pendingCount) || 0;
+      const invoicePending = Number(category.pendingCount) || 0;
+      const cents = category.evidenceAmountCents ?? evidenceAmounts?.totalCents, invoiceCents = category.amountCents;
+      const missingAmount = !Number.isSafeInteger(cents) || !Number.isSafeInteger(invoiceCents);
+      const remaining = pending || invoicePending || missingAmount ? '待核对后计算' : `${window.MosaicInvoiceAmounts.formatAmount(Math.max(0, cents - invoiceCents))} 元`;
+      const totals = node('div', 'rb-evidence-totals'); totals.dataset.evidenceTotals = category.key;
+      totals.append(node('p', 'rb-evidence-subtotal', `${pending ? '截图已识别小计' : '截图参考合计'}：${category.evidenceAmount ?? evidenceAmounts?.totalAmount ?? '0.00'} 元${pending ? ` · 待核对 ${pending} 张` : ''}`),
+        node('p', 'rb-evidence-subtotal', `${invoicePending ? '补票发票已识别小计' : '已有补票发票合计'}：${category.amount || '0.00'} 元${invoicePending ? ` · 待核对 ${invoicePending} 页` : ''}`));
+      const difference = node('p', 'rb-evidence-difference', `还需补票参考金额：${remaining}`); difference.dataset.evidenceDifference = category.key; totals.append(difference, node('p', 'rb-evidence-subtotal', '仅作补票整理参考，不计入正式报销总额。')); zone.append(totals);
+    }
+    appendFileList(zone, items, category);
     const add = button(purpose === 'evidence' ? '添加购买截图…' : '添加补票发票…', 'rb-text-button', () => importCategory(category.key, undefined, purpose)); add.disabled = busy(); zone.append(add); return zone;
   }
-  function amountReview(workspace) {
-    const section = node('section', 'rb-amount-review'); section.id = 'rb-amount-review';
-    section.append(node('h3', '', '发票金额核对'), node('p', 'rb-help', '按发票页核对金额，保存后自动汇总到所属分类；不计报销的页可排除。购买截图不计金额。'));
-    const items = workspace.amounts?.items || [];
+  const amountDraftKey = (item, purpose) => `${purpose}:${item.assetId}:${item.pageNumber || 1}`;
+  function previewName(label, assetId, pageNumber, key, className = '') {
+    const name = button(label, `rb-preview-name ${className}`, event => {
+      if (!assetId || busy()) return;
+      window.MosaicReimbursementPreview.open({ request: { ...context(), assetId, pageNumber }, name: label, returnFocus: event.currentTarget });
+    });
+    name.dataset.previewKey = key; name.title = `单击预览：${label}`; name.setAttribute('aria-label', `预览 ${label}`); name.disabled = busy() || !assetId;
+    return name;
+  }
+  function amountReview(workspace, purpose = 'invoice') {
+    const evidence = purpose === 'evidence', amounts = evidence ? workspace.evidenceAmounts : workspace.amounts;
+    const section = node('section', `rb-amount-review${evidence ? ' rb-evidence-review' : ''}`); section.id = evidence ? 'rb-evidence-amount-review' : 'rb-amount-review';
+    section.append(node('h3', '', evidence ? '购买截图金额（不计入报销）' : '发票金额核对'), node('p', 'rb-help', evidence ? '自动识别的金额仅供参考，可手动核对或忽略，不写入报销总额。' : '按发票页核对金额，保存后自动汇总到所属分类；不计报销的页可排除。购买截图不计入报销。'));
+    if (evidence) {
+      const summary = node('p', 'rb-evidence-subtotal'); summary.id = 'rb-evidence-amount-total';
+      summary.textContent = `截图识别小计：${amounts?.totalAmount || '0.00'} 元（仅供参考）${amounts?.pendingCount ? ` · 待核对 ${amounts.pendingCount} 张` : ''}`; section.append(summary);
+    }
+    const items = amounts?.items || [];
     if (!items.length) { section.append(node('p', 'rb-help', '导入发票图片或 PDF 后，将在这里显示每页金额。')); return section; }
     const categories = new Map(workspace.categories.map(category => [category.key, category.name]));
     const rows = node('div', 'rb-amount-rows');
     for (const item of items) {
-      const pageNumber = item.pageNumber || 1, key = `${item.assetId}:${pageNumber}`;
+      const pageNumber = item.pageNumber || 1, key = amountDraftKey(item, purpose);
       const excluded = item.status === 'excluded', pending = item.status === 'pending';
       const known = !excluded && !pending && Number.isSafeInteger(item.amountCents) && item.amountCents >= 0;
-      const row = node('div', 'rb-amount-row'); row.dataset.amountAsset = item.assetId; row.dataset.amountPage = pageNumber;
+      const row = node('div', 'rb-amount-row'); row.dataset.amountAsset = item.assetId; row.dataset.amountPage = pageNumber; row.dataset.amountPurpose = purpose;
       const wholeDocument = String(item.reason || '').includes('整份文件');
-      const info = node('div', 'rb-amount-info'); info.append(node('strong', '', `${item.name || '发票'} · ${wholeDocument ? '整份文件' : `第 ${pageNumber} 页`}`), node('span', '', categories.get(item.categoryKey) || '未分类'));
-      const status = { recognized: '自动识别', manual: '手动确认', pending: '待核对', excluded: '已排除，不计金额' }[item.status] || '待核对';
+      const info = node('div', 'rb-amount-info'); info.append(previewName(`${item.name || (evidence ? '购买截图' : '发票')} · ${wholeDocument ? '整份文件' : `第 ${pageNumber} 页`}`, item.assetId, wholeDocument ? 1 : pageNumber, `amount:${key}`), node('span', '', categories.get(item.categoryKey) || '未分类'));
+      const status = { recognized: '自动识别', manual: '手动确认', pending: '待核对', excluded: evidence ? '已忽略参考金额' : '已排除，不计金额' }[item.status] || '待核对';
       info.append(node('small', pending ? 'rb-amount-pending' : '', `${status}${item.reason ? ` · ${String(item.reason).slice(0, 200)}` : ''}`));
       if (!known && item.detectedAmount) info.append(node('small', '', `识别参考：${item.detectedAmount} 元`));
       const field = node('label', 'rb-amount-field'); field.append(node('span', '', '金额（元）'));
-      const input = node('input', 'rb-input'); input.type = 'text'; input.inputMode = 'decimal'; input.maxLength = 80; input.placeholder = excluded ? '填写后恢复计入' : '待核对'; input.dataset.amountInput = key;
+      const input = node('input', 'rb-input'); input.type = 'text'; input.inputMode = 'decimal'; input.maxLength = 80; input.placeholder = excluded ? evidence ? '填写后恢复参考金额' : '填写后恢复计入' : '待核对'; input.dataset.amountInput = key;
       input.value = state.amountDrafts.get(key) ?? (known ? item.amount || window.MosaicInvoiceAmounts?.formatAmount(item.amountCents) || '' : item.detectedAmount ?? '');
-      input.setAttribute('aria-label', `${item.name || '发票'}第${pageNumber}页金额`); input.disabled = busy() || workspace.state === 'generating';
+      input.setAttribute('aria-label', `${item.name || (evidence ? '购买截图' : '发票')}第${pageNumber}页${evidence ? '参考' : ''}金额（元）`); input.disabled = busy() || workspace.state === 'generating';
       field.append(input);
       const actions = node('div', 'rb-amount-actions');
-      const save = button(excluded ? '恢复计入' : known ? '保存修改' : '确认金额', 'rb-secondary', () => saveAmount(item, input.value, false)); save.dataset.amountSave = key;
+      const save = button(excluded ? evidence ? '恢复参考金额' : '恢复计入' : known ? '保存修改' : evidence ? '确认参考金额' : '确认金额', 'rb-secondary', () => saveAmount(item, input.value, false, purpose)); save.dataset.amountSave = key;
       const update = () => {
         const cents = window.MosaicInvoiceAmounts?.parseAmount(input.value) ?? null;
         save.disabled = busy() || workspace.state === 'generating' || cents === null || (known && cents === item.amountCents);
         input.setAttribute('aria-invalid', String(input.value.trim() !== '' && cents === null));
       };
       input.addEventListener('input', () => { state.amountDrafts.set(key, input.value); update(); }); update();
-      const exclude = button(excluded ? '已排除' : '排除此页', 'rb-text-button', () => saveAmount(item, null, true)); exclude.dataset.amountExclude = key; exclude.disabled = excluded || busy() || workspace.state === 'generating';
+      const exclude = button(excluded ? evidence ? '已忽略' : '已排除' : evidence ? '忽略参考金额' : '排除此页', 'rb-text-button', () => saveAmount(item, null, true, purpose)); exclude.dataset.amountExclude = key; exclude.disabled = excluded || busy() || workspace.state === 'generating';
       actions.append(save, exclude); row.append(info, field, actions); rows.append(row);
     }
     section.append(rows); return section;
   }
-  async function saveAmount(item, value, excluded) {
+  async function saveAmount(item, value, excluded, purpose = 'invoice') {
     if (busy() || state.workspace?.state === 'generating') return;
     const cents = excluded ? null : window.MosaicInvoiceAmounts?.parseAmount(value) ?? null;
     if (!excluded && cents === null) { report('请输入有效金额，最多两位小数。', true); return; }
-    const request = { ...context(), assetId: item.assetId, pageNumber: item.pageNumber || 1, amount: excluded ? null : window.MosaicInvoiceAmounts.formatAmount(cents), excluded };
+    const evidence = purpose === 'evidence';
+    const request = { ...context(), assetId: item.assetId, pageNumber: item.pageNumber || 1, amount: excluded ? null : window.MosaicInvoiceAmounts.formatAmount(cents), excluded, ...(evidence ? { purpose } : {}) };
     state.working = true; report(''); renderWorkspace();
     try {
       const result = await api.reimbursementSetAmount(request);
       if (request.folderId !== state.folderId || request.libraryRoot !== state.libraryRoot) return;
       if (result?.workspace) state.workspace = result.workspace; else await loadWorkspace(false, false);
-      state.amountDrafts.delete(`${item.assetId}:${item.pageNumber || 1}`);
-      report(excluded ? '此页已排除，不计报销金额。' : '金额已保存，报销表会自动更新。');
+      state.amountDrafts.delete(amountDraftKey(item, purpose));
+      report(evidence ? excluded ? '已忽略此截图的参考金额，报销总额保持不变。' : '截图参考金额已保存，不计入报销总额。' : excluded ? '此页已排除，不计报销金额。' : '金额已保存，报销表会自动更新。');
     } catch (error) { report(error.message || String(error), true); }
     finally { state.working = false; if (state.mode === 'workspace') renderWorkspace(); }
   }
@@ -423,7 +470,7 @@
     select.value = String(pages); select.addEventListener('change', () => { if (supplementary) state.supplementMergePages = Number(select.value); else state.invoiceMergePages = Number(select.value); renderWorkspace(); }); label.append(select); card.append(label);
     const merging = state.mergingInvoices && state.mergingScope === scope;
     const status = workspace?.state === 'generating' ? workspace.message || '正在生成文件…' : merging ? '正在合并发票…' : stale ? layoutChanged ? '排版已更改，请重新合并。' : merge.message || '来源已变化，请重新合并。' : artifact?.ready ? artifact.name : sourceCount ? '选择每页张数后即可合并。' : '暂无可合并的图片或 PDF。';
-    card.append(node('p', 'rb-output-status', status));
+    card.append(ready ? previewName(artifact.name, artifact.assetId, 1, `artifact:${kind}`, 'rb-output-status') : node('p', 'rb-output-status', status));
     const mergeButton = button(merging ? '正在合并…' : artifact?.ready ? '重新合并' : '一键合并', 'rb-secondary', () => mergeInvoices(scope)); mergeButton.id = supplementary ? 'rb-merge-supplement-invoices' : 'rb-merge-invoices'; mergeButton.disabled = blocked || !sourceCount;
     const actions = node('div', 'rb-output-actions'); actions.append(mergeButton);
     for (const [text, method] of [['打开预览', 'open'], ['导出…', 'export']]) { const action = button(text, 'rb-secondary', () => artifactAction(kind, method)); if (supplementary) action.dataset.supplementInvoiceAction = method; else action.dataset.invoiceAction = method; action.disabled = !ready; actions.append(action); }
@@ -447,7 +494,8 @@
   }
   async function importCategory(category, paths, purpose = 'invoice') {
     if (busy() || !state.workspace) return;
-    const target = { ...context(), category, purpose }; state.working = true; report('正在导入文件…'); renderWorkspace();
+    if (purpose === 'itinerary' && state.workspace.state === 'generating') return;
+    const target = { ...context(), ...(category ? { category } : {}), purpose }; state.working = true; report('正在导入文件…'); renderWorkspace();
     try {
       const result = await (paths ? api.reimbursementImport({ ...target, paths }) : api.reimbursementChooseImport(target));
       if (result?.cancelled) { report('已取消添加。'); return; }
@@ -458,7 +506,7 @@
       const errors = Array.isArray(result?.report?.errors) ? result.report.errors : [];
       const lines = [];
       if (imported) lines.push(`${imported} 个已导入。`);
-      if (restored) lines.push(`已恢复 ${restored} 个文件到当前分类。`);
+      if (restored) lines.push(`已恢复 ${restored} 个文件到${purpose === 'itinerary' ? '行程单区' : '当前分类'}。`);
       if (imported || restored) lines.push('生成文件会自动更新。');
       else lines.push('本次没有新增或恢复文件。');
       if (duplicates) lines.push(`${duplicates} 个文件已在素材库中，本次未重复添加。`);
@@ -469,6 +517,11 @@
   }
   async function artifactAction(kind, method) {
     if (busy()) return;
+    if (method === 'open' && kind !== 'form') {
+      const artifact = state.workspace?.artifacts?.[kind];
+      if (artifact?.ready) window.MosaicReimbursementPreview.open({ request: { ...context(), assetId: artifact.assetId, pageNumber: 1 }, name: artifact.name, returnFocus: document.activeElement });
+      return;
+    }
     state.working = true; renderWorkspace();
     try {
       const request = { ...context(), kind };
@@ -477,19 +530,31 @@
     } catch (error) { report(error.message || String(error), true); }
     finally { state.working = false; renderWorkspace(); }
   }
+  async function exportAllArtifacts() {
+    if (busy() || !state.workspace?.artifacts?.form?.ready || state.workspace.state === 'generating') return;
+    const request = context(); state.exportingAll = request; state.working = true; report('正在准备并导出全部文件…'); renderWorkspace();
+    const active = () => state.exportingAll === request && state.open && request.folderId === state.folderId && request.libraryRoot === state.libraryRoot;
+    try {
+      const result = await api.reimbursementExportAll(request);
+      if (!active()) return;
+      if (result?.saved) { await loadWorkspace(false, false); if (active()) report(`已导出 ${Number(result.count) || 0} 个文件：${result.path || ''}`); }
+      else if (result?.cancelled) report('已取消导出。');
+    } catch (error) { if (active()) report(error.message || String(error), true); }
+    finally { if (state.exportingAll === request) { state.exportingAll = null; state.working = false; if (state.open && state.mode === 'workspace') renderWorkspace(); } }
+  }
   function handleDrop(event) {
     const files = [...(event.dataTransfer?.files || [])];
     if (!files.length && ![...(event.dataTransfer?.types || [])].includes('Files')) return;
     event.preventDefault(); event.stopImmediatePropagation();
-    const card = event.target.closest?.('.rb-category'), zone = event.target.closest?.('.rb-drop-zone') || card;
+    const card = event.target.closest?.('.rb-category'), itinerary = event.target.closest?.('#rb-itinerary'), zone = event.target.closest?.('.rb-drop-zone') || card;
     if (event.type === 'dragleave') { if (zone && !zone.contains(event.relatedTarget)) zone.classList.remove('is-drop-target'); return; }
-    const validTarget = card && (card.dataset.category !== 'supplement' || zone?.dataset.purpose);
+    const validTarget = itinerary ? state.workspace?.state !== 'generating' : card && (card.dataset.category !== 'supplement' || zone?.dataset.purpose);
     if (event.type === 'dragenter' || event.type === 'dragover') { if (event.dataTransfer) event.dataTransfer.dropEffect = validTarget && !busy() ? 'copy' : 'none'; if (validTarget && !busy()) zone.classList.add('is-drop-target'); return; }
     root.querySelectorAll('.is-drop-target').forEach(item => item.classList.remove('is-drop-target'));
     if (state.mode !== 'workspace' || busy()) return;
-    if (!card) { report('请将文件拖到对应的分类。'); return; }
-    if (!validTarget) { report('请拖到“补票发票”或“购买截图”区域。'); return; }
-    try { const paths = files.map(file => api.getFilePath(file)).filter(Boolean); if (paths.length) void importCategory(card.dataset.category, paths, zone.dataset.purpose || 'invoice'); }
+    if (!card && !itinerary) { report('请将文件拖到对应的分类或行程单区。'); return; }
+    if (!validTarget) { report(itinerary ? '正在处理文件，请稍候再添加行程单。' : '请拖到“补票发票”或“购买截图”区域。'); return; }
+    try { const paths = files.map(file => api.getFilePath(file)).filter(Boolean); if (paths.length) void importCategory(itinerary ? undefined : card.dataset.category, paths, itinerary ? 'itinerary' : zone.dataset.purpose || 'invoice'); }
     catch (error) { report(error.message || String(error), true); }
   }
   window.shituReimbursements = Object.freeze({ open, openSettings, isOpen: () => state.open });

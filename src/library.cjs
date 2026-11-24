@@ -336,10 +336,15 @@ class Library {
       assetIds.add(asset.id);
     }
     if (data.folders.some(folder => ReimbursementFolders.isRoot(folder) || 'reimbursement' in folder || 'reimbursementRootId' in folder || 'reimbursementCategory' in folder) ||
-        data.assets.some(asset => 'reimbursementGenerated' in asset || 'reimbursementSupplementInvoice' in asset || 'reimbursementAmounts' in asset)) {
+        data.assets.some(asset => 'reimbursementGenerated' in asset || 'reimbursementSupplementInvoice' in asset || 'reimbursementAmounts' in asset || 'reimbursementEvidenceAmounts' in asset)) {
       ReimbursementFolders.validate(data.folders, data.assets);
       const categories = ReimbursementFolders.categoryMap(data.folders);
-      for (const asset of data.assets) if (!IMAGE.has(asset.ext) && asset.ext !== 'pdf' && categories.get(asset.folderId) === 'supplement') throw new Error('补票分类只接受图片或 PDF');
+      const itineraryByFolder = new Map();
+      for (const asset of data.assets) if (!IMAGE.has(asset.ext) && asset.ext !== 'pdf') {
+        if (categories.get(asset.folderId) === 'supplement') throw new Error('补票分类只接受图片或 PDF');
+        if (!itineraryByFolder.has(asset.folderId)) itineraryByFolder.set(asset.folderId, Boolean(ReimbursementFolders.itineraryRootForFolder(data.folders, asset.folderId)));
+        if (itineraryByFolder.get(asset.folderId)) throw new Error('打车行程单只接受图片或 PDF');
+      }
     }
   }
 
@@ -455,7 +460,8 @@ class Library {
       const sourceMetadata = importMetadata(metadata);
       this._folder(folderId);
       const targetCategory = ReimbursementFolders.categoryForFolder(this.data.folders, folderId);
-      if (restoreTrashed && !targetCategory) throw new Error('仅能在有效的报销分类中恢复重复文件');
+      const targetItinerary = ReimbursementFolders.itineraryRootForFolder(this.data.folders, folderId);
+      if (restoreTrashed && !targetCategory && !targetItinerary) throw new Error('仅能在有效的报销分类或行程单目录中恢复重复文件');
       const report = { imported: 0, restored: 0, duplicates: 0, unsupported: [], errors: [], assetIds: [], restoredAssetIds: [], warnings: [] };
       if (modelPackage) report.existingAssets = [];
       const projectPreparations = [];
@@ -544,6 +550,7 @@ class Library {
           const asset = !active && matches.find(asset => asset.trashedAt && !asset.reimbursementGenerated && (IMAGE.has(asset.ext) || DOCUMENT.has(asset.ext)));
           if (asset) {
             if (targetCategory === 'supplement' && !IMAGE.has(asset.ext) && asset.ext !== 'pdf') throw new Error('补票分类只接受图片或 PDF');
+            if (targetItinerary && !IMAGE.has(asset.ext) && asset.ext !== 'pdf') throw new Error('打车行程单只接受图片或 PDF');
             await this._checkManagedParent(asset.filename);
             const original = path.join(this.root, asset.filename);
             const info = await fs.lstat(original).catch(error => { if (error.code === 'ENOENT') return null; throw error; });
@@ -564,6 +571,7 @@ class Library {
         try {
           const ext = path.extname(absolute).slice(1).toLowerCase();
           if (!IMAGE.has(ext) && ext !== 'pdf' && ReimbursementFolders.categoryForFolder(draft.folders, folderId) === 'supplement') throw new Error('补票分类只接受图片或 PDF');
+          if (!IMAGE.has(ext) && ext !== 'pdf' && targetItinerary) throw new Error('打车行程单只接受图片或 PDF');
           if (PROJECT.has(ext)) {
             projectPlan = projectPlans.get(absolute);
             const manifest = projectPlan.manifest;
@@ -1019,7 +1027,7 @@ class Library {
       if (ordered && !Number.isSafeInteger(sortOrder)) throw new Error('文件夹排序超出范围，请先调整同级顺序');
       const categoryIds = Object.fromEntries(ReimbursementFolders.CATEGORIES.map(category => [category.key, crypto.randomUUID()]));
       draft.folders.push({ id: folderId, name, parentId, createdAt: timestamp, kind: 'reimbursement',
-        ...(ordered ? { sortOrder } : {}), reimbursement: { version: 1, categoryIds, formAssetId: null, supplementPdfAssetId: null, invoicePdfAssetId: null, supplementInvoicePdfAssetId: null } });
+        ...(ordered ? { sortOrder } : {}), reimbursement: { version: 1, categoryIds, formAssetId: null, supplementPdfAssetId: null, invoicePdfAssetId: null, supplementInvoicePdfAssetId: null, itineraryFolderId: null, itineraryPdfAssetId: null } });
       for (const [index, category] of ReimbursementFolders.CATEGORIES.entries()) draft.folders.push({
         id: categoryIds[category.key], name: category.name, parentId: folderId, createdAt: timestamp, sortOrder: index,
         reimbursementRootId: folderId, reimbursementCategory: category.key
@@ -1069,6 +1077,30 @@ class Library {
     });
   }
 
+  ensureReimbursementItinerary(rootId) {
+    return this._mutate(async () => {
+      const root = this.data.folders.find(folder => folder.id === rootId);
+      if (!ReimbursementFolders.isRoot(root)) throw new Error('报销文件夹已不存在');
+      const existingId = root.reimbursement.itineraryFolderId;
+      if (existingId) {
+        const existing = this.data.folders.find(folder => folder.id === existingId);
+        if (!existing || existing.parentId !== rootId || ReimbursementFolders.isRoot(existing) || ReimbursementFolders.isCategory(existing)) throw new Error('打车行程单文件夹引用无效');
+        return { snapshot: this.snapshot(), folderId: existingId };
+      }
+      const siblings = FolderTree.children(this.data.folders, rootId), names = new Set(siblings.map(folder => folder.name));
+      let name = '打车行程单', suffix = 2;
+      while (names.has(name)) name = `打车行程单 ${suffix++}`;
+      const sortOrder = siblings.reduce((maximum, folder, index) => Math.max(maximum, folder.sortOrder ?? index), -1) + 1;
+      if (!Number.isSafeInteger(sortOrder)) throw new Error('文件夹排序超出范围，请先调整同级顺序');
+      const draft = clone(this.data), timestamp = now(), folderId = crypto.randomUUID();
+      draft.folders.push({ id: folderId, name, parentId: rootId, createdAt: timestamp, sortOrder });
+      const changedRoot = draft.folders.find(folder => folder.id === rootId);
+      changedRoot.reimbursement.itineraryFolderId = folderId; changedRoot.reimbursement.itineraryPdfSignature = null; changedRoot.updatedAt = timestamp;
+      await this._persist(draft);
+      return { snapshot: this.snapshot(), folderId };
+    });
+  }
+
   setReimbursementSupplementInvoice(ids, enabled) {
     return this._mutate(async () => {
       if (typeof enabled !== 'boolean') throw new Error('补票发票标记无效');
@@ -1109,6 +1141,24 @@ class Library {
     });
   }
 
+  setReimbursementEvidenceAmounts(assetId, value) {
+    return this._mutate(async () => {
+      const asset = this.data.assets.find(item => item.id === assetId);
+      if (!asset) throw new Error('素材不存在');
+      if (!IMAGE.has(asset.ext) || ReimbursementFolders.categoryForFolder(this.data.folders, asset.folderId) !== 'supplement' || ReimbursementFolders.isSupplementInvoice(asset)) throw new Error('只能记录补票分类中购买截图的显示金额');
+      const summary = ReimbursementFolders.reimbursementAmounts(value);
+      await this._checkManagedParent(asset.filename);
+      const filename = path.join(this.root, asset.filename), info = await fs.lstat(filename);
+      if (!info.isFile() || info.isSymbolicLink() || await hashFile(filename) !== summary.sourceHash) throw new Error('截图原件已变化，请重新识别后再保存金额');
+      const next = { ...asset, reimbursementEvidenceAmounts: summary };
+      if (sameField(asset, next, 'reimbursementEvidenceAmounts')) return this.snapshot();
+      const draft = clone(this.data);
+      Object.assign(draft.assets.find(item => item.id === assetId), { reimbursementEvidenceAmounts: summary, updatedAt: now() });
+      await this._persist(draft);
+      return this.snapshot();
+    });
+  }
+
   setReimbursementInvoiceOptions(rootId, options, scope = 'regular') {
     return this._mutate(async () => {
       const root = this.data.folders.find(folder => folder.id === rootId);
@@ -1134,6 +1184,20 @@ class Library {
       if ((root.reimbursement[fields.signature] ?? null) === value) return this.snapshot();
       const draft = clone(this.data), changedRoot = draft.folders.find(folder => folder.id === rootId);
       changedRoot.reimbursement[fields.signature] = value;
+      changedRoot.updatedAt = now();
+      await this._persist(draft);
+      return this.snapshot();
+    });
+  }
+
+  setReimbursementItinerarySignature(rootId, signature) {
+    return this._mutate(async () => {
+      const root = this.data.folders.find(folder => folder.id === rootId);
+      if (!ReimbursementFolders.isRoot(root)) throw new Error('报销文件夹已不存在');
+      const value = ReimbursementFolders.invoicePdfSignature(signature);
+      if ((root.reimbursement.itineraryPdfSignature ?? null) === value) return this.snapshot();
+      const draft = clone(this.data), changedRoot = draft.folders.find(folder => folder.id === rootId);
+      changedRoot.reimbursement.itineraryPdfSignature = value;
       changedRoot.updatedAt = now();
       await this._persist(draft);
       return this.snapshot();
@@ -1252,8 +1316,10 @@ class Library {
       if (!ReimbursementFolders.isRoot(root)) throw new Error('报销文件夹已不存在');
       const draft = clone(this.data), targetRoot = draft.folders.find(folder => folder.id === rootId);
       const asset = draft.assets.find(asset => asset.reimbursementGenerated?.rootId === rootId && asset.reimbursementGenerated?.kind === kind);
-      if ((targetRoot.reimbursement[pointer] ?? null) === null && (!asset || asset.trashedAt)) return this.snapshot();
+      const hasItinerarySignature = kind === 'itineraryPdf' && targetRoot.reimbursement.itineraryPdfSignature != null;
+      if ((targetRoot.reimbursement[pointer] ?? null) === null && (!asset || asset.trashedAt) && !hasItinerarySignature) return this.snapshot();
       targetRoot.reimbursement[pointer] = null; targetRoot.updatedAt = now();
+      if (kind === 'itineraryPdf') targetRoot.reimbursement.itineraryPdfSignature = null;
       if (asset) Object.assign(asset, { trashedAt: asset.trashedAt || now(), updatedAt: now() });
       await this._persist(draft);
       return this.snapshot();
@@ -1410,6 +1476,9 @@ class Library {
       const draft = clone(this.data);
       draft.folders = draft.folders.filter(folder => !removed.has(folder.id));
       for (const asset of draft.assets) if (removed.has(asset.folderId)) Object.assign(asset, { folderId: null, updatedAt: now() });
+      for (const folder of draft.folders) if (ReimbursementFolders.isRoot(folder) && removed.has(folder.reimbursement.itineraryFolderId)) {
+        folder.reimbursement.itineraryFolderId = null; folder.reimbursement.itineraryPdfSignature = null; folder.updatedAt = now();
+      }
       await this._persist(draft);
       return this.snapshot();
     });

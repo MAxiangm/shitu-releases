@@ -11,7 +11,8 @@ const DOCUMENT_KINDS = Object.freeze({
   form: Object.freeze({ extension: 'xlsx', pointer: 'formAssetId' }),
   supplementPdf: Object.freeze({ extension: 'pdf', pointer: 'supplementPdfAssetId' }),
   invoicePdf: Object.freeze({ extension: 'pdf', pointer: 'invoicePdfAssetId' }),
-  supplementInvoicePdf: Object.freeze({ extension: 'pdf', pointer: 'supplementInvoicePdfAssetId' })
+  supplementInvoicePdf: Object.freeze({ extension: 'pdf', pointer: 'supplementInvoicePdfAssetId' }),
+  itineraryPdf: Object.freeze({ extension: 'pdf', pointer: 'itineraryPdfAssetId' })
 });
 const INVOICE_IMAGES_PER_PAGE = Object.freeze([1, 2, 3, 4, 6, 8, 9]);
 const DEFAULT_INVOICE_PDF_OPTIONS = Object.freeze({ imagesPerPage: 2 });
@@ -82,6 +83,18 @@ function categoryForFolder(folders, id) {
     if (isRoot(current)) return null;
     seen.add(current.id);
     current = byId.get(current.parentId);
+  }
+  return null;
+}
+
+function itineraryRootForFolder(folders, id) {
+  const root = findRoot(folders, id), itineraryId = root?.reimbursement?.itineraryFolderId;
+  if (!itineraryId) return null;
+  const byId = new Map(folders.map(folder => [folder.id, folder])), seen = new Set();
+  let current = byId.get(id);
+  while (current && current.id !== root.id && !seen.has(current.id)) {
+    if (current.id === itineraryId) return root;
+    seen.add(current.id); current = byId.get(current.parentId);
   }
   return null;
 }
@@ -159,7 +172,7 @@ function validate(folders, assets) {
       const value = folder.reimbursement;
       if (hasCategory || !validId(folder.id) || !plain(value) || value.version !== 1 ||
           Object.keys(value).some(key => !['version', 'categoryIds', 'formAssetId', 'supplementPdfAssetId', 'invoicePdfAssetId', 'invoicePdfOptions', 'invoicePdfSignature',
-            'supplementInvoicePdfAssetId', 'supplementInvoicePdfOptions', 'supplementInvoicePdfSignature'].includes(key)) ||
+            'supplementInvoicePdfAssetId', 'supplementInvoicePdfOptions', 'supplementInvoicePdfSignature', 'itineraryFolderId', 'itineraryPdfAssetId', 'itineraryPdfSignature'].includes(key)) ||
           !plain(value.categoryIds) || Object.keys(value.categoryIds).length > MAX_CATEGORIES) throw new Error('报销文件夹配置无效');
       for (const scope of ['regular', 'supplement']) {
         const fields = invoicePdfFields(scope);
@@ -169,6 +182,7 @@ function validate(folders, assets) {
         }
         if (Object.hasOwn(value, fields.signature)) invoicePdfSignature(value[fields.signature]);
       }
+      if (Object.hasOwn(value, 'itineraryPdfSignature')) invoicePdfSignature(value.itineraryPdfSignature);
       const ids = new Set();
       for (const [key, id] of Object.entries(value.categoryIds)) {
         const child = byId.get(id);
@@ -177,10 +191,16 @@ function validate(folders, assets) {
         categoryName(child.name);
         ids.add(id);
       }
+      const itineraryId = value.itineraryFolderId === undefined ? null : value.itineraryFolderId;
+      if (itineraryId !== null) {
+        const itinerary = byId.get(itineraryId);
+        if (!validId(itineraryId) || ids.has(itineraryId) || !itinerary || itinerary.parentId !== folder.id ||
+            isRoot(itinerary) || isCategory(itinerary)) throw new Error('打车行程单文件夹引用无效');
+      }
       for (const [kind, { pointer, extension }] of Object.entries(DOCUMENT_KINDS)) {
         // Existing v1 roots predate merged invoice PDFs. Reading them must not
         // mutate the index just to materialize a missing optional pointer.
-        const id = ['invoicePdf', 'supplementInvoicePdf'].includes(kind) && value[pointer] === undefined ? null : value[pointer];
+        const id = ['invoicePdf', 'supplementInvoicePdf', 'itineraryPdf'].includes(kind) && value[pointer] === undefined ? null : value[pointer];
         if (id !== null && !validId(id)) throw new Error('报销文档引用无效');
         const asset = assetsById.get(id);
         // Deleted documents can be regenerated. A pointer may never take over
@@ -202,6 +222,10 @@ function validate(folders, assets) {
       if (!IMAGE.has(asset.ext) && asset.ext !== 'pdf') throw new Error('报销金额素材类型无效');
       reimbursementAmounts(asset.reimbursementAmounts);
     }
+    if (Object.hasOwn(asset, 'reimbursementEvidenceAmounts')) {
+      if (!IMAGE.has(asset.ext)) throw new Error('购买截图金额素材类型无效');
+      reimbursementAmounts(asset.reimbursementEvidenceAmounts);
+    }
     if (!Object.hasOwn(asset, 'reimbursementGenerated')) continue;
     const value = asset.reimbursementGenerated;
     if (!plain(value) || Object.keys(value).length !== 2 || !validId(value.rootId) || !Object.hasOwn(DOCUMENT_KINDS, value.kind) || asset.ext !== DOCUMENT_KINDS[value.kind].extension) throw new Error('报销生成文档信息无效');
@@ -217,4 +241,4 @@ function validate(folders, assets) {
 
 module.exports = { CATEGORIES, MAX_CATEGORIES, CATEGORY_KEY, DOCUMENT_KINDS, INVOICE_IMAGES_PER_PAGE, DEFAULT_INVOICE_PDF_OPTIONS, MAX_AMOUNT_CENTS,
   invoicePdfOptions, invoicePdfSignature, invoicePdfFields, reimbursementAmounts, isSupplementInvoice,
-  categoryName, normalizeCategories, listCategories, isRoot, isCategory, findRoot, categoryForFolder, categoryMap, documentKind, validate };
+  categoryName, normalizeCategories, listCategories, isRoot, isCategory, findRoot, categoryForFolder, itineraryRootForFolder, categoryMap, documentKind, validate };

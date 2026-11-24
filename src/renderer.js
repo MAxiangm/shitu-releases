@@ -3396,16 +3396,21 @@ function renderWindowState(snapshot) {
   const expanded = snapshot?.maximized === true || snapshot?.fullScreen === true;
   document.documentElement.toggleAttribute('data-custom-window', custom);
   document.documentElement.toggleAttribute('data-window-maximized', custom && expanded);
+  document.documentElement.toggleAttribute('data-window-always-on-top', snapshot?.alwaysOnTop === true);
   $('windowControls').hidden = !custom;
   const label = expanded ? '还原窗口' : '最大化窗口';
   $('windowMaximize').setAttribute('aria-label', label);
   $('windowMaximize').title = label;
+  const pinned = snapshot?.alwaysOnTop === true;
+  $('windowPin').setAttribute('aria-pressed', String(pinned));
+  $('windowPin').setAttribute('aria-label', pinned ? '取消窗口置顶' : '窗口置顶');
+  $('windowPin').title = pinned ? '取消窗口置顶（当前已置顶）' : '窗口置顶（当前未置顶）';
 }
 if (api.windowState && api.windowCommand) {
   let stateRevision = 0;
   api.onWindowState?.(snapshot => { stateRevision++; renderWindowState(snapshot); });
   api.windowState().then(snapshot => { if (!stateRevision) renderWindowState(snapshot); }).catch(messageError);
-  for (const [id, command] of [['windowMinimize', 'minimize'], ['windowMaximize', 'toggle-maximize'], ['windowClose', 'close']]) {
+  for (const [id, command] of [['windowPin', 'toggle-always-on-top'], ['windowMinimize', 'minimize'], ['windowMaximize', 'toggle-maximize'], ['windowClose', 'close']]) {
     $(id).addEventListener('click', () => { void run(() => api.windowCommand(command)); });
   }
 }

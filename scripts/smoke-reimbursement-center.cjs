@@ -30,7 +30,16 @@ async function electronTest({ app, BrowserWindow }, options) {
     await js(async () => window.shituReimbursements.open({ folderId: 'case-1', libraryRoot: 'C:\\fixture-library' }));
     assert(await js(() => document.querySelectorAll('.rb-category').length === 5 && [...document.querySelectorAll('.rb-category h3')].map(x => x.textContent).join(',') === '出行,设备,会员,其他,补票'), 'Five reimbursement categories missing');
     assert(await js(() => document.querySelector('[data-artifact="form"] button').disabled === false && document.querySelector('[data-artifact="supplementPdf"] button').disabled === true), 'Initial output readiness incorrect');
-    assert(await js(() => document.querySelectorAll('.rb-output-card').length === 4 && document.querySelector('#rb-merge-invoices').disabled && document.querySelector('#rb-merge-supplement-invoices').disabled), 'Empty merged-invoice PDF card missing or enabled');
+    assert(await js(() => document.querySelectorAll('.rb-output-card').length === 5 && document.querySelector('#rb-merge-invoices').disabled && document.querySelector('#rb-merge-supplement-invoices').disabled && document.querySelector('[data-artifact="itineraryPdf"] button').disabled), 'Empty PDF cards missing or enabled');
+    assert(await js(() => document.querySelector('#rb-itinerary') && !document.querySelector('#rb-itinerary').closest('.rb-category') && !document.querySelector('#rb-export-all').disabled), 'Independent itinerary area or empty-itinerary export-all action missing');
+    await js(() => { window.nextExportAll = 'cancel'; }); await click('#rb-export-all');
+    assert(await js(() => document.querySelector('#rb-notice').textContent === '已取消导出。' && !document.querySelector('#rb-export-all').disabled), 'Export-all cancellation left the workspace busy');
+    await js(() => { window.nextExportAll = 'error'; }); await click('#rb-export-all');
+    assert(await js(() => document.querySelector('#rb-notice').classList.contains('rb-error') && document.querySelector('#rb-notice').textContent.includes('导出目录不可写')), 'Export-all failure was not reported');
+    await js(() => { window.nextExportAll = 'pending'; }); await click('#rb-export-all');
+    assert(await js(() => document.querySelector('#rb-export-all').disabled && document.querySelector('#rb-notice').textContent.includes('正在准备并导出全部文件')), 'Export-all is not guarded while preparing');
+    await js(() => { document.querySelector('#rb-export-all').click(); window.completeExportAll(); }); await pause();
+    assert(await js(() => window.exportAllRequests.length === 3 && document.querySelector('#rb-notice').textContent.includes('已导出 1 个文件') && window.exportAllRequests.at(-1).folderId === 'case-1'), 'Empty optional itinerary blocked export-all or double click duplicated it');
     assert(await js(() => document.querySelector('.rb-workspace-bar').textContent.includes('公司名称：测试公司名称')), 'Saved company name missing from workspace summary');
     checks.push('Blank profile settings preserve company and four prior fields, including account leading zeros');
 
@@ -45,9 +54,10 @@ async function electronTest({ app, BrowserWindow }, options) {
     }); await pause();
     assert(await js(() => window.globalDrops === 0 && window.dropRequests[0].category === 'supplement' && window.dropRequests[0].purpose === 'evidence' && window.dropRequests[0].paths[0].endsWith('购买截图.png')), 'Native file drop bubbled into generic import or wrong category');
     assert(await js(() => !document.querySelector('[data-artifact="supplementPdf"] button').disabled && document.querySelector('[data-category="supplement"]').textContent.includes('购买截图.png')), 'Supplement screenshot import did not update PDF readiness');
-    await click('[data-artifact="form"] button');
+    await click('[data-artifact="form"] .rb-output-actions button');
     await click('[data-artifact="supplementPdf"] button');
-    assert(await js(() => window.openRequests.map(x => x.kind).join(',') === 'form,supplementPdf'), 'Wrong artifact open requests');
+    assert(await js(() => window.openRequests.map(x => x.kind).join(',') === 'form' && window.previewRequests.at(-1).assetId === 'pdf-1'), 'Wrong artifact preview requests');
+    await click('#rb-preview-close');
     await click('[data-artifact="supplementPdf"] button:last-child');
     assert(await js(() => window.exportRequests[0].kind === 'supplementPdf' && document.querySelector('#rb-notice').textContent.includes('补票截图.pdf')), 'PDF export not surfaced');
     await screenshot('workspace');
@@ -65,8 +75,8 @@ async function electronTest({ app, BrowserWindow }, options) {
     assert(await js(() => window.mergeRequests[0].imagesPerPage === 4 && window.mergeRequests[0].folderId === 'case-1' && document.querySelector('#rb-merge-invoices').disabled && document.querySelector('#rb-invoice-per-page').disabled), 'Merge request settings or busy guards wrong');
     await js(() => window.completeInvoiceMerge()); await pause();
     assert(await js(() => !document.querySelector('[data-invoice-action="open"]').disabled && document.querySelector('#rb-merge-invoices').textContent === '重新合并'), 'Merged invoice output not ready');
-    await click('[data-invoice-action="open"]'); await click('[data-invoice-action="export"]');
-    assert(await js(() => window.openRequests.at(-1).kind === 'invoicePdf' && window.exportRequests.at(-1).kind === 'invoicePdf'), 'Merged invoice preview/export use wrong artifact kind');
+    await click('[data-invoice-action="open"]'); await click('#rb-preview-close'); await click('[data-invoice-action="export"]');
+    assert(await js(() => window.previewRequests.at(-1).assetId === 'invoice-merged' && window.exportRequests.at(-1).kind === 'invoicePdf'), 'Merged invoice preview/export use wrong artifact kind');
     await js(() => { const select = document.querySelector('#rb-invoice-per-page'); select.value = '2'; select.dispatchEvent(new Event('change')); });
     assert(await js(() => document.querySelector('[data-invoice-action="open"]').disabled && document.querySelector('[data-artifact="invoicePdf"]').textContent.includes('排版已更改')), 'Changed page density left old PDF enabled');
     await js(() => { window.delayInvoiceMerge = false; window.failInvoiceMerge = true; }); await click('#rb-merge-invoices');
@@ -76,13 +86,13 @@ async function electronTest({ app, BrowserWindow }, options) {
     assert(await js(() => document.querySelector('[data-invoice-action="open"]').disabled && document.querySelector('[data-invoice-action="export"]').disabled && document.querySelector('[data-artifact="invoicePdf"]').textContent.includes('发票已变化')), 'Backend stale state left old PDF enabled');
     await screenshot('merged-invoices');
     checks.push('Merged invoice PDF excludes supplement, reports unsupported files, guards layout/stale state and handles merge failures');
-    assert(await js(() => document.querySelectorAll('[data-amount-asset]').length === 1 && document.querySelector('#rb-amount-total').textContent.includes('10.00')), 'Purchase screenshots were included in invoice amount rows or total');
+    assert(await js(() => document.querySelectorAll('#rb-amount-review [data-amount-asset]').length === 1 && document.querySelector('#rb-amount-total').textContent.includes('10.00')), 'Purchase screenshots were included in invoice amount rows or total');
     await js(() => { window.nextPending = true; window.nextPageCount = 2; });
     await click('[data-category="supplement"] [data-purpose="invoice"] .rb-text-button');
     assert(await js(() => {
       window.pendingAsset = window.lastAddedId;
       const total = document.querySelector('#rb-amount-total').textContent;
-      return window.chooseRequests.at(-1).purpose === 'invoice' && total.includes('已识别小计') && total.includes('待核对 2') && !total.includes('报销总额') && document.querySelectorAll('[data-amount-asset]').length === 3;
+      return window.chooseRequests.at(-1).purpose === 'invoice' && total.includes('已识别小计') && total.includes('待核对 2') && !total.includes('报销总额') && document.querySelectorAll('#rb-amount-review [data-amount-asset]').length === 3;
     }), 'Supplement invoice pages not counted as pending or subtotal mislabeled as final total');
     assert(await js(() => document.querySelector('#rb-refresh-workspace').textContent.includes('重试识别')), 'Missing retry recognition action');
     await click('#rb-refresh-workspace');
@@ -96,15 +106,104 @@ async function electronTest({ app, BrowserWindow }, options) {
     assert(await js(() => window.amountRequests.at(-1).amount === '0.00' && window.amountRequests.at(-1).excluded === false && document.querySelector('#rb-amount-total').textContent.includes('22.34')), 'Explicit zero failed to restore excluded invoice page');
     await js(() => { const select = document.querySelector('#rb-supplement-invoice-per-page'); select.value = '6'; select.dispatchEvent(new Event('change')); });
     await click('#rb-merge-supplement-invoices');
-    await click('[data-supplement-invoice-action="open"]'); await click('[data-supplement-invoice-action="export"]');
-    assert(await js(() => window.mergeRequests.at(-1).scope === 'supplement' && window.mergeRequests.at(-1).imagesPerPage === 6 && window.openRequests.at(-1).kind === 'supplementInvoicePdf' && window.exportRequests.at(-1).kind === 'supplementInvoicePdf' && document.querySelector('#rb-invoice-per-page').value === '2'), 'Supplement invoice merge scope or independent layout/artifact wrong');
+    await click('[data-supplement-invoice-action="open"]'); await click('#rb-preview-close'); await click('[data-supplement-invoice-action="export"]');
+    assert(await js(() => window.mergeRequests.at(-1).scope === 'supplement' && window.mergeRequests.at(-1).imagesPerPage === 6 && window.previewRequests.at(-1).assetId === 'invoice-merged' && window.exportRequests.at(-1).kind === 'supplementInvoicePdf' && document.querySelector('#rb-invoice-per-page').value === '2'), 'Supplement invoice merge scope or independent layout/artifact wrong');
     assert(await js(() => new Set([...document.querySelectorAll('[id]')].map(item => item.id)).size === document.querySelectorAll('[id]').length), 'Invoice and supplement cards have duplicate IDs');
     await js(() => document.querySelector('#rb-amount-review').scrollIntoView({ block: 'start' })); await screenshot('amount-review');
     await js(() => { document.querySelector('#rb-content').scrollTop = 0; });
     checks.push('Pending subtotals, per-page amount review/exclusion/zero and independent supplement invoice merge');
 
+    assert(await js(() => {
+      window.evidenceAmountAsset = document.querySelector('#rb-evidence-amount-review [data-amount-asset]').dataset.amountAsset;
+      return document.querySelector('#rb-evidence-amount-review h3').textContent === '购买截图金额（不计入报销）' && document.querySelectorAll('#rb-evidence-amount-review [data-amount-asset]').length === 1 && document.querySelector('#rb-evidence-amount-total').textContent.includes('10.00 元') && document.querySelector('[data-evidence-difference="supplement"]').textContent.includes('0.00 元');
+    }), 'Screenshot reference amounts were missing, mixed with invoices, or produced a negative supplement difference');
+    await js(() => { const input = document.querySelector('#rb-evidence-amount-review input'); input.value = '50'; input.dispatchEvent(new Event('input')); document.querySelector('#rb-evidence-amount-review [data-amount-save]').click(); }); await pause();
+    assert(await js(() => window.amountRequests.at(-1).purpose === 'evidence' && window.amountRequests.at(-1).amount === '50.00' && document.querySelector('#rb-amount-total').textContent.includes('22.34') && document.querySelector('[data-evidence-totals="supplement"]').textContent.includes('已有补票发票合计：12.34 元') && document.querySelector('[data-evidence-difference="supplement"]').textContent.includes('37.66 元')), 'Manual screenshot amount changed reimbursement totals or supplement reference difference is wrong');
+    await js(() => { window.markAmountPending(window.evidenceAmountAsset, 'evidence'); }); await pause(); await pause();
+    assert(await js(() => document.querySelector('#rb-refresh-workspace').textContent.includes('重试识别') && document.querySelector('[data-evidence-difference="supplement"]').textContent.includes('待核对后计算') && document.querySelector('#rb-amount-total').textContent.includes('报销总额 ¥22.34')), 'Screenshot pending state hid retry or was mistaken for a final difference/reimbursement pending amount');
+    await js(() => { const input = document.querySelector('#rb-evidence-amount-review input'); input.value = '40'; input.dispatchEvent(new Event('input')); document.querySelector('#rb-evidence-amount-review [data-amount-save]').click(); }); await pause();
+    await js(() => window.markAmountPending(window.pendingAsset, 'invoice', 2)); await pause(); await pause();
+    assert(await js(() => document.querySelector('[data-evidence-difference="supplement"]').textContent.includes('待核对后计算') && document.querySelector('#rb-amount-total').textContent.includes('待核对 1')), 'Unconfirmed supplement invoice amount produced a supposedly complete difference');
+    await js(() => { const row = document.querySelector(`#rb-amount-review [data-amount-asset="${window.pendingAsset}"][data-amount-page="2"]`); row.querySelector('input').value = '0'; row.querySelector('input').dispatchEvent(new Event('input')); row.querySelector('[data-amount-save]').click(); }); await pause();
+    await click('#rb-evidence-amount-review [data-amount-exclude]');
+    assert(await js(() => window.amountRequests.at(-1).purpose === 'evidence' && window.amountRequests.at(-1).excluded === true && document.querySelector('#rb-evidence-amount-review [data-amount-save]').textContent === '恢复参考金额' && document.querySelector('#rb-evidence-amount-review [data-amount-exclude]').textContent === '已忽略' && document.querySelector('#rb-amount-total').textContent.includes('22.34') && document.querySelector('[data-evidence-difference="supplement"]').textContent.includes('0.00 元')), 'Ignoring a screenshot amount used invoice wording or changed reimbursement totals');
+    await js(() => { const input = document.querySelector('#rb-evidence-amount-review input'); input.value = '0'; input.dispatchEvent(new Event('input')); document.querySelector('#rb-evidence-amount-review [data-amount-save]').click(); }); await pause();
+    assert(await js(() => window.amountRequests.at(-1).purpose === 'evidence' && window.amountRequests.at(-1).amount === '0.00' && !window.amountRequests.at(-1).excluded && document.querySelector('#rb-evidence-amount-total').textContent.includes('0.00 元')), 'Zero screenshot reference could not be restored');
+    await js(() => { const row = document.querySelector(`#rb-amount-review [data-amount-asset="${window.pendingAsset}"][data-amount-page="1"]`); row.querySelector('input').value = '88.88'; row.querySelector('input').dispatchEvent(new Event('input')); window.changeInvoicePurpose(window.pendingAsset, 'evidence'); }); await pause(); await pause();
+    assert(await js(() => document.querySelector(`#rb-evidence-amount-review [data-amount-asset="${window.pendingAsset}"][data-amount-page="1"] input`).value !== '88.88'), 'An invoice draft leaked into screenshot reference amounts');
+    await js(() => { const input = document.querySelector(`#rb-evidence-amount-review [data-amount-asset="${window.pendingAsset}"][data-amount-page="1"] input`); input.value = '99.99'; input.dispatchEvent(new Event('input')); window.changeInvoicePurpose(window.pendingAsset, 'invoice'); }); await pause(); await pause();
+    assert(await js(() => document.querySelector(`#rb-amount-review [data-amount-asset="${window.pendingAsset}"][data-amount-page="1"] input`).value === '88.88'), 'Screenshot draft overwrote the invoice draft for the same asset and page');
+    await js(() => { const input = document.querySelector(`#rb-amount-review [data-amount-asset="${window.pendingAsset}"][data-amount-page="1"] input`); input.value = '12.34'; input.dispatchEvent(new Event('input')); const evidenceInput = document.querySelector('#rb-evidence-amount-review input'); evidenceInput.value = '75'; evidenceInput.dispatchEvent(new Event('input')); window.failEvidenceAmount = true; document.querySelector('#rb-evidence-amount-review [data-amount-save]').click(); }); await pause();
+    assert(await js(() => document.querySelector('#rb-notice').textContent.includes('参考金额保存失败') && document.querySelector('#rb-evidence-amount-review input').value === '75' && document.querySelector('#rb-amount-total').textContent.includes('22.34')), 'Reference save failure lost the draft or changed invoice total');
+    await click('#rb-evidence-amount-review [data-amount-save]');
+    assert(await js(() => document.querySelector('#rb-evidence-amount-total').textContent.includes('75.00 元') && document.querySelector('[data-evidence-difference="supplement"]').textContent.includes('62.66 元') && document.querySelector('#rb-notice').textContent.includes('不计入报销总额')), 'Reference amount retry or supplement shortfall calculation failed');
+    await js(() => document.querySelector('#rb-evidence-amount-review').scrollIntoView({ block: 'start' })); await screenshot('evidence-amount-review');
+    checks.push('Screenshot reference amounts stay separate from reimbursement totals, support pending/manual/ignore/zero, isolate drafts and calculate confirmed supplement shortfalls');
+
+    await click('#rb-add-itinerary');
+    assert(await js(() => { window.itineraryPdfId = window.lastAddedId; return window.chooseRequests.at(-1).purpose === 'itinerary' && !Object.hasOwn(window.chooseRequests.at(-1), 'category') && document.querySelector('#rb-itinerary [data-file-id]') && document.querySelector('#rb-amount-total').textContent.includes('22.34') && !document.querySelector(`[data-amount-asset="${window.itineraryPdfId}"]`); }), 'Itinerary PDF did not import independently or was included in amounts');
+    await js(() => {
+      window.nextFileExt = 'png'; const data = new DataTransfer(); data.items.add(new File(['fixture'], '打车行程截图.png', { type: 'image/png' }));
+      document.querySelector('#rb-itinerary').dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: data }));
+    }); await pause();
+    assert(await js(() => { window.itineraryImageId = window.lastAddedId; return window.globalDrops === 0 && window.dropRequests.at(-1).purpose === 'itinerary' && !Object.hasOwn(window.dropRequests.at(-1), 'category') && document.querySelectorAll('#rb-itinerary [data-file-id]').length === 2 && !document.querySelector('[data-artifact="itineraryPdf"] button').disabled && !document.querySelector(`[data-amount-asset="${window.itineraryImageId}"]`) && document.querySelector('#rb-evidence-amount-total').textContent.includes('75.00 元'); }), 'Itinerary image drop was routed twice, mixed with screenshots or did not enable automatic PDF');
+    assert(await js(() => [...document.querySelectorAll('.rb-file-name,.rb-amount-info>.rb-preview-name')].every(item => item.tagName === 'BUTTON' && item.dataset.previewKey)), 'Not all reimbursement filenames are preview buttons');
+    await js(() => {
+      const row = document.querySelector(`[data-amount-asset="${window.pendingAsset}"][data-amount-page="2"]`);
+      row.querySelector('input').value = '66.66'; row.querySelector('input').dispatchEvent(new Event('input'));
+      row.scrollIntoView({ block: 'center' }); window.previewScroll = document.querySelector('#rb-content').scrollTop;
+      row.querySelector('.rb-preview-name').click();
+    }); await pause();
+    assert(await js(() => window.MosaicReimbursementPreview.isOpen() && window.previewRequests.at(-1).assetId === window.pendingAsset && window.previewRequests.at(-1).pageNumber === 2 && document.querySelector('#rb-preview-image').complete && document.querySelector('#rb-preview-image').naturalWidth > 0), 'Amount filename did not load the corresponding PDF page');
+    await click('#rb-preview-previous');
+    assert(await js(() => window.previewRequests.at(-1).pageNumber === 1), 'PDF previous page was not requested');
+    await click('#rb-preview-next'); await click('#rb-preview-zoom');
+    await screenshot('filename-pdf-preview');
+    await js(() => document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })));
+    assert(await js(() => !window.MosaicReimbursementPreview.isOpen() && window.shituReimbursements.isOpen() && document.querySelector(`[data-amount-asset="${window.pendingAsset}"][data-amount-page="2"] input`).value === '66.66' && Math.abs(document.querySelector('#rb-content').scrollTop - window.previewScroll) < 2 && document.activeElement.dataset.previewKey === `amount:invoice:${window.pendingAsset}:2`), 'Closing preview lost amount draft, scroll, focus or closed the entire workspace');
+    await js(() => { const row = document.querySelector(`[data-amount-asset="${window.pendingAsset}"][data-amount-page="2"]`); row.querySelector('input').value = '0'; row.querySelector('input').dispatchEvent(new Event('input')); });
+    await click('#rb-evidence-amount-review .rb-preview-name');
+    assert(await js(() => window.previewRequests.at(-1).assetId === window.evidenceAmountAsset && window.previewRequests.at(-1).pageNumber === 1), 'Screenshot amount filename opened a different file');
+    assert(await js(() => { const image = document.querySelector('#rb-preview-image').getBoundingClientRect(), stage = document.querySelector('.rb-preview-stage').getBoundingClientRect(); return image.width > 0 && image.height > 0 && image.left >= stage.left && image.right <= stage.right && image.top >= stage.top && image.bottom <= stage.bottom; }), 'Fit-to-window preview overflowed its viewport');
+    await screenshot('filename-screenshot-preview'); await click('#rb-preview-close');
+    await click('#rb-itinerary .rb-file-name');
+    assert(await js(() => window.previewRequests.at(-1).assetId === window.itineraryPdfId), 'Itinerary filename opened a different file');
+    await click('#rb-preview-close');
+    await click('[data-category="membership"] .rb-file-name');
+    assert(await js(() => window.MosaicReimbursementPreview.isOpen() && !window.sourceOpenRequests.length && !document.querySelector('#rb-preview-open-source').disabled), 'Office attachment opened externally without the explicit action');
+    await click('#rb-preview-open-source');
+    assert(await js(() => window.sourceOpenRequests.length === 1), 'Office preview did not expose the default-app action');
+    await click('#rb-preview-close');
+    await js(() => { window.failPreview = true; }); await click('#rb-itinerary .rb-file-name');
+    assert(await js(() => document.querySelector('#rb-preview-status').textContent.includes('预览读取失败')), 'Preview read failure was not displayed');
+    await click('#rb-preview-retry');
+    assert(await js(() => document.querySelector('#rb-preview-image').naturalWidth > 0), 'Failed preview could not be retried');
+    await click('#rb-preview-close');
+    await js(() => { window.delayPreview = true; }); await click('#rb-itinerary .rb-file-name');
+    await click('#rb-preview-close'); await js(() => window.completePreview()); await pause();
+    assert(await js(() => !window.MosaicReimbursementPreview.isOpen() && !document.querySelector('#rb-preview-image').getAttribute('src')), 'Late preview response reopened a closed preview');
+    checks.push('All filenames preview in-place; PDF page navigation, screenshot and itinerary previews, Office fallback, retry, late-response cancellation and draft/scroll/focus preservation');
+    await click('[data-artifact="itineraryPdf"] button'); await click('#rb-preview-close'); await click('[data-artifact="itineraryPdf"] .rb-output-actions button:last-child');
+    assert(await js(() => window.previewRequests.at(-1).assetId === 'itinerary-pdf' && window.exportRequests.at(-1).kind === 'itineraryPdf'), 'Itinerary preview/export uses another artifact');
+    await js(() => window.markItineraryStale()); await pause();
+    assert(await js(() => [...document.querySelectorAll('[data-artifact="itineraryPdf"] button')].every(button => button.disabled) && document.querySelector('[data-artifact="itineraryPdf"]').textContent.includes('行程单已变化') && !document.querySelector('#rb-export-all').disabled), 'Stale itinerary enabled old PDF actions or blocked automatic export-all');
+    await click('#rb-export-all');
+    assert(await js(() => document.querySelector('#rb-notice').textContent.includes('已导出 5 个文件') && document.querySelector('#rb-notice').textContent.includes('独立报销目录') && !document.querySelector('[data-artifact="itineraryPdf"] button').disabled && document.querySelector('#rb-amount-total').textContent.includes('22.34')), 'Export-all did not refresh generated artifacts or changed reimbursement amounts');
+    window.setSize(1000, 720);
+    await js(() => document.querySelector('#rb-itinerary').scrollIntoView({ block: 'center' })); await screenshot('itinerary-small');
+    assert(await js(() => { const section = document.querySelector('#rb-itinerary').getBoundingClientRect(); return section.left >= 0 && section.right <= innerWidth && [...document.querySelectorAll('#rb-itinerary button')].every(button => button.getBoundingClientRect().right <= innerWidth); }), 'Itinerary controls overflow the small window');
+    await js(() => document.querySelector('#rb-export-all').scrollIntoView({ block: 'center' })); await screenshot('export-all-small');
+    window.setSize(1440, 900);
+    await js(() => { document.querySelector(`[data-remove-file="${window.itineraryPdfId}"]`).click(); document.querySelector(`[data-cancel-remove-file="${window.itineraryPdfId}"]`).click(); }); await pause();
+    assert(await js(() => document.querySelectorAll('#rb-itinerary [data-file-id]').length === 2), 'Cancelling itinerary deletion removed a file');
+    await js(() => { document.querySelector(`[data-remove-file="${window.itineraryPdfId}"]`).click(); document.querySelector(`[data-confirm-remove-file="${window.itineraryPdfId}"]`).click(); }); await pause();
+    assert(await js(() => window.removeRequests.at(-1).purpose === 'itinerary' && window.removeRequests.at(-1).category === 'itinerary' && document.querySelectorAll('#rb-itinerary [data-file-id]').length === 1), 'Itinerary removal used the invoice category path');
+    await js(() => { document.querySelector(`[data-remove-file="${window.itineraryImageId}"]`).click(); document.querySelector(`[data-confirm-remove-file="${window.itineraryImageId}"]`).click(); }); await pause();
+    assert(await js(() => !document.querySelector('#rb-itinerary [data-file-id]') && document.querySelector('[data-artifact="itineraryPdf"] button').disabled && document.querySelector('[data-artifact="itineraryPdf"]').textContent.includes('待添加打车行程单') && !document.querySelector('#rb-export-all').disabled), 'Empty itinerary did not clear its PDF or disabled export-all');
+    checks.push('Independent image/PDF itinerary import, safe deletion and stale PDF handling; export-all supports empty optionals, cancellation, errors and refreshed five-artifact bundles');
+
     await js(() => window.emitState('generating', '正在更新补票截图')); await pause();
-    assert(await js(() => [...document.querySelectorAll('.rb-output-card button,[data-remove-file]')].every(button => button.disabled) && document.querySelector('#rb-refresh-workspace').disabled), 'Stale artifacts, deletion or retry enabled during generation');
+    assert(await js(() => [...document.querySelectorAll('.rb-output-card button,[data-remove-file],#rb-export-all,#rb-add-itinerary')].every(button => button.disabled) && document.querySelector('#rb-refresh-workspace').disabled), 'Stale artifacts, deletion, export-all or itinerary import enabled during generation');
     await click('#rb-cancel-processing');
     assert(await js(() => window.cancelRequests.at(-1).folderId === 'case-1'), 'Cancel current processing did not target workspace');
     await js(() => window.emitState('idle', '已更新生成文件')); await pause();
@@ -123,12 +222,16 @@ async function electronTest({ app, BrowserWindow }, options) {
     assert(await js(() => { const content = document.querySelector('#rb-content'); return content.getBoundingClientRect().right <= innerWidth && content.scrollHeight >= content.clientHeight && [...document.querySelectorAll('.rb-category')].every(card => card.getBoundingClientRect().right <= innerWidth); }), 'Small workspace cannot scroll to outputs');
     await js(() => { const content = document.querySelector('#rb-content'); content.scrollTop = content.scrollHeight; }); await screenshot('merged-invoices-small');
     assert(await js(() => { const card = document.querySelector('[data-artifact="invoicePdf"]').getBoundingClientRect(); return card.left >= 0 && card.right <= innerWidth && document.querySelector('#rb-merge-invoices').getBoundingClientRect().bottom <= innerHeight; }), 'Merged invoice controls inaccessible in small window');
+    await js(() => document.querySelector('#rb-evidence-amount-review').scrollIntoView({ block: 'start' })); await screenshot('evidence-amount-review-small');
+    assert(await js(() => { const section = document.querySelector('#rb-evidence-amount-review'), bounds = section.getBoundingClientRect(); return bounds.left >= 0 && bounds.right <= innerWidth && [...section.querySelectorAll('input,button')].every(item => { const rect = item.getBoundingClientRect(); return rect.left >= 0 && rect.right <= innerWidth && rect.bottom <= innerHeight; }); }), 'Screenshot reference controls overflow the small window');
+    await js(() => document.querySelector('[data-evidence-totals="supplement"]').scrollIntoView({ block: 'center' })); await screenshot('supplement-reference-small');
     checks.push('Profile edits regenerate workbook and small layout keeps categories accessible');
 
     await js(() => { window.nextFileName = '这是一份用于检查窄窗口文件名不会挤出删除按钮的非常非常长的发票附件_<img src=x onerror=alert(1)>.pdf'; });
     await click('[data-category="travel"] > .rb-text-button');
     assert(await js(() => {
       window.removalAsset = window.lastAddedId;
+      window.beforeRemovalRequests = window.removeRequests.length;
       window.evidenceAsset = document.querySelector('[data-purpose="evidence"] .rb-file-row').dataset.fileId;
       const rows = [document.querySelector(`[data-file-id="${window.removalAsset}"]`), document.querySelector(`[data-file-id="${window.pendingAsset}"]`), document.querySelector(`[data-file-id="${window.evidenceAsset}"]`)];
       return rows.every(row => { const button = row.querySelector('[data-remove-file]'); return button && button.textContent === '删除' && !button.disabled && button.title.includes(row.querySelector('.rb-file-name').textContent) && button.getAttribute('aria-label') === button.title; }) && !document.querySelector('.rb-categories img');
@@ -142,11 +245,11 @@ async function electronTest({ app, BrowserWindow }, options) {
     }); await screenshot('delete-confirm-small');
     assert(await js(() => window.removalFits), 'Long filename pushed deletion controls outside the small category card');
     await js(() => document.querySelector(`[data-cancel-remove-file="${window.removalAsset}"]`).click()); await pause();
-    assert(await js(() => window.removeRequests.length === 0 && !document.querySelector('[data-confirm-remove-file]') && document.querySelector(`[data-file-id="${window.removalAsset}"]`)), 'Cancel called removal API or removed file');
+    assert(await js(() => window.removeRequests.length === window.beforeRemovalRequests && !document.querySelector('[data-confirm-remove-file]') && document.querySelector(`[data-file-id="${window.removalAsset}"]`)), 'Cancel called removal API or removed file');
     await js(() => { document.querySelector(`[data-remove-file="${window.removalAsset}"]`).click(); window.failRemove = true; document.querySelector(`[data-confirm-remove-file="${window.removalAsset}"]`).click(); }); await pause();
     assert(await js(() => document.querySelector(`[data-file-id="${window.removalAsset}"]`) && document.querySelector('#rb-notice').classList.contains('rb-error') && document.querySelector('#rb-notice').textContent.includes('文件删除失败')), 'Failed removal hid the existing file or did not show the error');
     await js(() => { window.delayRemove = true; const confirm = document.querySelector(`[data-confirm-remove-file="${window.removalAsset}"]`); confirm.click(); confirm.click(); }); await pause();
-    assert(await js(() => window.removeRequests.length === 2 && [...document.querySelectorAll('[data-remove-file],[data-confirm-remove-file],[data-cancel-remove-file]')].every(button => button.disabled)), 'Pending deletion allowed duplicate calls or another file action');
+    assert(await js(() => window.removeRequests.length === window.beforeRemovalRequests + 2 && [...document.querySelectorAll('[data-remove-file],[data-confirm-remove-file],[data-cancel-remove-file]')].every(button => button.disabled)), 'Pending deletion allowed duplicate calls or another file action');
     await js(() => { window.completeRemove(); window.delayRemove = false; }); await pause();
     assert(await js(() => {
       const request = window.removeRequests.at(-1);
@@ -163,7 +266,7 @@ async function electronTest({ app, BrowserWindow }, options) {
     await js(() => { window.removeSyncError = '申请表被占用，请重试更新'; document.querySelector(`[data-remove-file="${window.pendingAsset}"]`).click(); document.querySelector(`[data-confirm-remove-file="${window.pendingAsset}"]`).click(); }); await pause();
     assert(await js(() => !document.querySelector(`[data-file-id="${window.pendingAsset}"]`) && !document.querySelector(`[data-amount-asset="${window.pendingAsset}"]`) && document.querySelector('#rb-amount-total').textContent.includes('10.00') && document.querySelector('#rb-notice').classList.contains('rb-error') && document.querySelector('#rb-notice').textContent.includes('已移到回收站，但报销表同步失败') && document.querySelector('#rb-notice').textContent.includes('申请表被占用')), 'Partial sync failure incorrectly claimed deletion failed or left stale amounts');
     await js(() => { document.querySelector(`[data-remove-file="${window.evidenceAsset}"]`).click(); document.querySelector(`[data-confirm-remove-file="${window.evidenceAsset}"]`).click(); }); await pause();
-    assert(await js(() => !document.querySelector(`[data-file-id="${window.evidenceAsset}"]`) && document.querySelector('[data-artifact="supplementPdf"] button').disabled && document.querySelector('[data-artifact="supplementPdf"]').textContent.includes('待添加购买截图')), 'Evidence removal did not clear screenshot PDF');
+    assert(await js(() => !document.querySelector(`[data-file-id="${window.evidenceAsset}"]`) && !document.querySelector('#rb-evidence-amount-review') && !document.querySelector('[data-evidence-totals]') && document.querySelector('[data-artifact="supplementPdf"] button').disabled && document.querySelector('[data-artifact="supplementPdf"]').textContent.includes('待添加购买截图')), 'Evidence removal did not clear its reference section, difference or screenshot PDF');
     checks.push('Recoverable deletion in all three file areas handles cancel, failure, double clicks, amount updates and partial sync failure');
 
     await click('[data-category="equipment"] > .rb-text-button');
@@ -277,28 +380,36 @@ async function electronTest({ app, BrowserWindow }, options) {
 function mockBridge() {
   let listener, libraryListener, profile = { applicant: '', companyName: '', accountName: '', bankName: '', accountNumber: '' };
   const workspace = { folderId: 'case-1', name: '11月报销', date: '2026-11-21', profile, state: 'idle', message: '', categories: [['travel', '出行'], ['equipment', '设备'], ['membership', '会员'], ['other', '其他'], ['supplement', '补票']].map(([key, name]) => ({ key, name, folderId: `folder-${key}`, count: 0, items: [] })), artifacts: { form: { assetId: 'form-1', name: '报销申请表.xlsx', ready: true }, supplementPdf: { assetId: null, name: '补票截图.pdf', ready: false }, invoicePdf: { assetId: null, name: '合并发票.pdf', ready: false }, supplementInvoicePdf: { assetId: null, name: '补票发票.pdf', ready: false } }, invoiceMerge: { imagesPerPage: 2, sourceCount: 0, unsupportedCount: 0, stale: false }, supplementInvoiceMerge: { imagesPerPage: 2, sourceCount: 0, unsupportedCount: 0, stale: false } };
+  workspace.itinerary = { items: [], count: 0, stale: false, message: '' };
+  workspace.artifacts.itineraryPdf = { assetId: null, name: '打车行程单.pdf', ready: false };
   const amountRecords = new Map(), removedFiles = new Map(); let nextAsset = 1;
-  window.savedProfiles = []; window.chooseRequests = []; window.dropRequests = []; window.openRequests = []; window.exportRequests = []; window.refreshRequests = []; window.categoryRequests = []; window.mergeRequests = []; window.amountRequests = []; window.cancelRequests = []; window.removeRequests = []; window.getCount = 0; window.globalDrops = 0;
+  window.savedProfiles = []; window.chooseRequests = []; window.dropRequests = []; window.openRequests = []; window.exportRequests = []; window.exportAllRequests = []; window.refreshRequests = []; window.categoryRequests = []; window.mergeRequests = []; window.amountRequests = []; window.cancelRequests = []; window.removeRequests = []; window.getCount = 0; window.globalDrops = 0;
+  window.previewRequests = []; window.previewCancelCount = 0; window.sourceOpenRequests = [];
   const format = cents => `${Math.floor(cents / 100)}.${String(cents % 100).padStart(2, '0')}`;
   const snapshot = () => {
-    const allAmounts = [];
+    const allAmounts = [], allEvidenceAmounts = [];
     for (const category of workspace.categories) {
       category.invoiceItems = category.items.filter(item => item.purpose !== 'evidence'); category.evidenceItems = category.items.filter(item => item.purpose === 'evidence');
       const records = category.invoiceItems.flatMap(item => Array.from({ length: item.pageCount || 1 }, (_, index) => amountRecords.get(`${item.id}:${index + 1}`)).filter(Boolean)).map(item => ({ ...item, categoryKey: category.key }));
+      const evidenceRecords = category.evidenceItems.flatMap(item => Array.from({ length: item.pageCount || 1 }, (_, index) => amountRecords.get(`evidence:${item.id}:${index + 1}`)).filter(Boolean)).map(item => ({ ...item, categoryKey: category.key, purpose: 'evidence' }));
       category.invoiceCount = records.length; category.pendingCount = records.filter(item => item.status === 'pending').length;
       category.amountCents = records.reduce((sum, item) => sum + (item.status !== 'excluded' && item.status !== 'pending' ? item.amountCents || 0 : 0), 0); category.amount = format(category.amountCents); allAmounts.push(...records);
+      category.evidencePendingCount = evidenceRecords.filter(item => item.status === 'pending').length;
+      category.evidenceAmountCents = evidenceRecords.reduce((sum, item) => sum + (item.status !== 'excluded' && item.status !== 'pending' ? item.amountCents || 0 : 0), 0); category.evidenceAmount = format(category.evidenceAmountCents); allEvidenceAmounts.push(...evidenceRecords);
     }
     for (const [key, selected] of [['invoiceMerge', workspace.categories.filter(category => category.key !== 'supplement').flatMap(category => category.items)], ['supplementInvoiceMerge', workspace.categories.find(category => category.key === 'supplement')?.invoiceItems || []]]) {
       workspace[key].sourceCount = selected.filter(item => ['png', 'jpg', 'pdf'].includes(item.ext)).length; workspace[key].unsupportedCount = selected.length - workspace[key].sourceCount;
     }
     const totalCents = workspace.categories.reduce((sum, category) => sum + category.amountCents, 0);
     workspace.amounts = { totalCents, totalAmount: format(totalCents), pendingCount: allAmounts.filter(item => item.status === 'pending').length, items: allAmounts };
+    const evidenceCents = workspace.categories.reduce((sum, category) => sum + category.evidenceAmountCents, 0);
+    workspace.evidenceAmounts = { totalCents: evidenceCents, totalAmount: format(evidenceCents), pendingCount: allEvidenceAmounts.filter(item => item.status === 'pending').length, items: allEvidenceAmounts };
     return structuredClone({ ...workspace, profile });
   };
   const add = request => {
     if (window.partialFailure) { window.partialFailure = false; return { snapshot: {}, workspace: snapshot(), report: { imported: 0, duplicates: 1, errors: [{ path: 'C:\\fixtures\\损坏文件.pdf', message: '无法读取文件' }] } }; }
     if (window.duplicateOnly) { window.duplicateOnly = false; return { snapshot: {}, workspace: snapshot(), report: { imported: 0, restored: 0, duplicates: 1, errors: [] } }; }
-    const category = workspace.categories.find(item => item.key === request.category), purpose = request.purpose || 'invoice';
+    const purpose = request.purpose || 'invoice', category = purpose === 'itinerary' ? workspace.itinerary : workspace.categories.find(item => item.key === request.category);
     if (window.restoreRemovedAsset) {
       const id = window.restoreRemovedAsset, removed = removedFiles.get(id); window.restoreRemovedAsset = null;
       category.items.push(removed.item); category.count = category.items.length;
@@ -307,35 +418,44 @@ function mockBridge() {
       return { snapshot: {}, workspace: snapshot(), report: { imported: 0, restored: 1, restoredAssetIds: [id], duplicates: 0, errors: [] } };
     }
     const ext = window.nextFileExt || (purpose === 'evidence' ? 'png' : 'pdf'); window.nextFileExt = '';
-    const name = window.nextFileName || request.paths?.[0]?.split('\\').at(-1) || `${category.name}发票.${ext}`; window.nextFileName = '';
+    const name = window.nextFileName || request.paths?.[0]?.split('\\').at(-1) || `${purpose === 'itinerary' ? '打车行程单' : `${category.name}发票`}.${ext}`; window.nextFileName = '';
     const id = `asset-${nextAsset++}`, pageCount = window.nextPageCount || 1; window.nextPageCount = 0; window.lastAddedId = id;
     category.items.push({ id, name, ext, mediaType: ext === 'pdf' || ext === 'docx' ? 'document' : 'image', purpose, pageCount }); category.count++;
-    if (purpose !== 'evidence' && ['png', 'jpg', 'pdf'].includes(ext)) for (let pageNumber = 1; pageNumber <= pageCount; pageNumber++) amountRecords.set(`${id}:${pageNumber}`, { assetId: id, pageNumber, name: `${name} · 第 ${pageNumber} 页`, status: window.nextPending ? 'pending' : 'recognized', amountCents: window.nextPending ? null : 1000, amount: window.nextPending ? null : '10.00', detectedAmount: window.nextPending ? '12.34' : '10.00', confidence: window.nextPending ? 'low' : 'high', reason: window.nextPending ? '识别结果待核对' : '价税合计' });
+    if (purpose !== 'itinerary' && ['png', 'jpg', 'pdf'].includes(ext)) for (let pageNumber = 1; pageNumber <= pageCount; pageNumber++) amountRecords.set(`${purpose === 'evidence' ? 'evidence:' : ''}${id}:${pageNumber}`, { assetId: id, pageNumber, name, status: window.nextPending ? 'pending' : 'recognized', amountCents: window.nextPending ? null : 1000, amount: window.nextPending ? null : '10.00', detectedAmount: window.nextPending ? '12.34' : '10.00', confidence: window.nextPending ? 'low' : 'high', reason: window.nextPending ? '识别结果待核对' : purpose === 'evidence' ? '订单总额，仅供参考' : '价税合计', ...(purpose === 'evidence' ? { purpose } : {}) });
     window.nextPending = false;
     if (request.category === 'supplement' && purpose === 'evidence') { workspace.artifacts.supplementPdf.ready = true; workspace.artifacts.supplementPdf.assetId = 'pdf-1'; }
+    if (purpose === 'itinerary') { workspace.artifacts.itineraryPdf.ready = true; workspace.artifacts.itineraryPdf.assetId = 'itinerary-pdf'; workspace.itinerary.stale = false; }
     return { snapshot: {}, workspace: snapshot(), report: { imported: 1, assetIds: [id], duplicates: 0, errors: [] } };
   };
   document.addEventListener('drop', () => { window.globalDrops++; });
   window.emitState = (state, message) => { workspace.state = state; workspace.message = message; listener({ folderId: 'case-1', libraryRoot: 'C:\\fixture-library', state, message }); };
   window.emitForeignEvent = () => listener({ folderId: 'other-case', libraryRoot: 'C:\\fixture-library', state: 'idle' });
   window.emitLibraryChanged = () => libraryListener?.();
+  window.markAmountPending = (id, purpose, page = 1) => { Object.assign(amountRecords.get(`${purpose === 'evidence' ? 'evidence:' : ''}${id}:${page}`), { status: 'pending', amountCents: null, amount: null, reason: '识别结果待核对' }); window.emitLibraryChanged(); };
+  window.changeInvoicePurpose = (id, purpose) => {
+    const item = workspace.categories.flatMap(category => category.items).find(item => item.id === id); item.purpose = purpose;
+    if (purpose === 'evidence') for (let page = 1; page <= (item.pageCount || 1); page++) amountRecords.set(`evidence:${id}:${page}`, { ...amountRecords.get(`${id}:${page}`), purpose });
+    window.emitLibraryChanged();
+  };
   window.markInvoiceStale = () => { workspace.invoiceMerge.stale = true; workspace.invoiceMerge.message = '发票已变化，请重新合并。'; window.emitState('idle', ''); };
+  window.markItineraryStale = () => { workspace.itinerary.stale = true; workspace.itinerary.message = '行程单已变化，请刷新生成文件。'; window.emitState('idle', ''); };
   window.shitu = {
     reimbursementGetProfile: async () => structuredClone(profile),
     reimbursementSaveProfile: async value => { window.savedProfiles.push(value); profile = structuredClone(value); return structuredClone(value); },
     reimbursementGet: async request => { window.getCount++; const value = snapshot(); const result = request.folderId === workspace.folderId ? value : { ...value, folderId: request.folderId, name: '另一个报销资料夹', categories: [], amounts: { totalCents: 0, totalAmount: '0.00', pendingCount: 0, items: [] } }; if (window.delayNextGet) { window.delayNextGet = false; return new Promise(resolve => { window.completeGet = () => resolve(result); }); } return result; },
     reimbursementRefresh: async request => { window.refreshRequests.push(request); return snapshot(); },
-    reimbursementSetAmount: async request => { window.amountRequests.push(request); const record = amountRecords.get(`${request.assetId}:${request.pageNumber}`); Object.assign(record, request.excluded ? { status: 'excluded', amount: null, amountCents: null } : { status: 'manual', amount: request.amount, amountCents: window.MosaicInvoiceAmounts.parseAmount(request.amount) }); return { snapshot: {}, workspace: snapshot() }; },
+    reimbursementSetAmount: async request => { window.amountRequests.push(request); if (request.purpose === 'evidence' && window.failEvidenceAmount) { window.failEvidenceAmount = false; throw new Error('参考金额保存失败，请重试'); } const record = amountRecords.get(`${request.purpose === 'evidence' ? 'evidence:' : ''}${request.assetId}:${request.pageNumber}`); Object.assign(record, request.excluded ? { status: 'excluded', amount: null, amountCents: null, reason: request.purpose === 'evidence' ? '已忽略参考金额' : '不计入报销' } : { status: 'manual', amount: request.amount, amountCents: window.MosaicInvoiceAmounts.parseAmount(request.amount), reason: request.purpose === 'evidence' ? '参考金额已核对' : '已手动核对' }); return { snapshot: {}, workspace: snapshot() }; },
     reimbursementCancel: async request => { window.cancelRequests.push(request); workspace.state = 'idle'; workspace.message = '处理已取消'; return { cancelled: true }; },
     reimbursementRemoveFile: async request => {
       window.removeRequests.push(structuredClone(request));
       const complete = () => {
         if (window.failRemove) { window.failRemove = false; throw new Error('文件删除失败，请重试'); }
-        const category = workspace.categories.find(item => item.key === request.category);
-        removedFiles.set(request.assetId, { category: category.key, item: category.items.find(item => item.id === request.assetId), amounts: [...amountRecords.entries()].filter(([key]) => key.startsWith(`${request.assetId}:`)) });
+        const category = request.purpose === 'itinerary' ? workspace.itinerary : workspace.categories.find(item => item.key === request.category);
+        removedFiles.set(request.assetId, { category: request.purpose === 'itinerary' ? 'itinerary' : category.key, item: category.items.find(item => item.id === request.assetId), amounts: [...amountRecords.entries()].filter(([, record]) => record.assetId === request.assetId) });
         category.items = category.items.filter(item => item.id !== request.assetId); category.count = category.items.length;
-        for (const key of amountRecords.keys()) if (key.startsWith(`${request.assetId}:`)) amountRecords.delete(key);
-        if (request.category === 'supplement') {
+        for (const [key, record] of amountRecords) if (record.assetId === request.assetId) amountRecords.delete(key);
+        if (request.purpose === 'itinerary') { workspace.artifacts.itineraryPdf.ready = category.items.length > 0; workspace.itinerary.stale = false; workspace.itinerary.message = ''; }
+        else if (request.category === 'supplement') {
           workspace.supplementInvoiceMerge.stale = true;
           workspace.artifacts.supplementPdf.ready = category.items.some(item => item.purpose === 'evidence');
         } else workspace.invoiceMerge.stale = true;
@@ -355,7 +475,33 @@ function mockBridge() {
     reimbursementChooseImport: async request => { window.chooseRequests.push(request); return add(request); },
     reimbursementImport: async request => { window.dropRequests.push(request); return add(request); },
     reimbursementOpenArtifact: async request => { window.openRequests.push(request); return { opened: true }; },
+    reimbursementPreview: async request => {
+      window.previewRequests.push(structuredClone(request));
+      const item = [...workspace.categories.flatMap(category => category.items), ...workspace.itinerary.items, ...Object.values(workspace.artifacts).map(artifact => ({ id: artifact.assetId, name: artifact.name, ext: artifact.name.endsWith('.xlsx') ? 'xlsx' : 'pdf', pageCount: 2 }))].find(item => item.id === request.assetId);
+      if (!item) throw new Error('预览文件不存在');
+      const result = { name: item.name, ext: item.ext, pageNumber: request.pageNumber || 1, pageCount: item.pageCount || 1 };
+      if (window.failPreview) { window.failPreview = false; throw new Error('预览读取失败'); }
+      if (window.delayPreview) { window.delayPreview = false; await new Promise(resolve => { window.completePreview = resolve; }); }
+      if (['docx', 'xlsx'].includes(item.ext)) return { ...result, type: 'external' };
+      const canvas = document.createElement('canvas'); canvas.width = 900; canvas.height = 1300;
+      const ctx = canvas.getContext('2d'); ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, 900, 1300); ctx.fillStyle = '#222'; ctx.font = '32px sans-serif'; ctx.fillText('报销附件预览 · 本机测试', 65, 120); ctx.font = '25px sans-serif'; ctx.fillText(`第 ${result.pageNumber} 页 / 共 ${result.pageCount} 页`, 65, 200); ctx.fillText('金额与原始文件保持不变', 65, 275);
+      return { ...result, type: 'image', url: canvas.toDataURL('image/png') };
+    },
+    reimbursementPreviewCancel: async () => { window.previewCancelCount++; return { cancelled: true }; },
+    reimbursementOpenSource: async request => { window.sourceOpenRequests.push(structuredClone(request)); return { opened: true }; },
     reimbursementExport: async request => { window.exportRequests.push(request); return { saved: true, path: 'C:\\Exports\\补票截图.pdf' }; },
+    reimbursementExportAll: async request => {
+      window.exportAllRequests.push(request); const mode = window.nextExportAll; window.nextExportAll = '';
+      if (mode === 'cancel') return { cancelled: true };
+      if (mode === 'error') throw new Error('导出目录不可写，请重新选择');
+      const complete = () => {
+        for (const [key, kind] of [['invoiceMerge', 'invoicePdf'], ['supplementInvoiceMerge', 'supplementInvoicePdf']]) if (workspace[key].sourceCount) { workspace[key].stale = false; workspace.artifacts[kind].ready = true; }
+        workspace.itinerary.stale = false; workspace.itinerary.message = '';
+        return { saved: true, path: 'C:\\Exports\\独立报销目录', count: Object.values(workspace.artifacts).filter(item => item.ready).length };
+      };
+      if (mode === 'pending') return new Promise(resolve => { window.completeExportAll = () => resolve(complete()); });
+      return complete();
+    },
     importPaths: async (paths, options) => { const category = workspace.categories.find(item => item.folderId === options.folderId); const result = add({ paths, category: category.key }); window.emitLibraryChanged(); return result; },
     setTrash: async (ids, trashed) => { for (const id of ids) { if (trashed) { const category = workspace.categories.find(item => item.items.some(item => item.id === id)); await window.shitu.reimbursementRemoveFile({ folderId: workspace.folderId, category: category.key, assetId: id }); } else { const removed = removedFiles.get(id); window.restoreRemovedAsset = id; add({ category: removed.category }); } } window.emitLibraryChanged(); return snapshot(); },
     moveAssetsToFolder: async (ids, folderId) => { const destination = workspace.categories.find(item => item.folderId === folderId); for (const id of ids) { const source = workspace.categories.find(item => item.items.some(item => item.id === id)), item = source.items.find(item => item.id === id); source.items = source.items.filter(item => item.id !== id); source.count = source.items.length; destination.items.push(item); destination.count = destination.items.length; } window.emitLibraryChanged(); return snapshot(); },
@@ -369,7 +515,7 @@ async function main() {
   const tests = path.join(root, '.recovery', 'tests'); await fs.mkdir(tests, { recursive: true });
   const directory = await fs.mkdtemp(path.join(tests, 'reimbursement-ui-')), html = path.join(directory, 'index.html');
   const file = name => pathToFileURL(path.join(root, 'src', name)).href;
-  await fs.writeFile(html, `<!doctype html><html lang="zh-CN"><head><meta charset="UTF-8"><link rel="stylesheet" href="${file('styles.css')}"><link rel="stylesheet" href="${file('reimbursement-center.css')}"></head><body><script>(${mockBridge.toString()})();</script><script src="${file('invoice-amounts.js')}"></script><script src="${file('reimbursement-center.js')}"></script></body></html>`);
+  await fs.writeFile(html, `<!doctype html><html lang="zh-CN"><head><meta charset="UTF-8"><link rel="stylesheet" href="${file('styles.css')}"><link rel="stylesheet" href="${file('reimbursement-center.css')}"><link rel="stylesheet" href="${file('reimbursement-preview.css')}"></head><body><script>(${mockBridge.toString()})();</script><script src="${file('invoice-amounts.js')}"></script><script src="${file('reimbursement-center.js')}"></script><script src="${file('reimbursement-preview.js')}"></script></body></html>`);
   await fs.writeFile(path.join(directory, 'main.cjs'), `const electron=require('electron');const path=require('node:path');electron.app.setName('Mosaic reimbursement isolated smoke');electron.app.setPath('userData',path.join(__dirname,'profile'));electron.app.setPath('sessionData',path.join(__dirname,'sessions'));(${electronTest.toString()})(electron,${JSON.stringify({ directory, html })});setTimeout(()=>electron.app.exit(2),60000).unref();`);
   await fs.writeFile(path.join(directory, 'package.json'), JSON.stringify({ name: 'mosaic-reimbursement-smoke', main: 'main.cjs' }));
   const env = { ...process.env }; delete env.ELECTRON_RUN_AS_NODE;

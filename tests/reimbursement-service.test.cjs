@@ -15,18 +15,18 @@ async function fixture(t, overrides = {}) {
   const library = new Library({ root: path.join(base, 'library'), createThumbnail: async (_input, output) => {
     await sharp({ create: { width: 40, height: 40, channels: 3, background: '#ffffff' } }).jpeg().toFile(output); return { width: 0, height: 0 };
   } }); await library.init();
-  let current = library, date = new Date('2026-11-21T10:00:00Z'), chosenSave;
+  let current = library, date = new Date('2026-11-21T10:00:00Z'), chosenSave, chosenDirectory;
   const events = [];
   const profilePath = path.join(base, 'profile.json');
   const service = createReimbursementService({ rootDir: path.join(base, 'work'), profilePath, getLibrary: () => current, dateNow: () => date,
-    chooseFiles: async () => ({ canceled: true }), chooseSavePath: async () => chosenSave || { canceled: true }, openFile: async () => '',
+    chooseFiles: async () => ({ canceled: true }), chooseSavePath: async () => chosenSave || { canceled: true }, chooseDirectory: async () => chosenDirectory || { canceled: true }, openFile: async () => '',
     ocrEngine: { recognize: async () => ({ text: '' }) }, onEvent: event => events.push(event), ...overrides });
   t.after(async () => { await service.shutdown(); const relative = path.relative(parent, base); assert.ok(relative && !relative.startsWith('..')); await fs.rm(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }); });
   const request = id => ({ folderId: id, libraryRoot: library.root });
   const profile = { companyName: '测试公司', applicant: '测试申请人', accountName: '测试户名', bankName: '测试银行', accountNumber: '001234567890' };
   async function create() { await service.saveProfile(profile); return service.create({ name: '本月报销', libraryRoot: library.root }); }
   const sheet = async (assetId, name = 'xl/worksheets/sheet1.xml') => readZip(await fs.readFile(library.getAssetPath(assetId, 'original'))).entries.find(e => e.name === name).data.toString();
-  return { base, library, profilePath, service, request, profile, create, sheet, events, setDate: value => { date = value; }, saveTo: file => { chosenSave = { filePath: file }; }, switchLibrary: value => { current = value; } };
+  return { base, library, profilePath, service, request, profile, create, sheet, events, setDate: value => { date = value; }, saveTo: file => { chosenSave = { filePath: file }; }, exportAllTo: directory => { chosenDirectory = { filePaths: [directory] }; }, switchLibrary: value => { current = value; } };
 }
 
 test('reimbursement creation saves profile as strings and generates the real template with current dates', async t => {
@@ -245,7 +245,7 @@ test('invoice merging combines normal-category images and PDF pages, remembers l
   view = merged.workspace;
   assert.equal(view.invoiceMerge.imagesPerPage, 2); assert.equal(view.invoiceMerge.stale, false);
   const mergedId = view.artifacts.invoicePdf.assetId; assert.ok(mergedId);
-  assert.equal(view.artifacts.invoicePdf.name, '4张_合并发票');
+  assert.equal(view.artifacts.invoicePdf.name, '测试申请人_2026年11月_报销发票汇总_4张_金额待核对');
   assert.equal(received.length, 3); assert.ok(!received.includes(images[4]));
   let output = await fs.readFile(f.library.getAssetPath(mergedId, 'original'));
   assert.equal((output.toString('latin1').match(/\/Type\s*\/Page\b/g) || []).length, 2);
@@ -313,7 +313,7 @@ test('automatic amounts include image and multipage PDF invoices plus supplement
   readers.text('0,0,255', '价税合计（小写）￥30.30');
   readers.text('255,0,255', '价税合计（小写）￥40.40');
   readers.text('128,128,128', 'Total Amount: CNY 60.60');
-  readers.text('255,255,0', '价税合计（小写）￥9999.99');
+  readers.text('255,255,0', '实付款 ￥9999.99');
   const f = await fixture(t, readers), created = await f.create(), request = f.request(created.folderId);
   const regularImage = await imageFixture(f, 'regular', '#ff0000');
   const directPage = await imageFixture(f, 'direct-pdf-page', '#00ff00');
@@ -339,7 +339,9 @@ test('automatic amounts include image and multipage PDF invoices plus supplement
   assert.equal(view.amounts.items.length, 6);
   assert.equal(readers.ocrCalls.includes('0,255,0'), false, 'reliable PDF text avoids unnecessary OCR');
   assert.equal(readers.ocrCalls.includes('0,0,255'), true, 'scanned PDF pages use OCR');
-  assert.equal(readers.ocrCalls.includes('255,255,0'), false, 'evidence screenshots never participate in amount recognition');
+  assert.equal(readers.ocrCalls.includes('255,255,0'), true, 'evidence screenshots have independent amount recognition');
+  assert.equal(view.evidenceAmounts.totalCents, 999999);
+  assert.equal(view.amounts.items.some(item => item.purpose === 'evidence'), false, 'evidence recognition never enters invoice totals');
   const stored = f.library.snapshot().assets;
   const pdfId = imported.report.assetIds.find(id => stored.find(asset => asset.id === id).ext === 'pdf');
   const imageId = imported.report.assetIds.find(id => stored.find(asset => asset.id === id).ext === 'png');
@@ -421,7 +423,7 @@ test('supplement evidence and invoice PDFs use separate inputs, layout scopes, I
   view = (await f.service.mergeInvoices({ ...request, scope: 'supplement', imagesPerPage: 3 })).workspace;
   const invoiceId = view.artifacts.supplementInvoicePdf.assetId;
   assert.equal(new Set([evidenceId, regularId, invoiceId]).size, 3);
-  assert.equal(view.artifacts.supplementInvoicePdf.name, '4张_补票发票');
+  assert.equal(view.artifacts.supplementInvoicePdf.name, '测试申请人_2026年11月_补票发票汇总_4张_合计4.00元');
   assert.deepEqual(pdfCounts(await fs.readFile(f.library.getAssetPath(regularId))), { pages: 2, images: 2 });
   assert.deepEqual(pdfCounts(await fs.readFile(f.library.getAssetPath(invoiceId))), { pages: 2, images: 4 });
   view = (await f.service.mergeInvoices({ ...request, imagesPerPage: 2 })).workspace;
@@ -833,4 +835,267 @@ test('native folder imports, trash, restore and moves synchronize the same reimb
   await new Promise(resolve => setTimeout(resolve, 1100));
   assert.equal(builds, settledBuilds, 'generated-file index writes and read-only reloads must not cause a regeneration loop');
   assert.equal((await f.service.get(request)).amounts.totalCents, 1000);
+});
+
+test('purchase screenshot amounts are recognized and corrected independently without entering the workbook or invoice total', { timeout: 20000 }, async t => {
+  const readers = invoiceReaders();
+  readers.text('255,0,0', '商品金额 ￥200.00\n优惠 ￥71.20\n实付款 ￥128.80');
+  readers.text('0,0,255', '价税合计（小写）￥98.00');
+  const f = await fixture(t, readers), created = await f.create(), request = f.request(created.folderId);
+  const screenshot = await imageFixture(f, 'purchase-reference', '#ff0000');
+  const imported = await f.service.importFiles({ ...request, category: 'supplement', purpose: 'evidence', paths: [screenshot] });
+  const id = imported.report.assetIds[0], formId = imported.workspace.artifacts.form.assetId;
+  let view = imported.workspace;
+  assert.equal(view.evidenceAmounts.totalCents, 12880);
+  assert.equal(view.evidenceAmounts.items[0].purpose, 'evidence');
+  assert.equal(view.evidenceAmounts.items[0].status, 'recognized');
+  assert.equal(view.amounts.totalCents, 0); assert.equal(view.amounts.items.length, 0);
+  assert.deepEqual(await activeFormCategories(f, formId), []);
+  const asset = f.library.snapshot().assets.find(asset => asset.id === id);
+  assert.equal(asset.reimbursementAmounts, undefined);
+  assert.equal(asset.reimbursementEvidenceAmounts.pages[0].amountCents, 12880);
+  const invoice = await imageFixture(f, 'actual-supplement-invoice', '#0000ff');
+  view = (await f.service.importFiles({ ...request, category: 'supplement', purpose: 'invoice', paths: [invoice] })).workspace;
+  assert.equal(view.amounts.totalCents, 9800); assert.equal(view.evidenceAmounts.totalCents, 12880);
+  const workbookBefore = await fs.readFile(f.library.getAssetPath(formId));
+  view = (await f.service.setAmount({ ...request, purpose: 'evidence', assetId: id, pageNumber: 1, amount: '120.05' })).workspace;
+  assert.equal(view.evidenceAmounts.totalCents, 12005); assert.equal(view.amounts.totalCents, 9800);
+  assert.equal(view.evidenceAmounts.items[0].status, 'manual');
+  assert.deepEqual(await fs.readFile(f.library.getAssetPath(formId)), workbookBefore, 'reference edits cannot change the reimbursement workbook');
+  view = await f.service.refresh(request);
+  assert.equal(view.evidenceAmounts.totalCents, 12005, 'forced OCR preserves a confirmed reference amount');
+  view = (await f.service.setAmount({ ...request, purpose: 'evidence', assetId: id, pageNumber: 1, excluded: true })).workspace;
+  assert.equal(view.evidenceAmounts.totalCents, 0); assert.equal(view.evidenceAmounts.pendingCount, 0);
+  assert.equal(view.evidenceAmounts.items[0].status, 'excluded'); assert.equal(view.amounts.totalCents, 9800);
+  view = (await f.service.setAmount({ ...request, purpose: 'evidence', assetId: id, pageNumber: 1, amount: '128.80' })).workspace;
+  assert.equal(view.evidenceAmounts.totalCents, 12880); assert.equal(view.amounts.totalCents, 9800);
+});
+
+test('unreadable screenshot amount stays pending while printing and a zero reimbursement form remain available', async t => {
+  const f = await fixture(t), created = await f.create(), request = f.request(created.folderId);
+  const screenshot = await imageFixture(f, 'unreadable-reference', '#22aa66');
+  let result = await f.service.importFiles({ ...request, category: 'supplement', purpose: 'evidence', paths: [screenshot] });
+  const id = result.report.assetIds[0];
+  assert.equal(result.workspace.evidenceAmounts.pendingCount, 1);
+  assert.equal(result.workspace.evidenceAmounts.items[0].amountCents, null);
+  assert.equal(result.workspace.amounts.pendingCount, 0); assert.equal(result.workspace.amounts.totalCents, 0);
+  assert.equal(result.workspace.artifacts.supplementPdf.ready, true);
+  assert.deepEqual(await activeFormCategories(f, result.workspace.artifacts.form.assetId), []);
+  result = await f.service.setAmount({ ...request, purpose: 'evidence', assetId: id, pageNumber: 1, amount: '15.20' });
+  assert.equal(result.workspace.evidenceAmounts.totalCents, 1520);
+  await f.service.removeFile({ ...request, category: 'supplement', assetId: id });
+  assert.equal((await f.service.get(request)).evidenceAmounts.items.length, 0);
+  result = await f.service.importFiles({ ...request, category: 'supplement', purpose: 'evidence', paths: [screenshot] });
+  assert.deepEqual(result.report.restoredAssetIds, [id]);
+  assert.equal(result.workspace.evidenceAmounts.totalCents, 1520);
+  assert.equal(result.workspace.amounts.totalCents, 0);
+});
+
+test('amount editing rejects the wrong purpose and evidence data survives a library reopen', async t => {
+  const f = await fixture(t), created = await f.create(), request = f.request(created.folderId);
+  const screenshot = await imageFixture(f, 'reference-role', '#448822');
+  const imported = await f.service.importFiles({ ...request, category: 'supplement', purpose: 'evidence', paths: [screenshot] });
+  const id = imported.report.assetIds[0], change = { ...request, assetId: id, pageNumber: 1, amount: '56.78' };
+  await assert.rejects(f.service.setAmount(change), /发票.*移动或删除/);
+  await assert.rejects(f.service.setAmount({ ...change, purpose: 'unknown' }), /用途无效/);
+  await f.service.setAmount({ ...change, purpose: 'evidence' });
+  const reopened = new Library({ root: f.library.root }); await reopened.init();
+  assert.equal(reopened.snapshot().assets.find(asset => asset.id === id).reimbursementEvidenceAmounts.pages[0].amountCents, 5678);
+  const invoice = await imageFixture(f, 'invoice-role', '#1188bb');
+  const invoiceResult = await f.service.importFiles({ ...request, category: 'supplement', purpose: 'invoice', paths: [invoice] });
+  await assert.rejects(f.service.setAmount({ ...change, purpose: 'evidence', assetId: invoiceResult.report.assetIds[0] }), /截图.*移动或删除/);
+});
+
+test('nested reimbursement workspaces cannot leak invoices or evidence into their parent while ordinary subfolders remain owned', { timeout: 30000 }, async t => {
+  const f = await fixture(t), outer = await f.create(), request = f.request(outer.folderId);
+  const category = key => outer.workspace.categories.find(item => item.key === key).folderId;
+  const firstInner = await f.service.create({ name: '普通分类内的独立报销', parentId: category('travel'), libraryRoot: f.library.root });
+  const secondInner = await f.service.create({ name: '补票分类内的独立报销', parentId: category('supplement'), libraryRoot: f.library.root });
+  const invoiceSummary = async (id, cents) => ({ version: 1, sourceHash: crypto.createHash('sha256').update(await fs.readFile(f.library.getAssetPath(id))).digest('hex'),
+    pages: [{ pageNumber: 1, amountCents: cents, detectedCents: null, status: 'manual', confidence: 'none', reason: '已手动核对' }] });
+  const innerEvidenceIds = [];
+  for (const [index, inner] of [firstInner, secondInner].entries()) {
+    const screenshot = await imageFixture(f, `nested-evidence-${index}`, index ? '#00ff00' : '#ff0000');
+    const added = await f.service.importFiles({ ...f.request(inner.folderId), category: 'supplement', purpose: 'evidence', paths: [screenshot] });
+    const id = added.report.assetIds[0]; innerEvidenceIds.push(id);
+    await f.service.setAmount({ ...f.request(inner.folderId), purpose: 'evidence', assetId: id, pageNumber: 1, amount: index ? '9.99' : '8.88' });
+    // A previous invoice-role decision must not leak when the current role is evidence.
+    await f.library.setReimbursementAmounts(id, await invoiceSummary(id, index ? 22222 : 12345));
+  }
+  const innerInvoice = await imageFixture(f, 'nested-real-invoice', '#0000ff');
+  const invoiceImport = await f.service.importFiles({ ...f.request(firstInner.folderId), category: 'equipment', paths: [innerInvoice] });
+  const innerInvoiceId = invoiceImport.report.assetIds[0];
+  await f.service.setAmount({ ...f.request(firstInner.folderId), assetId: innerInvoiceId, pageNumber: 1, amount: '50.00' });
+  const ordinaryChild = (await f.library.createFolder('普通明细子目录', category('travel'))).folders.at(-1).id;
+  const ordinaryEvidenceChild = (await f.library.createFolder('普通购买截图子目录', category('supplement'))).folders.at(-1).id;
+  const ownInvoice = await imageFixture(f, 'parent-real-invoice', '#ffff00'), ownEvidence = await imageFixture(f, 'parent-real-evidence', '#ff00ff');
+  const ownInvoiceId = (await f.library.importPaths([ownInvoice], { folderId: ordinaryChild })).assetIds[0];
+  const ownEvidenceId = (await f.library.importPaths([ownEvidence], { folderId: ordinaryEvidenceChild })).assetIds[0];
+  await f.library.setReimbursementAmounts(ownInvoiceId, await invoiceSummary(ownInvoiceId, 2500));
+  await f.library.setReimbursementEvidenceAmounts(ownEvidenceId, await invoiceSummary(ownEvidenceId, 700));
+  const view = await f.service.refresh(request);
+  assert.equal(view.amounts.totalCents, 2500);
+  assert.deepEqual(view.amounts.items.map(item => item.assetId), [ownInvoiceId]);
+  assert.equal(view.evidenceAmounts.totalCents, 700);
+  assert.deepEqual(view.evidenceAmounts.items.map(item => item.assetId), [ownEvidenceId]);
+  assert.equal(view.invoiceMerge.sourceCount, 1); assert.equal(view.supplementInvoiceMerge.sourceCount, 0);
+  assert.deepEqual(view.categories.find(item => item.key === 'travel').items.map(item => item.id), [ownInvoiceId]);
+  assert.deepEqual(view.categories.find(item => item.key === 'supplement').items.map(item => item.id), [ownEvidenceId]);
+  assert.deepEqual(pdfCounts(await fs.readFile(f.library.getAssetPath(view.artifacts.supplementPdf.assetId))), { pages: 1, images: 1 });
+  const merged = (await f.service.mergeInvoices({ ...request, imagesPerPage: 2 })).workspace;
+  assert.deepEqual(pdfCounts(await fs.readFile(f.library.getAssetPath(merged.artifacts.invoicePdf.assetId))), { pages: 1, images: 1 });
+  for (const [assetId, categoryKey] of [[innerEvidenceIds[0], 'travel'], [innerInvoiceId, 'travel'], [innerEvidenceIds[1], 'supplement']]) {
+    await assert.rejects(f.service.removeFile({ ...request, category: categoryKey, assetId }), /不属于当前报销分类|已移动/);
+    assert.equal(f.library.snapshot().assets.find(asset => asset.id === assetId).trashedAt, null);
+  }
+  await assert.rejects(f.service.setAmount({ ...request, purpose: 'evidence', assetId: innerEvidenceIds[1], pageNumber: 1, amount: '1.00' }), /已移动或删除/);
+  assert.equal((await f.service.get(f.request(firstInner.folderId))).amounts.totalCents, 5000);
+  assert.equal((await f.service.get(f.request(firstInner.folderId))).evidenceAmounts.totalCents, 888);
+  assert.equal((await f.service.get(f.request(secondInner.folderId))).evidenceAmounts.totalCents, 999);
+  const removed = await f.service.removeFile({ ...request, category: 'travel', assetId: ownInvoiceId });
+  assert.equal(removed.removed, true); assert.equal(removed.workspace.amounts.totalCents, 0);
+  assert.deepEqual(await activeFormCategories(f, removed.workspace.artifacts.form.assetId), []);
+  const removedEvidence = await f.service.removeFile({ ...request, category: 'supplement', assetId: ownEvidenceId });
+  assert.equal(removedEvidence.removed, true); assert.equal(removedEvidence.workspace.artifacts.supplementPdf.ready, false);
+});
+
+test('itinerary images and PDFs automatically merge into independent A4 pages without OCR or reimbursement amounts', async t => {
+  const readers = invoiceReaders(); readers.text('255,0,0', '价税合计（小写）￥9999.00');
+  const f = await fixture(t, readers), created = await f.create(), request = f.request(created.folderId);
+  assert.equal(created.workspace.itinerary.count, 0); assert.equal(created.workspace.categories.length, 5);
+  const picture = await imageFixture(f, 'trip-picture', '#ff0000');
+  const pages = [await imageFixture(f, 'trip-p1', '#00ff00'), await imageFixture(f, 'trip-p2', '#0000ff')];
+  const pdf = await readers.pdf(f, 'trip-list', pages.map(path => ({ path, text: '支付金额 ￥100.00' })));
+  let result = await f.service.importFiles({ ...request, purpose: 'itinerary', paths: [picture, pdf] });
+  const id = result.report.assetIds[0], artifact = result.workspace.artifacts.itineraryPdf;
+  assert.equal(result.workspace.itinerary.count, 2); assert.equal(artifact.ready, true);
+  assert.equal(artifact.name, '测试申请人_2026年11月_打车行程单_3页');
+  assert.deepEqual(pdfCounts(await fs.readFile(f.library.getAssetPath(artifact.assetId))), { pages: 3, images: 3 });
+  assert.equal(result.workspace.amounts.totalCents, 0); assert.equal(result.workspace.amounts.items.length, 0);
+  assert.equal(result.workspace.evidenceAmounts.items.length, 0); assert.deepEqual(readers.ocrCalls, []);
+  assert.deepEqual(await activeFormCategories(f, result.workspace.artifacts.form.assetId), []);
+  await assert.rejects(f.service.setAmount({ ...request, assetId: id, pageNumber: 1, amount: '100.00' }), /发票已移动或删除/);
+  result = await f.service.removeFile({ ...request, purpose: 'itinerary', assetId: id });
+  assert.equal(result.workspace.itinerary.count, 1);
+  result = await f.service.importFiles({ ...request, purpose: 'itinerary', paths: [picture] });
+  assert.deepEqual(result.report.restoredAssetIds, [id]); assert.equal(result.workspace.itinerary.count, 2);
+  f.saveTo(path.join(f.base, 'trip-export.pdf'));
+  assert.equal((await f.service.exportArtifact({ ...request, kind: 'itineraryPdf' })).saved, true);
+  assert.deepEqual(await fs.readFile(path.join(f.base, 'trip-export.pdf')), await fs.readFile(f.library.getAssetPath(artifact.assetId)));
+});
+
+test('export all creates one named folder with the form and every applicable PDF and refreshes stale merges', { timeout: 20000 }, async t => {
+  const readers = invoiceReaders(); readers.text('255,0,0', '价税合计（小写）￥10.00'); readers.text('0,255,0', '价税合计（小写）￥5.00'); readers.text('0,0,255', '实付款 ￥80.00');
+  const f = await fixture(t, readers), created = await f.create(), request = f.request(created.folderId);
+  const regular = await imageFixture(f, 'export-regular', '#ff0000'), invoice = await imageFixture(f, 'export-supplement', '#00ff00');
+  const screenshot = await imageFixture(f, 'export-reference', '#0000ff'), trip = await imageFixture(f, 'export-trip', '#ffffff');
+  await f.service.importFiles({ ...request, category: 'travel', paths: [regular] });
+  await f.service.importFiles({ ...request, category: 'supplement', purpose: 'invoice', paths: [invoice] });
+  await f.service.importFiles({ ...request, category: 'supplement', purpose: 'evidence', paths: [screenshot] });
+  await f.service.importFiles({ ...request, purpose: 'itinerary', paths: [trip] });
+  const output = path.join(f.base, 'exports'); await fs.mkdir(output); f.exportAllTo(output);
+  const first = await f.service.exportAll(request);
+  assert.equal(first.saved, true); assert.equal(first.count, 5); assert.equal(path.basename(first.path), '测试申请人_2026年11月_报销资料');
+  const names = await fs.readdir(first.path);
+  assert.equal(names.filter(name => name.endsWith('.pdf')).length, 4); assert.equal(names.filter(name => name.endsWith('.xlsx')).length, 1);
+  assert.ok(names.filter(name => name.endsWith('.pdf')).every(name => name.startsWith('测试申请人_2026年11月_')));
+  assert.ok(names.includes('测试申请人_2026年11月_报销发票汇总_1张_合计10.00元.pdf'));
+  assert.ok(names.includes('测试申请人_2026年11月_补票发票汇总_1张_合计5.00元.pdf'));
+  assert.ok(names.includes('测试申请人_2026年11月_购买截图说明_1张.pdf'));
+  const before = await Promise.all(names.map(name => fs.readFile(path.join(first.path, name))));
+  readers.text('255,255,0', '价税合计（小写）￥3.00');
+  await f.service.importFiles({ ...request, category: 'travel', paths: [await imageFixture(f, 'export-extra', '#ffff00')] });
+  assert.equal((await f.service.get(request)).invoiceMerge.stale, true);
+  const second = await f.service.exportAll(request);
+  assert.equal(path.basename(second.path), '测试申请人_2026年11月_报销资料（2）');
+  assert.ok((await fs.readdir(second.path)).includes('测试申请人_2026年11月_报销发票汇总_2张_合计13.00元.pdf'));
+  assert.equal((await f.service.get(request)).invoiceMerge.stale, false);
+  for (let index = 0; index < names.length; index++) assert.deepEqual(await fs.readFile(path.join(first.path, names[index])), before[index]);
+  f.setDate(new Date('2027-01-03T00:00:00Z')); await f.service.saveProfile({ ...f.profile, applicant: '新申请人' });
+  const third = await f.service.exportAll(request);
+  assert.equal(path.basename(third.path), '新申请人_2027年1月_报销资料');
+  assert.ok((await fs.readdir(third.path)).filter(name => name.endsWith('.pdf')).every(name => name.startsWith('新申请人_2027年1月_')));
+  assert.equal((await f.service.get(request)).amounts.totalCents, 1800);
+});
+
+test('export all with empty optional sections exports only the form and cancellation writes nothing', async t => {
+  const f = await fixture(t), created = await f.create(), request = f.request(created.folderId);
+  assert.deepEqual(await f.service.exportAll(request), { saved: false, cancelled: true });
+  const output = path.join(f.base, 'exports'); await fs.mkdir(output); f.exportAllTo(output);
+  const result = await f.service.exportAll(request);
+  assert.equal(result.count, 1); assert.equal((await fs.readdir(result.path))[0].endsWith('.xlsx'), true);
+});
+
+test('profile saves retry brief Windows file locks without deleting the existing settings', async t => {
+  const f = await fixture(t); await f.service.saveProfile(f.profile);
+  const original = fs.rename; let attempts = 0;
+  fs.rename = async (source, target) => {
+    if (target === f.profilePath && attempts++ < 2) throw Object.assign(new Error('brief file lock'), { code: 'EPERM' });
+    return original(source, target);
+  };
+  try { await f.service.saveProfile({ ...f.profile, applicant: '更新申请人' }); }
+  finally { fs.rename = original; }
+  assert.equal(attempts, 3);
+  assert.equal((await f.service.getProfile()).applicant, '更新申请人');
+  assert.equal(JSON.parse(await fs.readFile(f.profilePath, 'utf8')).applicant, '更新申请人');
+});
+
+test('export all cannot publish stale files when a native import lands at the end of invoice merging', { timeout: 20000 }, async t => {
+  const readers = invoiceReaders(); readers.text('255,0,0', '价税合计（小写）￥10.00'); readers.text('0,255,0', '价税合计（小写）￥20.00');
+  const f = await fixture(t, readers), created = await f.create(), request = f.request(created.folderId);
+  const first = await imageFixture(f, 'export-race-first', '#ff0000'), second = await imageFixture(f, 'export-race-second', '#00ff00');
+  await f.service.importFiles({ ...request, category: 'travel', paths: [first] });
+  const categoryId = (await f.service.get(request)).categories.find(item => item.key === 'travel').folderId;
+  const output = path.join(f.base, 'exports'); await fs.mkdir(output); f.exportAllTo(output);
+  const original = f.library.setReimbursementInvoiceSignature.bind(f.library);
+  let imported = false, result, failure;
+  f.library.setReimbursementInvoiceSignature = async (...args) => {
+    const saved = await original(...args);
+    // The ordinary library import is independent of the service queue. Place it
+    // after the merge freshness check but before exportAll captures its inputs.
+    if (!imported && args[0] === created.folderId && (args[2] || 'regular') === 'regular') {
+      imported = true;
+      await f.library.importPaths([second], { folderId: categoryId });
+    }
+    return saved;
+  };
+  try { result = await f.service.exportAll(request); }
+  catch (error) { failure = error; }
+  finally { f.library.setReimbursementInvoiceSignature = original; }
+  assert.equal(imported, true, 'the concurrent native import must occur during the merge');
+  if (failure) {
+    assert.match(failure.message, /变化|重新|过期|同步/);
+    return;
+  }
+  assert.equal(result.saved, true);
+  const names = await fs.readdir(result.path), invoices = names.filter(name => name.includes('报销发票汇总'));
+  assert.equal(invoices.length, 1);
+  assert.deepEqual(pdfCounts(await fs.readFile(path.join(result.path, invoices[0]))), { pages: 2, images: 2 }, 'a successful export must include the concurrently imported invoice');
+  assert.match(invoices[0], /_2张_合计30\.00元\.pdf$/);
+  const view = await f.service.get(request);
+  assert.equal(view.invoiceMerge.stale, false); assert.equal(view.amounts.totalCents, 3000);
+});
+
+test('export all restores trashed generated invoice PDFs and exports every applicable scope', { timeout: 20000 }, async t => {
+  for (const scope of ['regular', 'supplement']) await t.test(scope, async child => {
+    const readers = invoiceReaders(); readers.text('255,0,0', '价税合计（小写）￥10.00');
+    const f = await fixture(child, readers), created = await f.create(), request = f.request(created.folderId);
+    const source = await imageFixture(f, `trashed-export-${scope}`, '#ff0000');
+    await f.service.importFiles({ ...request, category: scope === 'regular' ? 'travel' : 'supplement', purpose: 'invoice', paths: [source] });
+    const merged = (await f.service.mergeInvoices({ ...request, scope })).workspace;
+    const kind = scope === 'regular' ? 'invoicePdf' : 'supplementInvoicePdf', id = merged.artifacts[kind].assetId;
+    const originalBytes = await fs.readFile(f.library.getAssetPath(id));
+    await f.library.setTrash([id], true);
+    assert.equal((await f.service.get(request)).artifacts[kind].ready, false);
+    const output = path.join(f.base, 'exports'); await fs.mkdir(output); f.exportAllTo(output);
+    const result = await f.service.exportAll(request);
+    assert.equal(result.saved, true); assert.equal(result.count, 2, 'the form and applicable invoice PDF must both be exported');
+    const names = await fs.readdir(result.path), pdf = names.find(name => name.endsWith('.pdf'));
+    assert.equal(names.length, 2); assert.ok(names.some(name => name.endsWith('.xlsx'))); assert.ok(pdf);
+    assert.deepEqual(pdfCounts(await fs.readFile(path.join(result.path, pdf))), { pages: 1, images: 1 });
+    const view = await f.service.get(request);
+    assert.equal(view.artifacts[kind].ready, true); assert.equal(view.artifacts[kind].assetId, id);
+    assert.equal(f.library.snapshot().assets.find(asset => asset.id === id).trashedAt, null);
+    assert.deepEqual(await fs.readFile(f.library.getAssetPath(id)), originalBytes);
+  });
 });

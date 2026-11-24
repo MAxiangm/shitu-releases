@@ -16,6 +16,10 @@ async function runProduction(options) {
   const persist = result => fs.writeFile(path.join(options.directory, 'result.json'), JSON.stringify({ ...result, checks, errors, dialogs }, null, 2));
   const checkpoint = async value => { checks.push(value); await persist({ running: true }); };
   const xml = async filename => new Map(readZip(await fs.readFile(filename)).entries.map(entry => [entry.name, entry.data.toString('utf8')]));
+  const workbookIncludes = async (filename, value) => {
+    try { return (await xml(filename)).get('xl/worksheets/sheet1.xml')?.includes(value) || false; }
+    catch (error) { if (error.code === 'ENOENT') return false; throw error; }
+  };
   const cellXml = (sheet, address) => [...sheet.matchAll(/<c\b[^>]*\/>|<c\b[^>]*>[\s\S]*?<\/c>/g)].map(match => match[0]).find(cell => new RegExp(`\\br="${address}"`).test(cell)) || '';
   const numericCell = (sheet, address) => Number(/<v>([^<]+)<\/v>/.exec(cellXml(sheet, address))?.[1]);
   async function makeInvoiceFixtures() {
@@ -35,6 +39,17 @@ async function runProduction(options) {
         await printer.webContents.executeJavaScript('document.fonts.ready.then(() => true)');
         await fs.writeFile(filename, await printer.webContents.printToPDF({ pageSize: 'A4', printBackground: true }));
       }
+      const receipt = `<!doctype html><meta charset="UTF-8"><style>body{padding:50px;background:white;color:black;font-family:'Microsoft YaHei',sans-serif}h1,p{font-size:42px;line-height:1.8}</style><h1>订单详情</h1><p>商品金额 ￥164</p><p>优惠 ￥36</p><p>实付款 ￥128</p><p>订单编号 202611240001234567</p>`;
+      await printer.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(receipt)}`);
+      await printer.webContents.executeJavaScript('document.fonts.ready.then(() => true)'); await pause(150);
+      await fs.writeFile(options.purchaseScreenshot, (await printer.webContents.capturePage()).toPNG());
+      const trip = number => `<!doctype html><meta charset="UTF-8"><style>@page{size:A4;margin:20mm}body{font-family:'Microsoft YaHei',sans-serif;color:#111}section{page-break-after:always;padding:40px}section:last-child{page-break-after:auto}h1{font-size:38px}p{font-size:28px}</style>${Array.from({ length: number }, (_, index) => `<section><h1>打车行程单 第${index + 1}页</h1><p>本机测试行程资料</p><p>起点：示例地址甲</p><p>终点：示例地址乙</p><p>费用合计 ￥999</p></section>`).join('')}`;
+      await printer.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(trip(1))}`);
+      await printer.webContents.executeJavaScript('document.fonts.ready.then(() => true)'); await pause(150);
+      await fs.writeFile(options.tripImage, (await printer.webContents.capturePage()).toPNG());
+      await printer.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(trip(2))}`);
+      await printer.webContents.executeJavaScript('document.fonts.ready.then(() => true)');
+      await fs.writeFile(options.tripPdf, await printer.webContents.printToPDF({ pageSize: 'A4', printBackground: true }));
     } finally { printer.destroy(); }
   }
   async function waitFor(test, message, timeout = 40000) {
@@ -84,7 +99,7 @@ async function runProduction(options) {
     const settings = args.at(-1), extension = settings.filters?.[0]?.extensions?.[0];
     assert(['xlsx', 'pdf'].includes(extension), 'Unexpected reimbursement export extension');
     dialogs.push({ title: settings.title, defaultPath: settings.defaultPath, extension });
-    const outputName = String(settings.defaultPath).includes('补票发票') ? 'export-supplement-invoices.pdf' : String(settings.defaultPath).includes('合并发票') ? 'export-invoices.pdf' : `export.${extension}`;
+    const outputName = String(settings.defaultPath).includes('补票发票') ? 'export-supplement-invoices.pdf' : String(settings.defaultPath).includes('报销发票汇总') ? 'export-invoices.pdf' : `export.${extension}`;
     return { canceled: false, filePath: path.join(options.directory, outputName) };
   };
   app.on('browser-window-created', (_event, candidate) => {
@@ -280,7 +295,7 @@ async function runProduction(options) {
     await fs.writeFile(formPath, writeZip(currentArchive));
     const updatedProfile = { ...options.profile, applicant: '测试申请人乙', companyName: '更新后的测试公司' };
     await js(profile => window.shitu.reimbursementSaveProfile(profile), updatedProfile);
-    await waitFor(async () => (await xml(formPath)).get('xl/worksheets/sheet1.xml').includes(updatedProfile.companyName), 'Company-name setting did not automatically update the existing workbook');
+    await waitFor(() => workbookIncludes(formPath, updatedProfile.companyName), 'Company-name setting did not automatically update the existing workbook');
     await js(request => window.shitu.reimbursementRefresh(request), request);
     const preservedXml = (await xml(formPath)).get('xl/worksheets/sheet1.xml');
     assert(preservedXml.includes('手工填写的交通费') && preservedXml.includes('<v>42.50</v>') && preservedXml.includes('测试申请人乙') && preservedXml.includes(updatedProfile.companyName), 'Profile sync discarded external expense edits or failed to update the company name');
@@ -291,7 +306,7 @@ async function runProduction(options) {
     const rootCategory = folder.reimbursement.categoryIds;
     const extra = await js(async (file, category) => { const result = await window.shitu.importPaths([file], category); applyLibrary(result.snapshot); return result; }, options.screenshots[3], rootCategory.other);
     await js(async (id, category, libraryRoot) => { const result = await window.shitu.moveAssetsToFolder([id], category, libraryRoot); applyLibrary(result); }, extra.report.assetIds[0], rootCategory.supplement, options.library);
-    await waitFor(() => js(async request => { const view = await window.shitu.reimbursementGet(request); return view.categories.find(item => item.key === 'supplement').evidenceItems.length === 4 && view.artifacts.supplementPdf.name.startsWith('4张_') && view.state === 'idle'; }, request), 'Native library move did not trigger automatic supplement rebuild');
+    await waitFor(() => js(async request => { const view = await window.shitu.reimbursementGet(request); return view.categories.find(item => item.key === 'supplement').evidenceItems.length === 4 && view.artifacts.supplementPdf.name.includes('_4张') && view.state === 'idle'; }, request), 'Native library move did not trigger automatic supplement rebuild');
     await checkpoint('ordinary library import then move into supplement category triggered the index watcher and rebuilt the same PDF');
 
     await js(async request => { applyLibrary(await window.shitu.getLibrary()); await window.shituReimbursements.open(request); }, request);
@@ -315,7 +330,7 @@ async function runProduction(options) {
     const cancelledSwitch = await js(() => window.shitu.openLibrary());
     openingTest = null;
     assert(cancelledSwitch.cancelled, 'Library switching did not cancel');
-    await waitFor(async () => (await xml(formPath)).get('xl/worksheets/sheet1.xml').includes('切库恢复测试'), 'Background generation did not resume after cancelling library switching');
+    await waitFor(() => workbookIncludes(formPath, '切库恢复测试'), 'Background generation did not resume after cancelling library switching');
     await checkpoint('background reimbursement generation pauses during library switching and resumes after cancellation');
 
     // Customize categories through the actual management UI, with files and a
@@ -540,10 +555,130 @@ async function runProduction(options) {
     await waitFor(() => js(id => Boolean(state.library.assets.find(item => item.id === id)?.trashedAt), nativeId), 'Workspace removal did not synchronize the main library renderer');
     assert(hash(await fs.readFile(path.join(options.library, nativeDeleted.filename))) === hash(await fs.readFile(options.nativeSyncInvoice)), 'Bidirectional synchronization changed original invoice bytes');
     await checkpoint('an open workspace follows native-library imports into category subfolders, trash and restore without manual refresh; native reimport restores identity into another category and workspace deletion updates the main library');
+    const invoiceTotalBeforeReference = (await js(request => window.shitu.reimbursementGet(request), request)).amounts.totalCents;
+    let reference = await js((request, file) => window.shitu.reimbursementImport({ ...request, category: 'supplement', purpose: 'evidence', paths: [file] }), request, options.purchaseScreenshot);
+    const referenceId = reference.report.assetIds[0];
+    assert(referenceId && reference.workspace.evidenceAmounts.items.find(item => item.assetId === referenceId)?.amountCents === 12800, 'Real Windows OCR did not read the purchase screenshot payment amount');
+    assert(reference.workspace.amounts.totalCents === invoiceTotalBeforeReference, 'Purchase screenshot changed the invoice total');
+    for (const item of reference.workspace.evidenceAmounts.items.filter(item => item.assetId !== referenceId)) {
+      await js(request => window.shitu.reimbursementSetAmount(request), { ...request, purpose: 'evidence', assetId: item.assetId, pageNumber: item.pageNumber, excluded: true });
+    }
+    const formBeforeReferenceEdit = hash(await fs.readFile(formPath));
+    await js(request => window.shituReimbursements.open(request), request);
+    await waitFor(() => js(id => !!document.querySelector(`[data-amount-purpose="evidence"][data-amount-asset="${id}"] input:not(:disabled)`), referenceId), 'Purchase reference amount controls unavailable');
+    await js(id => {
+      const row = document.querySelector(`[data-amount-purpose="evidence"][data-amount-asset="${id}"]`), input = row.querySelector('input');
+      input.value = '150.50'; input.dispatchEvent(new Event('input', { bubbles: true })); row.querySelector('[data-amount-save]').click();
+    }, referenceId);
+    await waitFor(() => js(async (request, id) => {
+      const view = await window.shitu.reimbursementGet(request);
+      return view.state === 'idle' && view.evidenceAmounts.items.find(item => item.assetId === id)?.amountCents === 15050;
+    }, request, referenceId), 'Purchase reference amount UI failed to save');
+    reference = await js(request => window.shitu.reimbursementGet(request), request);
+    const supplementAmount = reference.categories.find(item => item.key === 'supplement').amountCents;
+    const difference = (Math.max(0, 15050 - supplementAmount) / 100).toFixed(2);
+    await waitFor(() => js(value => document.querySelector('[data-evidence-difference="supplement"]')?.textContent.includes(value), difference), 'Remaining supplement reference amount did not update');
+    assert(reference.amounts.totalCents === invoiceTotalBeforeReference && reference.evidenceAmounts.pendingCount === 0, 'Reference amount editing affected reimbursement totals or left ignored references pending');
+    assert(hash(await fs.readFile(formPath)) === formBeforeReferenceEdit, 'Reference amount editing changed the actual reimbursement workbook');
+    await js(() => document.querySelector('[data-evidence-totals="supplement"]').scrollIntoView({ block: 'center' }));
+    await capture('reimbursement-evidence-totals.png');
+    await js(id => document.querySelector(`[data-amount-purpose="evidence"][data-amount-asset="${id}"]`).scrollIntoView({ block: 'center' }), referenceId);
+    await capture('reimbursement-evidence-amount.png');
+    await checkpoint('real purchase screenshot OCR, independent reference editing and remaining supplement amount work without changing invoice totals or XLSX bytes');
+    const beforeTrip = await js(request => window.shitu.reimbursementGet(request), request);
+    const tripResult = await js((request, paths) => window.shitu.reimbursementImport({ ...request, purpose: 'itinerary', paths }), request, [options.tripImage, options.tripPdf]);
+    assert(tripResult.report.imported === 2 && tripResult.workspace.itinerary.count === 2 && tripResult.workspace.artifacts.itineraryPdf.ready, 'Itinerary image and PDF did not create their own output');
+    assert(tripResult.workspace.amounts.totalCents === beforeTrip.amounts.totalCents && tripResult.workspace.evidenceAmounts.totalCents === beforeTrip.evidenceAmounts.totalCents, 'Itinerary entered the reimbursement or purchase reference amounts');
+    const tripSnapshot = await js(() => window.shitu.getLibrary()), tripAsset = tripSnapshot.assets.find(asset => asset.id === tripResult.workspace.artifacts.itineraryPdf.assetId);
+    assert((await fs.readFile(path.join(options.library, tripAsset.filename))).toString('latin1').match(/\/Type\s*\/Page\b/g)?.length === 3, 'Itinerary image and two PDF pages did not become three A4 pages');
+    await js(request => window.shituReimbursements.open(request), request);
+    await waitFor(() => js(() => document.querySelector('#rb-itinerary .rb-file-list')?.children.length === 2 && !document.querySelector('[data-artifact="itineraryPdf"] button')?.disabled), 'Itinerary UI did not reflect the real imported files');
+    await js(() => document.querySelector('#rb-itinerary').scrollIntoView({ block: 'center' }));
+    await capture('reimbursement-itinerary.png');
+
+    const tripSourcePdfId = tripResult.report.assetIds.find(id => tripSnapshot.assets.find(asset => asset.id === id)?.ext === 'pdf');
+    const pdfPreview = await js(request => window.shitu.reimbursementPreview(request), { ...request, assetId: tripSourcePdfId, pageNumber: 2 });
+    assert(pdfPreview.type === 'image' && /^data:image\/jpeg;base64,/.test(pdfPreview.url) && pdfPreview.pageNumber === 2 && pdfPreview.pageCount === 2, 'Real preview IPC did not render the original PDF second page as JPEG');
+    await js(() => window.shitu.reimbursementPreviewCancel());
+    const waitPreview = async (assetId, pageNumber, pageCount) => waitFor(() => js((assetId, pageNumber, pageCount) => {
+      const current = window.MosaicReimbursementPreview?.currentRequest(), image = document.querySelector('#rb-preview-image');
+      return current?.assetId === assetId && current.pageNumber === pageNumber && image && !image.hidden && image.complete && image.naturalWidth > 0 &&
+        /^data:image\/jpeg;base64,/.test(image.getAttribute('src') || '') && document.querySelector('#rb-preview-page')?.textContent === `${pageNumber} / ${pageCount}`;
+    }, assetId, pageNumber, pageCount), 'Preview did not show the expected original image or PDF page', 65000);
+    const clickPreviewName = async key => {
+      await waitFor(() => js(key => Boolean([...document.querySelectorAll('button[data-preview-key]')].find(button => button.dataset.previewKey === key && !button.disabled)), key), `File name was not previewable: ${key}`);
+      await js(key => { const button = [...document.querySelectorAll('button[data-preview-key]')].find(button => button.dataset.previewKey === key); button.scrollIntoView({ block: 'center' }); button.click(); }, key);
+    };
+    const closePreview = async () => {
+      await js(() => document.querySelector('#rb-preview-close').click());
+      await waitFor(() => js(() => !window.MosaicReimbursementPreview.isOpen() && !document.querySelector('#reimbursementCenter').inert), 'Preview close did not restore the reimbursement workspace');
+    };
+    await js(id => { const input = document.querySelector(`[data-amount-purpose="evidence"][data-amount-asset="${id}"] input`); input.value = '151.01'; input.dispatchEvent(new Event('input', { bubbles: true })); }, referenceId);
+    await clickPreviewName(`file:${referenceId}`);
+    await waitPreview(referenceId, 1, 1);
+    assert(await js(() => document.querySelector('#reimbursementCenter').inert && document.querySelector('#rb-preview-next').disabled), 'Image preview did not isolate the underlying workspace or allowed nonexistent pages');
+    await js(() => document.querySelector('#rb-preview-zoom').click());
+    assert(await js(() => document.querySelector('#rb-preview-zoom').getAttribute('aria-pressed') === 'true'), 'Preview original-size zoom did not toggle');
+    await capture('reimbursement-preview-image.png');
+    const previousPreviewUrl = await js(() => document.querySelector('#rb-preview-image').getAttribute('src'));
+    const switchingPreview = await js((request, name) => {
+      void window.MosaicReimbursementPreview.open({ request, name });
+      return !document.querySelector('#rb-preview-image').hasAttribute('src') && document.querySelector('#rb-preview-image').hidden;
+    }, { ...request, assetId: autoImageId, pageNumber: 1 }, '合成发票图片');
+    assert(switchingPreview, 'Changing preview sources left the earlier image visible while loading');
+    await waitPreview(autoImageId, 1, 1);
+    assert(await js(old => document.querySelector('#rb-preview-image').getAttribute('src') !== old, previousPreviewUrl), 'Changing files reused the old preview image');
+    await closePreview();
+    await clickPreviewName(`file:${autoImageId}`); await waitPreview(autoImageId, 1, 1); await closePreview();
+    await clickPreviewName(`amount:evidence:${referenceId}:1`); await waitPreview(referenceId, 1, 1); await closePreview();
+    assert(await js(id => document.querySelector(`[data-amount-purpose="evidence"][data-amount-asset="${id}"] input`).value === '151.01', referenceId), 'Opening and closing previews lost an unsaved amount draft');
+    assert((await js(request => window.shitu.reimbursementGet(request), request)).evidenceAmounts.items.find(item => item.assetId === referenceId).amountCents === 15050, 'Preview silently saved the amount draft');
+    await js(id => { const input = document.querySelector(`[data-amount-purpose="evidence"][data-amount-asset="${id}"] input`); input.value = '150.50'; input.dispatchEvent(new Event('input', { bubbles: true })); }, referenceId);
+    await checkpoint('file names in categories and screenshot amount rows open safe JPEG previews; zoom, source replacement and close preserve unsaved amount drafts');
+
+    await clickPreviewName(`amount:invoice:${supplementInvoiceId}:2`); await waitPreview(supplementInvoiceId, 2, 2);
+    assert(await js(() => document.querySelector('#rb-preview-next').disabled && !document.querySelector('#rb-preview-previous').disabled), 'PDF amount-row preview did not open the corresponding second page');
+    await capture('reimbursement-preview-pdf-page2.png');
+    await js(() => document.querySelector('#rb-preview-previous').click()); await waitPreview(supplementInvoiceId, 1, 2);
+    await js(() => document.querySelector('#rb-preview-next').click()); await waitPreview(supplementInvoiceId, 2, 2); await closePreview();
+    await clickPreviewName(`file:${tripSourcePdfId}`); await waitPreview(tripSourcePdfId, 1, 2);
+    await js(() => document.querySelector('#rb-preview-next').click()); await waitPreview(tripSourcePdfId, 2, 2); await closePreview();
+    await clickPreviewName('artifact:itineraryPdf'); await waitPreview(tripAsset.id, 1, 3); await closePreview();
+    await clickPreviewName('artifact:form');
+    await waitFor(() => js(() => window.MosaicReimbursementPreview.isOpen() && document.querySelector('#rb-preview-status')?.textContent.includes('默认软件') && document.querySelector('#rb-preview-image').hidden), 'XLSX file name did not open the safe external-format preview state');
+    assert(await js(() => !document.querySelector('#rb-preview-open-source').disabled), 'External-format preview did not offer an explicit open-source action');
+    await capture('reimbursement-preview-form.png'); await closePreview();
+    await checkpoint('real main/preload previews original PDF page 2, per-page amount names, itinerary sources and generated PDF names; XLSX stays in a safe preview layer without launching Excel');
+
+    const exportRoot = path.join(options.directory, '完整报销导出'); await fs.mkdir(exportRoot);
+    openingTest = async settings => {
+      assert(settings.properties.includes('openDirectory'), 'Export-all did not choose a directory');
+      return { canceled: false, filePaths: [exportRoot] };
+    };
+    await js(() => document.querySelector('#rb-export-all').click());
+    await waitFor(async () => {
+      const folders = await fs.readdir(exportRoot);
+      if (folders.length !== 1) return false;
+      const files = await fs.readdir(path.join(exportRoot, folders[0]));
+      return files.filter(name => name.endsWith('.pdf')).length === 4 && files.filter(name => name.endsWith('.xlsx')).length === 1 && await js(() => !document.querySelector('#rb-export-all').disabled);
+    }, 'Export-all did not finish the complete folder', 65000);
+    openingTest = null;
+    const [exportFolder] = await fs.readdir(exportRoot), exportedNames = await fs.readdir(path.join(exportRoot, exportFolder));
+    const savedProfile = await js(() => window.shitu.reimbursementGetProfile());
+    const prefix = require(path.join(options.root, 'src/reimbursement-names.cjs')).reimbursementBundleName(savedProfile, options.date);
+    assert(exportFolder === `${prefix}_报销资料` && exportedNames.filter(name => name.endsWith('.pdf')).every(name => name.startsWith(`${prefix}_`)), 'Export folder or PDF names omitted applicant/year/month');
+    const exportedView = await js(request => window.shitu.reimbursementGet(request), request), exportedSnapshot = await js(() => window.shitu.getLibrary());
+    for (const artifact of Object.values(exportedView.artifacts)) if (artifact.ready) {
+      const asset = exportedSnapshot.assets.find(item => item.id === artifact.assetId), filename = `${asset.name}.${asset.ext}`;
+      assert(exportedNames.includes(filename) && hash(await fs.readFile(path.join(exportRoot, exportFolder, filename))) === asset.hash, 'Complete export did not preserve exact generated bytes');
+    }
+    assert(exportedView.amounts.totalCents === beforeTrip.amounts.totalCents, 'Export-all changed reimbursement totals');
+    await capture('reimbursement-export-all.png');
+    await checkpoint('itinerary images and PDF pages auto-merge without amounts; one UI export creates a Chinese applicant/month folder with the exact XLSX and all four PDFs');
     assert(hash(await fs.readFile(path.join(options.root, 'assets/reimbursement-template.xlsx'))) === options.templateHash, 'Bundled template was modified');
     assert(errors.length === 0, `Production runtime errors: ${errors.join('\n')}`);
     await checkpoint('production export IPC wrote valid XLSX/PDF; bundled template unchanged; no renderer/preload/main errors');
-    await persist({ ok: true, library: options.library, folderId, formAssetId: formId, supplementPdfAssetId: supplementId, invoicePdfAssetId: invoicePdfId, supplementInvoicePdfAssetId: supplementInvoicePdfId, restorations: { nativeDrop: 1, supplementInvoice: restoredInvoiceImport.report.restored, evidence: restoredEvidenceImport.report.restored, nativeLibraryReimport: nativeReimport.report.restored }, screenshots: ['reimbursement-settings.png', 'reimbursement-workspace-empty.png', 'reimbursement-workspace.png', 'reimbursement-custom-categories.png', 'reimbursement-restored-supplement.png', 'reimbursement-invoices-stale.png', 'reimbursement-invoices-merged.png', 'reimbursement-amounts.png', 'reimbursement-file-removed.png', 'reimbursement-files-restored.png', 'reimbursement-drag-restored.png', 'reimbursement-native-library-sync.png'], exports: ['export.xlsx', 'export.pdf', 'export-invoices.pdf', 'export-supplement-invoices.pdf'] });
+    await persist({ ok: true, library: options.library, folderId, formAssetId: formId, supplementPdfAssetId: supplementId, invoicePdfAssetId: invoicePdfId, supplementInvoicePdfAssetId: supplementInvoicePdfId, restorations: { nativeDrop: 1, supplementInvoice: restoredInvoiceImport.report.restored, evidence: restoredEvidenceImport.report.restored, nativeLibraryReimport: nativeReimport.report.restored }, screenshots: ['reimbursement-settings.png', 'reimbursement-workspace-empty.png', 'reimbursement-workspace.png', 'reimbursement-custom-categories.png', 'reimbursement-restored-supplement.png', 'reimbursement-invoices-stale.png', 'reimbursement-invoices-merged.png', 'reimbursement-amounts.png', 'reimbursement-file-removed.png', 'reimbursement-files-restored.png', 'reimbursement-drag-restored.png', 'reimbursement-native-library-sync.png', 'reimbursement-preview-image.png', 'reimbursement-preview-pdf-page2.png', 'reimbursement-preview-form.png'], exports: ['export.xlsx', 'export.pdf', 'export-invoices.pdf', 'export-supplement-invoices.pdf'] });
     app.exit(0);
   } catch (error) {
     if (window && !window.isDestroyed()) await capture('failure.png').catch(() => {});
@@ -578,6 +713,8 @@ async function main() {
   const date = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
   const [y, m, d] = date.split('-').map(Number);
   const options = { root: appRoot, directory, library, screenshots, travelPdf, invoiceImages, multiPageInvoice, invoiceUnsupported, invoiceSourceHashes, autoImageInvoice: path.join(directory, 'OCR金额发票.png'), ambiguousOcrInvoice: path.join(directory, 'OCR小数点不确定发票.png'), textInvoice: path.join(directory, '文字层金额发票.pdf'), supplementInvoice: path.join(directory, '两页补票发票.pdf'), nativeSyncInvoice: path.join(directory, '普通入口同步发票.pdf'), date, dateChinese: `${y}年${m}月${d}日`, profile: { companyName: '示例公司', applicant: '测试申请人甲', accountName: '测试收款人', bankName: '测试银行北京支行', accountNumber: '00123456789012345678' }, templateHash: hash(await fs.readFile(path.join(appRoot, 'assets/reimbursement-template.xlsx'))) };
+  options.purchaseScreenshot = path.join(directory, '实付款购买截图.png');
+  options.tripImage = path.join(directory, '打车图片行程单.png'); options.tripPdf = path.join(directory, '两页打车行程单.pdf');
   await fs.writeFile(path.join(directory, 'options.json'), JSON.stringify(options));
   await fs.writeFile(path.join(directory, 'fixture-app/package.json'), JSON.stringify({ name: 'mosaic-reimbursement-smoke', version: require('../package.json').version, main: 'main.cjs' }));
   await fs.writeFile(path.join(directory, 'fixture-app/main.cjs'), `require(${JSON.stringify(__filename)}).runProduction(require(${JSON.stringify(path.join(directory, 'options.json'))}));`);

@@ -15,7 +15,7 @@ module.exports = function configureWindowHeaderSmoke({ root, base }) {
     win97: [0, 0, 0, 0], win98: [0, 0, 0, 0], winxp: [10, 10, 6, 6]
   };
   const actions = ['#skinButton', '#collectorButton', '#toggleDetails', '#headerMoreButton'];
-  const captionButtons = ['#windowMinimize', '#windowMaximize', '#windowClose'];
+  const captionButtons = ['#windowPin', '#windowMinimize', '#windowMaximize', '#windowClose'];
   const failures = [];
   const network = [];
   const screenshots = [];
@@ -463,6 +463,24 @@ module.exports = function configureWindowHeaderSmoke({ root, base }) {
       assert.ok(sample?.id, 'Sample import failed');
       await wait(() => visible('#windowControls'), 'Window controls did not load');
       assert.equal((await js('api.windowState()')).customControls, true);
+      assert.equal(window.isAlwaysOnTop(), false, 'New windows must default to ordinary stacking');
+      assert.equal((await js('api.windowState()')).alwaysOnTop, false);
+      const folderModeBeforePin = await js('folderPanelMode');
+      await click('#windowPin');
+      await wait(() => window.isAlwaysOnTop(), 'Window pin did not enable native always-on-top');
+      await wait(() => js(`document.querySelector('#windowPin').getAttribute('aria-pressed') === 'true'`), 'Pin state did not reach the renderer');
+      assert.equal((await js('api.windowState()')).alwaysOnTop, true);
+      assert.ok(await js(`document.querySelector('#windowPin').title.includes('当前已置顶') && document.querySelector('#windowPin').getAttribute('aria-label') === '取消窗口置顶'`));
+      assert.equal(await js(`getComputedStyle(document.querySelector('#windowPin')).getPropertyValue('app-region') || getComputedStyle(document.querySelector('#windowPin')).getPropertyValue('-webkit-app-region')`), 'no-drag');
+      await capture('window-pinned-1080x700.png');
+      await press('Space');
+      await wait(() => !window.isAlwaysOnTop(), 'Keyboard activation did not turn pin off');
+      await wait(() => js(`document.querySelector('#windowPin').getAttribute('aria-pressed') === 'false'`), 'Unpin state did not reach the renderer');
+      assert.equal(await js('folderPanelMode'), folderModeBeforePin, 'Window pin changed the folder sidebar pin');
+      window.setAlwaysOnTop(true);
+      await wait(() => js(`document.querySelector('#windowPin').getAttribute('aria-pressed') === 'true'`), 'Native always-on-top change did not update the UI');
+      window.setAlwaysOnTop(false);
+      await wait(() => js(`document.querySelector('#windowPin').getAttribute('aria-pressed') === 'false'`), 'Native always-on-top reset did not update the UI');
       const libraryLabels = [
         ['D:\\工作\\拾图素材库', 'Mosaic 素材库'],
         ['D:\\工作\\拾图素材库 2\\', 'Mosaic 素材库 2'],
@@ -515,6 +533,12 @@ module.exports = function configureWindowHeaderSmoke({ root, base }) {
           assert.equal(icon, label, 'Famicom library icon does not use the header text color');
         }
         await capture(`header-${skin}-1080x700.png`);
+        await click('#windowPin');
+        await wait(() => window.isAlwaysOnTop(), `${skin}: pin is not clickable`);
+        await wait(() => js(`document.querySelector('#windowPin').getAttribute('aria-pressed') === 'true'`), `${skin}: pin UI did not update`);
+        if (skin === 'mac') await capture('window-pin-mac-1080x700.png');
+        await click('#windowPin');
+        await wait(() => !window.isAlwaysOnTop(), `${skin}: pin could not be disabled`);
         nativeCorners[skin] = await checkNativeCorners(skin, 'at compact size');
       }
       assert.ok(new Set(descriptors.map(descriptor => descriptor.captionStyles.join())).size >= 8, 'Caption buttons do not distinguish the skin designs');
@@ -621,6 +645,7 @@ module.exports = function configureWindowHeaderSmoke({ root, base }) {
         const result = { ok: normalClose, compactHeaderAtBothWidths: true, pinnedSidebarAndDetailsFit: true, brandMotion, captionStyles: descriptors, draggableHeader: true, nativeHitTest, nativeCorners, groupedMenuKeyboardDismissed: true, deviceSettingsOpensFromMenu: true,
           narrowPinnedSkins, widePinnedSkins,
           nativeMaximizeAndRestore: true, nativeMinimizeAndRestore: true, captionWorksInPreviewAndModal: true,
+          alwaysOnTopDefaultsOff: true, alwaysOnTopToggleAllSkins: true, alwaysOnTopKeyboard: true, nativeAlwaysOnTopEvents: true, independentFolderPin: true,
           existingCloseGuardHonored: normalClose, nativeMessages, networkRequests: network.length, screenshots };
         fs.writeFileSync(path.join(base, 'result.json'), JSON.stringify(result, null, 2));
         if (!normalClose) app.exit(1);

@@ -43,7 +43,7 @@ test('creates a typed root and five default categories in one atomic save and re
   assert.equal(calls, 1);
   const folder = rootOf(snapshot, folderId);
   assert.equal(folder.kind, 'reimbursement'); assert.equal(folder.parentId, parent.id);
-  assert.deepEqual(Object.keys(folder.reimbursement), ['version', 'categoryIds', 'formAssetId', 'supplementPdfAssetId', 'invoicePdfAssetId', 'supplementInvoicePdfAssetId']);
+  assert.deepEqual(Object.keys(folder.reimbursement), ['version', 'categoryIds', 'formAssetId', 'supplementPdfAssetId', 'invoicePdfAssetId', 'supplementInvoicePdfAssetId', 'itineraryFolderId', 'itineraryPdfAssetId']);
   assert.equal(folder.reimbursement.formAssetId, null); assert.equal(folder.reimbursement.supplementPdfAssetId, null);
   assert.equal(folder.reimbursement.invoicePdfAssetId, null);
   assert.equal(folder.reimbursement.supplementInvoicePdfAssetId, null);
@@ -934,4 +934,261 @@ test('failed restoration commits keep old trash state and remove only newly impo
     assert.deepEqual((await fs.readdir(path.join(library.root, 'originals'))).sort(), originals);
     assert.deepEqual((await fs.readdir(path.join(library.root, 'thumbnails'))).sort(), covers);
   }
+});
+
+test('evidence display amounts remain independent through purpose switches, moves, restoration and reload', async t => {
+  const f = await fixture(t), { library } = f, { folderId } = await library.createReimbursementFolder('购买截图');
+  const categories = rootOf(library.snapshot(), folderId).reimbursement.categoryIds;
+  const nested = (await library.createFolder('支付说明', categories.supplement)).folders.at(-1).id;
+  const bytes = await sharp({ create: { width: 12, height: 9, channels: 3, background: '#cceeff' } }).png().toBuffer();
+  const source = await f.source('purchase.png', bytes), { assetIds: [id] } = await library.importPaths([source], { folderId: nested });
+  const invoice = { version: 1, engineVersion: 3, sourceHash: hash(bytes), pages: [amountPage({ amountCents: 1234, detectedCents: 1234 })] };
+  const evidence = { version: 1, engineVersion: 3, sourceHash: hash(bytes), pages: [amountPage({ amountCents: 7890, detectedCents: null, status: 'manual' })] };
+  await library.setReimbursementAmounts(id, invoice);
+  let saved = await library.setReimbursementEvidenceAmounts(id, evidence);
+  assert.deepEqual(assetOf(saved, id).reimbursementEvidenceAmounts, evidence);
+  assert.deepEqual(assetOf(saved, id).reimbursementAmounts, invoice);
+  await library.setReimbursementSupplementInvoice([id], true);
+  const invoicePurpose = library.snapshot();
+  await assert.rejects(library.setReimbursementEvidenceAmounts(id, evidence), /购买截图/);
+  assert.deepEqual(library.snapshot(), invoicePurpose);
+  assert.deepEqual(assetOf(invoicePurpose, id).reimbursementEvidenceAmounts, evidence);
+  await library.setReimbursementAmounts(id, { ...invoice, pages: [amountPage({ amountCents: 4321 })] });
+  await library.setReimbursementSupplementInvoice([id], false);
+  saved = library.snapshot();
+  assert.equal(assetOf(saved, id).reimbursementAmounts.pages[0].amountCents, 4321);
+  assert.equal(assetOf(saved, id).reimbursementEvidenceAmounts.pages[0].amountCents, 7890);
+  await library.moveAssetsToFolder([id], categories.other);
+  await assert.rejects(library.setReimbursementEvidenceAmounts(id, evidence), /购买截图/);
+  assert.deepEqual(assetOf(library.snapshot(), id).reimbursementEvidenceAmounts, evidence, 'moving the image must retain its evidence record');
+  await library.setTrash([id], true);
+  const restored = await library.importPaths([source], { folderId: nested, restoreTrashed: true });
+  assert.deepEqual(restored.restoredAssetIds, [id]);
+  await library.updateAssets([id], { notes: '仅显示金额，不计报销' });
+  const reopened = await new Library({ root: library.root }).init(), asset = assetOf(reopened, id);
+  assert.deepEqual(asset.reimbursementEvidenceAmounts, evidence);
+  assert.equal(asset.reimbursementAmounts.pages[0].amountCents, 4321);
+  assert.equal(asset.notes, '仅显示金额，不计报销');
+  assert.equal(asset.hash, hash(bytes)); assert.deepEqual(await fs.readFile(library.getAssetPath(id)), bytes);
+});
+
+test('evidence amount writes require a current supplement evidence image and strictly validate the persisted field', async t => {
+  const f = await fixture(t), { library } = f, { folderId } = await library.createReimbursementFolder('截图金额校验');
+  const categories = rootOf(library.snapshot(), folderId).reimbursement.categoryIds;
+  const imageBytes = await sharp({ create: { width: 7, height: 5, channels: 3, background: '#abcdef' } }).png().toBuffer();
+  const image = await f.source('evidence.png', imageBytes), pdf = await f.source('invoice.pdf', f.pdf('evidence validation'));
+  const { assetIds: [imageId, pdfId] } = await library.importPaths([image, pdf], { folderId: categories.supplement });
+  const summary = { version: 1, sourceHash: hash(imageBytes), pages: [amountPage()] };
+  const before = library.snapshot(), index = await fs.readFile(library.indexPath);
+  for (const [id, value] of [[pdfId, summary], ['missing', summary], [imageId, null],
+    [imageId, { ...summary, pages: [amountPage({ amountCents: -1 })] }], [imageId, { ...summary, text: 'full OCR text' }]]) {
+    await assert.rejects(library.setReimbursementEvidenceAmounts(id, value));
+    assert.deepEqual(library.snapshot(), before); assert.deepEqual(await fs.readFile(library.indexPath), index);
+  }
+  const outside = structuredClone(library.data);
+  outside.folders = []; outside.assets = outside.assets.filter(asset => asset.id === imageId);
+  outside.assets[0].folderId = null; outside.assets[0].reimbursementEvidenceAmounts = { ...summary, pages: [amountPage({ status: 'invalid' })] };
+  assert.throws(() => library._validate(outside), /金额/);
+  const wrongType = structuredClone(library.data);
+  assetOf(wrongType, pdfId).reimbursementEvidenceAmounts = summary;
+  assert.throws(() => library._validate(wrongType), /购买截图金额素材类型/);
+  // Role changes are serialized before validating a following amount write.
+  const queued = await Promise.allSettled([library.setReimbursementSupplementInvoice([imageId], true), library.setReimbursementEvidenceAmounts(imageId, summary)]);
+  assert.equal(queued[0].status, 'fulfilled'); assert.equal(queued[1].status, 'rejected');
+  assert.equal(Object.hasOwn(assetOf(library.snapshot(), imageId), 'reimbursementEvidenceAmounts'), false);
+});
+
+test('evidence amount hash checks, no-op saves and failed commits preserve original bytes and invoice records', async t => {
+  const f = await fixture(t), { library } = f, { folderId } = await library.createReimbursementFolder('截图保存');
+  const folder = rootOf(library.snapshot(), folderId).reimbursement.categoryIds.supplement;
+  const bytes = await sharp({ create: { width: 9, height: 6, channels: 3, background: '#345678' } }).png().toBuffer();
+  const source = await f.source('purchase.png', bytes), { assetIds: [id] } = await library.importPaths([source], { folderId: folder });
+  const summary = { version: 1, sourceHash: hash(bytes), pages: [amountPage({ status: 'manual' })] };
+  await library.setReimbursementAmounts(id, summary);
+  const persist = library._persist.bind(library); let saves = 0;
+  library._persist = async data => { saves++; return persist(data); };
+  await library.setReimbursementEvidenceAmounts(id, summary);
+  const firstIndex = await fs.readFile(library.indexPath);
+  await library.setReimbursementEvidenceAmounts(id, structuredClone(summary));
+  assert.equal(saves, 1); assert.deepEqual(await fs.readFile(library.indexPath), firstIndex);
+  const edited = await sharp({ create: { width: 9, height: 6, channels: 3, background: '#112233' } }).png().toBuffer();
+  await fs.writeFile(library.getAssetPath(id), edited);
+  await assert.rejects(library.setReimbursementEvidenceAmounts(id, summary), /截图原件已变化/);
+  assert.equal(saves, 1, 'a cached no-op must still verify the actual original');
+  const changed = { ...summary, sourceHash: hash(edited), pages: [amountPage({ amountCents: 8888, status: 'manual' })] };
+  await library.setReimbursementEvidenceAmounts(id, changed);
+  assert.equal(assetOf(library.snapshot(), id).hash, hash(bytes));
+  assert.deepEqual(assetOf(library.snapshot(), id).reimbursementAmounts, summary);
+  const before = library.snapshot(), index = await fs.readFile(library.indexPath);
+  library._persist = async () => { throw new Error('evidence commit failed'); };
+  await assert.rejects(library.setReimbursementEvidenceAmounts(id, { ...changed, pages: [amountPage({ amountCents: 9999 })] }), /evidence commit failed/);
+  assert.deepEqual(library.snapshot(), before); assert.deepEqual(await fs.readFile(library.indexPath), index);
+  assert.deepEqual(await fs.readFile(library.getAssetPath(id)), edited);
+});
+
+test('itinerary folders are lazy, independent of categories, name-safe and idempotent after rename and reload', async t => {
+  const { library } = await fixture(t), { folderId } = await library.createReimbursementFolder('行程单');
+  const before = library.snapshot(), categories = rootOf(before, folderId).reimbursement.categoryIds;
+  assert.equal(before.folders.length, 6); assert.equal(rootOf(before, folderId).reimbursement.itineraryFolderId, null);
+  const ordinary = (await library.createFolder('打车行程单', folderId)).folders.at(-1);
+  const persist = library._persist.bind(library); let saves = 0;
+  library._persist = async data => { saves++; return persist(data); };
+  const ensured = await library.ensureReimbursementItinerary(folderId), id = ensured.folderId;
+  assert.notEqual(id, ordinary.id); assert.equal(rootOf(ensured.snapshot, id).name, '打车行程单 2');
+  assert.equal(rootOf(ensured.snapshot, id).parentId, folderId);
+  assert.equal(ReimbursementFolders.isCategory(rootOf(ensured.snapshot, id)), false);
+  assert.deepEqual(rootOf(ensured.snapshot, folderId).reimbursement.categoryIds, categories);
+  assert.equal(rootOf(ensured.snapshot, folderId).reimbursement.itineraryFolderId, id);
+  assert.equal(saves, 1);
+  const index = await fs.readFile(library.indexPath);
+  assert.equal((await library.ensureReimbursementItinerary(folderId)).folderId, id);
+  assert.equal(saves, 1); assert.deepEqual(await fs.readFile(library.indexPath), index);
+  await library.renameFolder(id, '自定义行程名称');
+  assert.equal((await library.ensureReimbursementItinerary(folderId)).folderId, id);
+  const reopened = new Library({ root: library.root }); await reopened.init();
+  assert.equal((await reopened.ensureReimbursementItinerary(folderId)).folderId, id);
+  const saved = reopened.snapshot();
+  await assert.rejects(reopened.moveFolder(id, null), /行程单文件夹引用无效/);
+  assert.deepEqual(reopened.snapshot(), saved);
+  await assert.rejects(reopened.ensureReimbursementItinerary(ordinary.id), /报销文件夹已不存在/);
+});
+
+test('itinerary creation is atomic and legacy reimbursement roots need no migration write', async t => {
+  const { library } = await fixture(t), { folderId } = await library.createReimbursementFolder('旧报销');
+  const old = structuredClone(library.data);
+  for (const key of ['itineraryFolderId', 'itineraryPdfAssetId', 'itineraryPdfSignature']) delete rootOf(old, folderId).reimbursement[key];
+  await fs.writeFile(library.indexPath, JSON.stringify(old));
+  const index = await fs.readFile(library.indexPath), reopened = new Library({ root: library.root }); await reopened.init();
+  await reopened.clearReimbursementDocument(folderId, 'itineraryPdf');
+  await reopened.setReimbursementItinerarySignature(folderId, null);
+  assert.deepEqual(await fs.readFile(library.indexPath), index);
+  const before = reopened.snapshot(), persist = reopened._persist.bind(reopened);
+  reopened._persist = async () => { throw new Error('itinerary save denied'); };
+  await assert.rejects(reopened.ensureReimbursementItinerary(folderId), /itinerary save denied/);
+  assert.deepEqual(reopened.snapshot(), before); assert.deepEqual(await fs.readFile(library.indexPath), index);
+  reopened._persist = persist;
+  const ensured = await reopened.ensureReimbursementItinerary(folderId);
+  assert.equal(rootOf(ensured.snapshot, ensured.folderId).parentId, folderId);
+  assert.equal(ReimbursementFolders.listCategories(ensured.snapshot.folders, folderId).length, 5);
+});
+
+test('itinerary pointers reject missing, nested, foreign and reimbursement-classified folders', async t => {
+  const { library } = await fixture(t), { folderId } = await library.createReimbursementFolder('所属报销');
+  const { folderId: otherRoot } = await library.createReimbursementFolder('其他报销');
+  const direct = (await library.createFolder('普通', folderId)).folders.at(-1).id;
+  const nested = (await library.createFolder('嵌套', direct)).folders.at(-1).id;
+  const foreign = (await library.createFolder('其他子目录', otherRoot)).folders.at(-1).id;
+  const inner = await library.createReimbursementFolder('独立子报销', folderId);
+  const categories = rootOf(library.snapshot(), folderId).reimbursement.categoryIds;
+  for (const pointer of [123, 'bad/id', crypto.randomUUID(), folderId, otherRoot, categories.travel, nested, foreign, inner.folderId]) {
+    const data = structuredClone(library.data); rootOf(data, folderId).reimbursement.itineraryFolderId = pointer;
+    assert.throws(() => library._validate(data), /行程单文件夹引用无效/);
+  }
+  const valid = structuredClone(library.data); rootOf(valid, folderId).reimbursement.itineraryFolderId = direct;
+  assert.doesNotThrow(() => library._validate(valid));
+});
+
+test('deleting an itinerary folder clears its pointer and signature atomically while retaining all original files', async t => {
+  const f = await fixture(t), { library } = f, { folderId } = await library.createReimbursementFolder('删除行程目录');
+  const itinerary = await library.ensureReimbursementItinerary(folderId);
+  const nested = (await library.createFolder('旧行程', itinerary.folderId)).folders.at(-1).id;
+  const source = await f.source('trip.pdf', f.pdf('original trip'));
+  const { assetIds: [sourceId] } = await library.importPaths([source], { folderId: nested });
+  const generated = await library.upsertReimbursementDocument(folderId, 'itineraryPdf', source, '行程单合并');
+  await library.setReimbursementItinerarySignature(folderId, hash(Buffer.from('itinerary signature')));
+  const before = library.snapshot(), index = await fs.readFile(library.indexPath), persist = library._persist.bind(library);
+  library._persist = async () => { throw new Error('delete itinerary denied'); };
+  await assert.rejects(library.deleteFolder(itinerary.folderId), /delete itinerary denied/);
+  assert.deepEqual(library.snapshot(), before); assert.deepEqual(await fs.readFile(library.indexPath), index);
+  library._persist = persist;
+  const deleted = await library.deleteFolder(itinerary.folderId);
+  assert.equal(rootOf(deleted, folderId).reimbursement.itineraryFolderId, null);
+  assert.equal(rootOf(deleted, folderId).reimbursement.itineraryPdfSignature, null);
+  assert.equal(assetOf(deleted, sourceId).folderId, null); assert.equal(assetOf(deleted, sourceId).trashedAt, null);
+  assert.equal(assetOf(deleted, generated.assetId).trashedAt, null, 'the service is responsible for retiring its generated PDF');
+  for (const id of [sourceId, generated.assetId]) assert.deepEqual(await fs.readFile(library.getAssetPath(id)), f.pdf('original trip'));
+  const replacement = await library.ensureReimbursementItinerary(folderId);
+  assert.notEqual(replacement.folderId, itinerary.folderId);
+  assert.equal(assetOf(replacement.snapshot, sourceId).folderId, null);
+  assert.equal(ReimbursementFolders.listCategories(replacement.snapshot.folders, folderId).length, 5);
+});
+
+test('itinerary generated PDFs and signatures remain independent and clear together', async t => {
+  const f = await fixture(t), { library } = f, { folderId } = await library.createReimbursementFolder('行程签名');
+  const source = await f.source('shared.pdf', f.pdf('shared bytes'));
+  const ordinary = await library.upsertReimbursementDocument(folderId, 'invoicePdf', source, '普通发票');
+  const itinerary = await library.upsertReimbursementDocument(folderId, 'itineraryPdf', source, '打车行程单');
+  assert.notEqual(itinerary.assetId, ordinary.assetId);
+  assert.equal(rootOf(itinerary.snapshot, folderId).reimbursement.itineraryPdfAssetId, itinerary.assetId);
+  const signature = hash(Buffer.from('trip sources'));
+  await library.setReimbursementItinerarySignature(folderId, signature);
+  const index = await fs.readFile(library.indexPath);
+  await library.setReimbursementItinerarySignature(folderId, signature);
+  assert.deepEqual(await fs.readFile(library.indexPath), index);
+  for (const bad of [undefined, '', 'bad', 'A'.repeat(64), 123, {}]) await assert.rejects(library.setReimbursementItinerarySignature(folderId, bad), /签名无效/);
+  const invalid = structuredClone(library.data); rootOf(invalid, folderId).reimbursement.itineraryPdfAssetId = ordinary.assetId;
+  assert.throws(() => library._validate(invalid), /引用了其他素材/);
+  const badSignature = structuredClone(library.data); rootOf(badSignature, folderId).reimbursement.itineraryPdfSignature = 'invalid';
+  assert.throws(() => library._validate(badSignature), /签名无效/);
+  const cleared = await library.clearReimbursementDocument(folderId, 'itineraryPdf');
+  assert.equal(rootOf(cleared, folderId).reimbursement.itineraryPdfSignature, null);
+  assert.equal(rootOf(cleared, folderId).reimbursement.itineraryPdfAssetId, null);
+  assert.ok(assetOf(cleared, itinerary.assetId).trashedAt); assert.equal(assetOf(cleared, ordinary.assetId).trashedAt, null);
+  assert.equal((await library.upsertReimbursementDocument(folderId, 'itineraryPdf', source, '重新生成')).assetId, itinerary.assetId);
+  const loaded = await new Library({ root: library.root }).init();
+  assert.equal(rootOf(loaded, folderId).reimbursement.itineraryPdfAssetId, itinerary.assetId);
+});
+
+test('itinerary imports restore matching deleted originals and reject other formats through native import and move paths', async t => {
+  const f = await fixture(t), { library } = f, { folderId } = await library.createReimbursementFolder('行程导入');
+  const itinerary = await library.ensureReimbursementItinerary(folderId);
+  const nested = (await library.createFolder('往期', itinerary.folderId)).folders.at(-1).id;
+  const source = await f.source('trip.pdf', f.pdf('trip restored'));
+  const { assetIds: [id] } = await library.importPaths([source], { folderId: nested, restoreTrashed: true });
+  await library.updateAssets([id], { name: '保留行程名称', notes: '保留备注' });
+  await library.setTrash([id], true);
+  const restored = await library.importPaths([source], { folderId: itinerary.folderId, restoreTrashed: true });
+  assert.equal(restored.restored, 1); assert.deepEqual(restored.restoredAssetIds, [id]); assert.deepEqual(restored.assetIds, []);
+  assert.equal(assetOf(library.snapshot(), id).name, '保留行程名称'); assert.equal(assetOf(library.snapshot(), id).notes, '保留备注');
+  assert.deepEqual(await fs.readFile(library.getAssetPath(id)), f.pdf('trip restored'));
+  assert.equal(ReimbursementFolders.itineraryRootForFolder(library.snapshot().folders, nested).id, folderId);
+  const word = await f.source('notes.docx', f.form('wrong itinerary format'));
+  const rejected = await library.importPaths([word], { folderId: nested, restoreTrashed: true });
+  assert.equal(rejected.imported, 0); assert.equal(rejected.errors.length, 1); assert.match(rejected.errors[0].message, /行程单只接受图片或 PDF/);
+  const outside = (await library.createFolder('普通位置')).folders.at(-1).id;
+  const document = await library.importPaths([word], { folderId: outside });
+  const before = library.snapshot();
+  await assert.rejects(library.moveAssetsToFolder(document.assetIds, nested), /行程单只接受图片或 PDF/);
+  await assert.rejects(library.updateAssets(document.assetIds, { folderId: itinerary.folderId }), /行程单只接受图片或 PDF/);
+  await assert.rejects(library.moveFolder(outside, itinerary.folderId), /行程单只接受图片或 PDF/);
+  assert.deepEqual(library.snapshot(), before);
+});
+
+test('itinerary authority and format restrictions stop at a nested reimbursement workspace', async t => {
+  const f = await fixture(t), { library } = f, { folderId } = await library.createReimbursementFolder('外层');
+  const itinerary = await library.ensureReimbursementItinerary(folderId);
+  const inner = await library.createReimbursementFolder('独立子报销', itinerary.folderId);
+  const innerRoot = rootOf(library.snapshot(), inner.folderId), ordinary = (await library.createFolder('未分类材料', inner.folderId)).folders.at(-1).id;
+  assert.equal(ReimbursementFolders.itineraryRootForFolder(library.snapshot().folders, inner.folderId), null);
+  assert.equal(ReimbursementFolders.itineraryRootForFolder(library.snapshot().folders, ordinary), null);
+  assert.equal(ReimbursementFolders.itineraryRootForFolder(library.snapshot().folders, innerRoot.reimbursement.categoryIds.travel), null);
+  const source = await f.source('inner.docx', f.form('inner document'));
+  assert.equal((await library.importPaths([source], { folderId: innerRoot.reimbursement.categoryIds.travel, restoreTrashed: true })).imported, 1);
+  await assert.rejects(library.importPaths([source], { folderId: inner.folderId, restoreTrashed: true }), /有效的报销分类/);
+  await assert.rejects(library.importPaths([source], { folderId: ordinary, restoreTrashed: true }), /有效的报销分类/);
+  assert.equal(ReimbursementFolders.listCategories(library.snapshot().folders, folderId).length, 5);
+});
+
+test('itinerary signature writes roll back on failure and clearing an absent PDF still clears its signature', async t => {
+  const { library } = await fixture(t), { folderId } = await library.createReimbursementFolder('空行程签名');
+  await library.setReimbursementItinerarySignature(folderId, hash(Buffer.from('previous itinerary')));
+  const before = library.snapshot(), index = await fs.readFile(library.indexPath), persist = library._persist.bind(library);
+  library._persist = async () => { throw new Error('signature save denied'); };
+  await assert.rejects(library.setReimbursementItinerarySignature(folderId, null), /signature save denied/);
+  await assert.rejects(library.clearReimbursementDocument(folderId, 'itineraryPdf'), /signature save denied/);
+  assert.deepEqual(library.snapshot(), before); assert.deepEqual(await fs.readFile(library.indexPath), index);
+  library._persist = persist;
+  const cleared = await library.clearReimbursementDocument(folderId, 'itineraryPdf');
+  assert.equal(rootOf(cleared, folderId).reimbursement.itineraryPdfSignature, null);
+  assert.equal(rootOf(cleared, folderId).reimbursement.itineraryPdfAssetId, null);
 });

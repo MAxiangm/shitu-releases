@@ -20,7 +20,8 @@ const sharp = require('sharp');
 const { createImagePlugins } = require('./image-plugins.cjs');
 const { createInvoiceService } = require('./invoice-service.cjs');
 const { createReimbursementService } = require('./reimbursement-service.cjs');
-const { categoryForFolder: reimbursementCategoryForFolder } = require('./reimbursement-folders.cjs');
+const { createReimbursementPreview } = require('./reimbursement-preview.cjs');
+const { categoryForFolder: reimbursementCategoryForFolder, itineraryRootForFolder } = require('./reimbursement-folders.cjs');
 const { createInvoicePdfReader } = require('./invoice-pdf-reader.cjs');
 const { createImageEditorService } = require('./image-editor-service.cjs');
 const { createAppUpdater } = require('./app-updater.cjs');
@@ -80,6 +81,7 @@ let movingAssets=0;
 let imagePlugins;
 let invoices;
 let reimbursements;
+let reimbursementPreview;
 let imageEditor;
 let videoEngine;
 let audioEngine;
@@ -243,6 +245,7 @@ async function switchLibrary(mode) {
   switchingLibrary=true;
   reimbursements?.synchronizeLibrary();
   try {
+  await reimbursementPreview?.cancel();
   let selected;
   if(mode==='legacy') {
     selected=libraryManager.status().legacyRoot;
@@ -350,7 +353,8 @@ function windowState(window = mainWindow) {
   return {
     customControls: customWindowControls,
     maximized: window.isMaximized(),
-    fullScreen: window.isFullScreen()
+    fullScreen: window.isFullScreen(),
+    alwaysOnTop: window.isAlwaysOnTop()
   };
 }
 
@@ -358,6 +362,9 @@ function windowCommand(action) {
   if (!customWindowControls) throw new Error('当前平台使用系统窗口按钮');
   const window = mainWindow;
   switch (action) {
+    case 'toggle-always-on-top':
+      window.setAlwaysOnTop(!window.isAlwaysOnTop());
+      break;
     case 'minimize':
       if (window.isMinimizable()) window.minimize();
       break;
@@ -405,7 +412,7 @@ async function installDownloadedUpdate({ filePath }) {
       child.once('error', reject);
       child.once('spawn', () => { child.unref(); resolve(); });
     });
-    await Promise.allSettled([imagePlugins?.shutdown(), collector?.close(), videoSiteAuth?.shutdown(), videoEngine?.shutdown(), audioEngine?.shutdown(), modelService?.shutdown(), fontExporter?.shutdown(), fontService?.shutdown(), aeProjects?.shutdown(), aePreviewService?.shutdown()]);
+    await Promise.allSettled([reimbursementPreview?.shutdown(), imagePlugins?.shutdown(), collector?.close(), videoSiteAuth?.shutdown(), videoEngine?.shutdown(), audioEngine?.shutdown(), modelService?.shutdown(), fontExporter?.shutdown(), fontService?.shutdown(), aeProjects?.shutdown(), aePreviewService?.shutdown()]);
     setTimeout(() => { mayClose = true; app.quit(); }, 150);
   } catch (error) {
     installingUpdate = false;
@@ -527,7 +534,7 @@ async function importPaths(paths, folderId = null) {
       await importPaths([filename], folder);
       sendActionEvent('library-changed');
     } }, reportProgress => owner.importPaths(paths, { folderId: folderId || null,
-      restoreTrashed: Boolean(reimbursementCategoryForFolder(owner.snapshot().folders, folderId)), onProgress: progress => {
+      restoreTrashed: Boolean(reimbursementCategoryForFolder(owner.snapshot().folders, folderId) || itineraryRootForFolder(owner.snapshot().folders, folderId)), onProgress: progress => {
       reportProgress(progress);
       sendActionEvent('import-progress', progress);
     } }));
@@ -692,6 +699,10 @@ function bindHandlers() {
   checkedHandler('reimbursement-choose-import', request => reimbursements.chooseImport(request));
   checkedHandler('reimbursement-open', request => reimbursements.openArtifact(request));
   checkedHandler('reimbursement-export', request => reimbursements.exportArtifact(request));
+  checkedHandler('reimbursement-export-all', request => reimbursements.exportAll(request));
+  checkedHandler('reimbursement-preview', request => reimbursementPreview.preview(request));
+  checkedHandler('reimbursement-preview-cancel', () => reimbursementPreview.cancel());
+  checkedHandler('reimbursement-open-source', request => reimbursementPreview.openSource(request));
   checkedHandler('image-editor-read', (id, root) => {
     if (closing || switchingLibrary) throw new Error('请等待当前素材操作完成后再编辑');
     return imageEditor.read(id, root);
@@ -858,7 +869,7 @@ async function createWindow() {
     ...(customWindowControls ? { frame: false, thickFrame: true, roundedCorners: false } : {}),
     title: productName, backgroundColor: '#0a0a0a',
     icon: path.join(__dirname, '..', 'assets', 'icon.ico'),
-    autoHideMenuBar: true, show: false,
+    autoHideMenuBar: true, show: false, alwaysOnTop: false,
     webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true, spellcheck: false }
   });
   if (customWindowControls) {
@@ -886,7 +897,7 @@ async function createWindow() {
   };
   for (const event of ['minimize', 'hide']) mainWindow.on(event, () => sendVisibility(false));
   for (const event of ['restore', 'show', 'focus']) mainWindow.on(event, () => sendVisibility(true));
-  for (const event of ['maximize', 'unmaximize', 'restore', 'enter-full-screen', 'leave-full-screen']) {
+  for (const event of ['maximize', 'unmaximize', 'restore', 'enter-full-screen', 'leave-full-screen', 'always-on-top-changed']) {
     mainWindow.on(event, () => sendActionEvent('window-state', windowState()));
   }
   for (const event of ['restore', 'focus']) mainWindow.on(event, () => updateScheduler?.trigger(event));
@@ -911,6 +922,7 @@ async function createWindow() {
       await library?.flush();
       await Promise.allSettled([videoSiteAuth?.shutdown(), sketchfabAccount?.shutdown(), transcodeDevices?.shutdown?.(), videoTranscoder?.shutdown(), audioEngine?.shutdown(), modelService?.shutdown(), fontExporter?.shutdown(), fontService?.shutdown(), aeProjects?.shutdown(), aePreviewService?.shutdown()]);
       await reimbursements?.shutdown();
+      await reimbursementPreview?.shutdown();
       await invoices?.shutdown();
       mayClose = true; mainWindow.close();
     }).catch(error => {
@@ -1026,11 +1038,18 @@ else {
       getLibrary: () => closing || switchingLibrary ? null : library,
       chooseFiles: options => dialog.showOpenDialog(mainWindow, options),
       chooseSavePath: options => dialog.showSaveDialog(mainWindow, options),
+      chooseDirectory: options => dialog.showOpenDialog(mainWindow, options),
       openFile: filename => shell.openPath(filename),
       onChanged: owner => { if (owner === library) sendActionEvent('library-changed'); },
       onEvent: event => sendActionEvent('reimbursement-event', event)
     });
     reimbursements.synchronizeLibrary();
+    reimbursementPreview = createReimbursementPreview({
+      rootDir: path.join(app.getPath('userData'), 'reimbursement-preview'),
+      getLibrary: () => closing || switchingLibrary ? null : library,
+      pdfReader: createInvoicePdfReader({ BrowserWindow, ipcMain }),
+      openFile: filename => shell.openPath(filename)
+    });
     videoSiteAuth = createVideoSiteAuth({ directory: path.join(app.getPath('userData'), 'video-site-auth'),
       onState: value => sendActionEvent('video-auth', value) });
     sketchfabAccount = createSketchfabAccount({ filePath: path.join(app.getPath('userData'), 'sketchfab-account.bin'), safeStorage });
@@ -1129,6 +1148,6 @@ else {
     audioPreviewService?.invalidate();
     videoTranscodeService?.shutdown().catch(()=>{}); videoTranscoder?.shutdown().catch(()=>{});
     Promise.resolve(transcodeDevices?.shutdown?.()).catch(()=>{});
-    reimbursements?.shutdown().catch(()=>{}); invoices?.shutdown().catch(()=>{}); imagePlugins?.shutdown().catch(()=>{}); collector?.close().catch(()=>{}); videoSiteAuth?.shutdown().catch(()=>{}); sketchfabAccount?.shutdown().catch(()=>{}); videoEngine?.shutdown().catch(()=>{}); Promise.resolve(audioEngine?.shutdown()).catch(()=>{}); modelService?.shutdown().catch(()=>{}); fontExporter?.shutdown().catch(()=>{}); fontService?.shutdown().catch(()=>{}); aeProjects?.shutdown().catch(()=>{}); aePreviewService?.shutdown().catch(()=>{});
+    reimbursementPreview?.shutdown().catch(()=>{}); reimbursements?.shutdown().catch(()=>{}); invoices?.shutdown().catch(()=>{}); imagePlugins?.shutdown().catch(()=>{}); collector?.close().catch(()=>{}); videoSiteAuth?.shutdown().catch(()=>{}); sketchfabAccount?.shutdown().catch(()=>{}); videoEngine?.shutdown().catch(()=>{}); Promise.resolve(audioEngine?.shutdown()).catch(()=>{}); modelService?.shutdown().catch(()=>{}); fontExporter?.shutdown().catch(()=>{}); fontService?.shutdown().catch(()=>{}); aeProjects?.shutdown().catch(()=>{}); aePreviewService?.shutdown().catch(()=>{});
   });
 }

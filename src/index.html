@@ -24,6 +24,7 @@
   <link rel="stylesheet" href="./task-center.css">
   <link rel="stylesheet" href="./image-editor.css">
   <link rel="stylesheet" href="./reimbursement-center.css">
+  <link rel="stylesheet" href="./reimbursement-preview.css">
 </head>
 <body>
   <canvas id="ambientParticles" aria-hidden="true"></canvas>
@@ -96,6 +97,7 @@
     <div class="window-controls-slot" aria-hidden="true"></div>
   </header>
   <div id="windowControls" class="window-controls" role="group" aria-label="窗口控制" hidden>
+    <button id="windowPin" type="button" aria-label="窗口置顶" aria-pressed="false" title="窗口置顶（当前未置顶）"><svg class="window-control-icon window-pin-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3h8M9 3v6l-3 3v2h12v-2l-3-3V3M12 14v7"/></svg></button>
     <button id="windowMinimize" type="button" aria-label="最小化窗口" title="最小化窗口"><svg class="window-control-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8h10"/></svg></button>
     <button id="windowMaximize" type="button" aria-label="最大化窗口" title="最大化窗口"><svg class="window-control-icon window-maximize-icon" viewBox="0 0 16 16" aria-hidden="true"><rect x="3.5" y="3.5" width="9" height="9"/></svg><svg class="window-control-icon window-restore-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M6 3.5h6.5V10"/><rect x="3.5" y="6" width="6.5" height="6.5"/></svg></button>
     <button id="windowClose" type="button" aria-label="关闭窗口" title="关闭窗口"><svg class="window-control-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="m4 4 8 8M12 4l-8 8"/></svg></button>
@@ -313,6 +315,7 @@
   <script src="./invoice-amounts.js"></script>
   <script src="./invoice-center.js"></script>
   <script src="./reimbursement-center.js"></script>
+  <script src="./reimbursement-preview.js"></script>
   <script src="./renderer.js"></script>
 </body>
 </html>
